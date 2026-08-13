@@ -1,0 +1,1191 @@
+"""
+Core HTTP Bridge — FastAPI 服务，将 CORE gRPC 接口暴露为 HTTP REST API。
+
+- 一元 RPC → RESTful 端点 (POST / GET / PATCH / DELETE)
+- 服务端流 → SSE (Server-Sent Events)
+- 客户端流 → WebSocket
+
+错误响应统一格式:
+  {"error": "<human readable>", "detail": "<技术细节>", "hint": "<可操作建议>"}
+
+运行: uvicorn app:app --host 0.0.0.0 --port 8080
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
+
+from core.api.grpc import wrappers
+from core.api.grpc import client as grpc_client
+
+from bridge import CoreGrpcBridge
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("core-http-bridge")
+
+# ---------------------------------------------------------------------------
+# 统一错误处理
+# ---------------------------------------------------------------------------
+
+_GRPC_TO_HTTP = {
+    "NOT_FOUND": 404,
+    "INVALID_ARGUMENT": 400,
+    "ALREADY_EXISTS": 409,
+    "PERMISSION_DENIED": 403,
+    "UNAUTHENTICATED": 401,
+    "UNIMPLEMENTED": 501,
+    "UNAVAILABLE": 503,
+    "CANCELLED": 499,
+    "DEADLINE_EXCEEDED": 504,
+    "OUT_OF_RANGE": 400,
+    "FAILED_PRECONDITION": 400,
+    "ABORTED": 409,
+    "RESOURCE_EXHAUSTED": 429,
+    "INTERNAL": 500,
+    "DATA_LOSS": 500,
+    "UNKNOWN": 500,
+}
+
+
+def _parse_grpc_error(exc: Exception) -> dict | None:
+    """从 gRPC _InactiveRpcError 提取 status/detail/http_code。"""
+    if type(exc).__name__ != "_InactiveRpcError":
+        return None
+    msg = str(exc)
+    code_map = {
+        0: "OK", 1: "CANCELLED", 2: "UNKNOWN", 3: "INVALID_ARGUMENT",
+        4: "DEADLINE_EXCEEDED", 5: "NOT_FOUND", 6: "ALREADY_EXISTS",
+        7: "PERMISSION_DENIED", 8: "RESOURCE_EXHAUSTED",
+        9: "FAILED_PRECONDITION", 10: "ABORTED", 11: "OUT_OF_RANGE",
+        12: "UNIMPLEMENTED", 13: "INTERNAL", 14: "UNAVAILABLE",
+        15: "DATA_LOSS", 16: "UNAUTHENTICATED",
+    }
+    status_code = "UNKNOWN"
+    m = re.search(r"grpc_status:(\d+)", msg)
+    if m:
+        status_code = code_map.get(int(m.group(1)), "UNKNOWN")
+    detail = msg
+    m = re.search(r'grpc_message:"([^"]+)"', msg)
+    if m:
+        detail = m.group(1)
+    http_code = _GRPC_TO_HTTP.get(status_code, 500)
+    return {"http": http_code, "status": status_code, "detail": detail}
+
+
+_HINTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"session.*not found", re.I), "session_id 不存在，请先 POST /api/sessions 创建"),
+    (re.compile(r"node.*not found", re.I), "node_id 不存在或不属于该会话"),
+    (re.compile(r"interface.*not", re.I), "iface_id 不存在于该节点"),
+    (re.compile(r"does not have mobility"), "该节点没有配置移动模型（仅 WLAN/EMANE 节点支持）"),
+    (re.compile(r"not using BasicRangeModel"), "WLAN 节点需要先启动会话才能使用 BasicRangeModel"),
+    (re.compile(r"has no attribute|NoneType.*to_proto", re.I), "请求参数格式有误 — 缺少必填字段或字段类型错误"),
+    (re.compile(r"does not have.*interface", re.I), "iface_id 不存在于该节点"),
+    (re.compile(r"unknown", re.I), "请检查请求的资源是否存在"),
+    (re.compile(r"ptp links support at most"), "该节点已有足够接口，不要重复添加"),
+    (re.compile(r"NoneType.*to_proto", re.I), "请求体格式有误 — 缺少必填字段或字段类型不匹配（例如缺少 iface1/iface2 或 type 字段）"),
+]
+
+
+def _hint_from_detail(detail: str) -> str:
+    for pattern, hint in _HINTS:
+        if pattern.search(detail):
+            return hint
+    return ""
+
+
+def _error_response(status_code: int, error: str, detail: str = "", hint: str = "") -> JSONResponse:
+    body: dict[str, str] = {"error": error}
+    if detail:
+        body["detail"] = detail
+    if hint:
+        body["hint"] = hint
+    return JSONResponse(status_code=status_code, content=body)
+
+
+# ---------------------------------------------------------------------------
+# Bridge lifecycle
+# ---------------------------------------------------------------------------
+
+bridge: CoreGrpcBridge | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global bridge
+    bridge = CoreGrpcBridge()
+    bridge.connect()
+    logger.info("bridge connected to core-daemon")
+    yield
+    bridge.close()
+    logger.info("bridge closed")
+
+
+app = FastAPI(
+    title="CORE HTTP Bridge",
+    description="HTTP REST API 包装 CORE 网络仿真器的 gRPC 接口",
+    version="1.1.0",
+    lifespan=lifespan,
+)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    grpc_err = _parse_grpc_error(exc)
+    if grpc_err:
+        detail = grpc_err["detail"]
+        hint = _hint_from_detail(detail)
+        logger.warning("gRPC %s %s %s -> %s: %s", request.method, request.url.path, grpc_err["status"], detail)
+        return _error_response(
+            status_code=grpc_err["http"],
+            error=detail,
+            detail="gRPC status: " + grpc_err["status"],
+            hint=hint,
+        )
+    logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+    return _error_response(
+        status_code=500,
+        error="internal server error",
+        detail=str(exc)[:200],
+        hint="check server logs for details",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pydantic 模型
+# ---------------------------------------------------------------------------
+
+class PositionModel(BaseModel):
+    x: float = 0
+    y: float = 0
+
+class GeoModel(BaseModel):
+    lat: float = 0
+    lon: float = 0
+    alt: float = 0
+
+class InterfaceModel(BaseModel):
+    id: int | None = None
+    name: str | None = None
+    mac: str | None = None
+    ip4: str | None = None
+    ip4_mask: int | None = None
+    ip6: str | None = None
+    ip6_mask: int | None = None
+    mtu: int | None = None
+    node_id: int | None = None
+
+class LinkOptionsModel(BaseModel):
+    jitter: int | None = None
+    key: int | None = None
+    mburst: int | None = None
+    mer: int | None = None
+    loss: float | None = None
+    bandwidth: int | None = None
+    burst: int | None = None
+    delay: int | None = None
+    dup: int | None = None
+    unidirectional: bool | None = None
+    buffer: int | None = None
+
+class LinkModel(BaseModel):
+    node1_id: int
+    node2_id: int
+    iface1: InterfaceModel | None = None
+    iface2: InterfaceModel | None = None
+    options: LinkOptionsModel | None = None
+
+class NodeModel(BaseModel):
+    id: int | None = None
+    name: str | None = None
+    type: int | None = 0
+    model: str | None = None
+    position: PositionModel | None = None
+    services: list[str] | None = None
+    emane: str | None = None
+    icon: str | None = None
+    image: str | None = None
+    server: str | None = None
+    geo: GeoModel | None = None
+
+class StartSessionRequest(BaseModel):
+    definition: bool = False
+
+class LinkedRequest(BaseModel):
+    node1_id: int
+    node2_id: int
+    iface1_id: int
+    iface2_id: int
+    linked: bool
+
+class NodeCommandRequest(BaseModel):
+    command: str
+    wait: bool = True
+    shell: bool = False
+
+class MobilityActionRequest(BaseModel):
+    node_id: int
+    action: str  # START | PAUSE | STOP
+
+class ServiceActionRequest(BaseModel):
+    node_id: int
+    service: str
+    action: str  # START | STOP | RESTART | VALIDATE
+
+class CreateServiceRequest(BaseModel):
+    name: str
+    group: str = "Custom"
+    executables: list[str] = []
+    dependencies: list[str] = []
+    directories: list[str] = []
+    files: list[str] = []
+    startup: list[str] = []
+    validate: list[str] = []
+    shutdown: list[str] = []
+    templates: dict[str, str] = {}
+    recreate: bool = False
+
+class AlertBody(BaseModel):
+    level: str  # DEFAULT|FATAL|ERROR|WARNING|NOTICE
+    source: str
+    text: str
+    node_id: int | None = None
+
+class OpenXmlBody(BaseModel):
+    data: str
+    start: bool = False
+
+class ExecuteScriptBody(BaseModel):
+    script: str
+    args: str = ""
+
+class SetWlanConfigBody(BaseModel):
+    wlan_id: int
+    config: dict[str, str]
+
+class SetMobilityConfigBody(BaseModel):
+    node_id: int
+    config: dict[str, str]
+
+class SetEmaneModelConfigBody(BaseModel):
+    node_id: int
+    model: str
+    config: dict[str, str]
+    iface_id: int | None = None
+
+class WlanLinkBody(BaseModel):
+    wlan_id: int
+    node1_id: int
+    node2_id: int
+    linked: bool
+
+class EmaneLinkBody(BaseModel):
+    nem1: int
+    nem2: int
+    linked: bool
+
+class WirelessLinkedBody(BaseModel):
+    wireless_id: int
+    node1_id: int
+    node2_id: int
+    linked: bool
+
+class EmanePathlossesBody(BaseModel):
+    node1_id: int
+    iface1_id: int = 0
+    node2_id: int
+    iface2_id: int = 0
+    rx1: float = 0.0
+    rx2: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# 拓扑导入 模型
+# ---------------------------------------------------------------------------
+
+class TopologyNode(BaseModel):
+    """拓扑中的节点定义。"""
+    id: int
+    name: str
+    model: str = "PC"
+    type: str = "default"  # default | switch | wlan | wireless | hub | docker | emane
+    x: float = 200
+    y: float = 200
+    services: list[str] | None = None
+    icon: str | None = None
+
+class TopologyLink(BaseModel):
+    """拓扑中的链路定义。"""
+    node1_id: int
+    node2_id: int
+    bandwidth: int | None = None
+    delay: int | None = None
+    loss: float | None = None
+    jitter: int | None = None
+    dup: int | None = None
+
+class TopologyWlan(BaseModel):
+    """WLAN 节点定义（含配置）。"""
+    id: int
+    name: str
+    x: float = 200
+    y: float = 200
+    range: str = "275"
+    bandwidth: str = "54000000"
+    delay: str = "5000"
+    jitter: str = "0"
+    error: str = "0"
+
+class TopologyInput(BaseModel):
+    """完整拓扑描述（JSON/XML 均可）。"""
+    name: str = "topology"
+    options: dict[str, str] | None = None
+    nodes: list[TopologyNode] = []
+    links: list[TopologyLink] = []
+    wlans: list[TopologyWlan] = []
+
+
+# ---------------------------------------------------------------------------
+# 序列化辅助
+# ---------------------------------------------------------------------------
+
+def _enum_val(e: Any) -> int:
+    return e.value if hasattr(e, "value") else e
+
+def _session_to_dict(s: wrappers.Session) -> dict:
+    return {
+        "id": s.id,
+        "state": _enum_val(s.state),
+        "nodes": [_node_to_dict(n) for n in (s.nodes or [])],
+        "links": [_link_to_dict(l) for l in (s.links or [])],
+        "dir": s.dir,
+        "user": s.user,
+        "file": str(s.file) if s.file else None,
+    }
+
+def _session_summary_to_dict(s: wrappers.SessionSummary) -> dict:
+    return {"id": s.id, "state": _enum_val(s.state), "nodes": s.nodes, "file": s.file, "dir": s.dir}
+
+def _node_to_dict(n: wrappers.Node) -> dict:
+    return {
+        "id": n.id,
+        "name": n.name,
+        "type": _enum_val(n.type),
+        "model": n.model,
+        "position": {"x": n.position.x, "y": n.position.y} if n.position else None,
+        "geo": {"lat": n.geo.lat, "lon": n.geo.lon, "alt": n.geo.alt} if n.geo else None,
+        "services": list(n.services) if n.services else [],
+        "emane": n.emane,
+        "icon": n.icon,
+        "image": n.image,
+        "server": n.server,
+        "dir": n.dir,
+        "channel": n.channel,
+        "canvas": n.canvas,
+    }
+
+def _link_to_dict(l: wrappers.Link) -> dict:
+    return {
+        "node1_id": l.node1_id,
+        "node2_id": l.node2_id,
+        "type": _enum_val(l.type),
+        "iface1": _iface_to_dict(l.iface1) if l.iface1 else None,
+        "iface2": _iface_to_dict(l.iface2) if l.iface2 else None,
+        "options": _link_options_to_dict(l.options) if l.options else None,
+    }
+
+def _iface_to_dict(i: wrappers.Interface) -> dict:
+    return {
+        "id": i.id, "name": i.name, "mac": i.mac, "ip4": i.ip4, "ip4_mask": i.ip4_mask,
+        "ip6": i.ip6, "ip6_mask": i.ip6_mask, "mtu": i.mtu, "node_id": i.node_id,
+    }
+
+def _link_options_to_dict(o: wrappers.LinkOptions) -> dict:
+    return {
+        "jitter": o.jitter, "key": o.key, "mburst": o.mburst, "mer": o.mer,
+        "loss": o.loss, "bandwidth": o.bandwidth, "burst": o.burst, "delay": o.delay,
+        "dup": o.dup, "unidirectional": o.unidirectional, "buffer": o.buffer,
+    }
+
+def _config_option_to_dict(co: wrappers.ConfigOption) -> dict:
+    return {
+        "label": co.label, "name": co.name, "value": co.value, "type": co.type,
+        "select": list(co.select) if co.select else [], "group": co.group,
+    }
+
+def _config_option_dict_to_dict(d: dict[str, wrappers.ConfigOption]) -> dict[str, dict]:
+    return {k: _config_option_to_dict(v) for k, v in d.items()}
+
+def _wrappers_node(m: NodeModel) -> wrappers.Node:
+    pos = wrappers.Position(x=m.position.x, y=m.position.y) if m.position else None
+    geo = wrappers.Geo(lat=m.geo.lat, lon=m.geo.lon, alt=m.geo.alt) if m.geo else None
+    return wrappers.Node(
+        id=m.id, name=m.name,
+        type=wrappers.NodeType(m.type) if m.type is not None else wrappers.NodeType.DEFAULT,
+        model=m.model, position=pos, geo=geo,
+        services=set(m.services) if m.services else None,
+        emane=m.emane, icon=m.icon, image=m.image, server=m.server,
+    )
+
+def _wrappers_iface(m: InterfaceModel | None) -> wrappers.Interface | None:
+    if m is None:
+        return None
+    return wrappers.Interface(
+        id=m.id, name=m.name, mac=m.mac, ip4=m.ip4, ip4_mask=m.ip4_mask,
+        ip6=m.ip6, ip6_mask=m.ip6_mask, mtu=m.mtu, node_id=m.node_id,
+    )
+
+def _wrappers_link_opts(m: LinkOptionsModel | None) -> wrappers.LinkOptions | None:
+    if m is None:
+        return None
+    return wrappers.LinkOptions(
+        jitter=m.jitter, key=m.key, mburst=m.mburst, mer=m.mer, loss=m.loss,
+        bandwidth=m.bandwidth, burst=m.burst, delay=m.delay, dup=m.dup,
+        unidirectional=m.unidirectional, buffer=m.buffer,
+    )
+
+# ---------------------------------------------------------------------------
+# 健康检查
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    if bridge is None:
+        return _error_response(503, "bridge not initialized", hint="check server startup logs")
+    try:
+        sessions = bridge.get_sessions()
+        return {"status": "ok", "sessions": len(sessions)}
+    except Exception as e:
+        return _error_response(503, "bridge unavailable", detail=str(e)[:100],
+                               hint="ensure core-daemon is running on localhost:50051")
+
+
+# ===================================================================
+# Session RPCs
+# ===================================================================
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """获取所有会话摘要列表"""
+    sessions = bridge.get_sessions()
+    return [_session_summary_to_dict(s) for s in sessions]
+
+@app.post("/api/sessions", status_code=201)
+async def create_session(body: dict | None = None):
+    """创建新会话"""
+    session_id = body.get("session_id") if body else None
+    s = bridge.create_session(session_id)
+    return _session_to_dict(s)
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: int):
+    """获取指定会话详情"""
+    s = bridge.get_session(session_id)
+    return _session_to_dict(s)
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: int):
+    """删除会话"""
+    result = bridge.delete_session(session_id)
+    return {"result": result}
+
+@app.get("/api/sessions/{session_id}/check")
+async def check_session(session_id: int):
+    """检查会话是否存在"""
+    return {"result": bridge.check_session(session_id)}
+
+@app.post("/api/sessions/{session_id}/start")
+async def start_session(session_id: int, body: StartSessionRequest):
+    """启动会话 (definition=True 仅定义, False 实例化并启动服务)"""
+    s = bridge.get_session(session_id)
+    result, exceptions = bridge.start_session(s, definition=body.definition)
+    return {"result": result, "exceptions": exceptions}
+
+@app.post("/api/sessions/{session_id}/stop")
+async def stop_session(session_id: int):
+    """停止运行中的会话"""
+    return {"result": bridge.stop_session(session_id)}
+
+@app.post("/api/sessions/{session_id}/alert")
+async def session_alert(session_id: int, body: AlertBody):
+    """发送告警到会话"""
+    level_map = {
+        "DEFAULT": wrappers.AlertLevel.DEFAULT,
+        "FATAL": wrappers.AlertLevel.FATAL,
+        "ERROR": wrappers.AlertLevel.ERROR,
+        "WARNING": wrappers.AlertLevel.WARNING,
+        "NOTICE": wrappers.AlertLevel.NOTICE,
+    }
+    level = level_map.get(body.level.upper())
+    if level is None:
+        return _error_response(400, "invalid alert level",
+                               detail=f"supported: {', '.join(level_map)}")
+    return {"result": bridge.alert(session_id, level, body.source, body.text, body.node_id)}
+
+
+# ===================================================================
+# Node RPCs
+# ===================================================================
+
+@app.post("/api/sessions/{session_id}/nodes", status_code=201)
+async def add_node(session_id: int, body: NodeModel):
+    """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)"""
+    node = _wrappers_node(body)
+    node_id = bridge.add_node(session_id, node)
+    return {"node_id": node_id}
+
+@app.get("/api/sessions/{session_id}/nodes/{node_id}")
+async def get_node(session_id: int, node_id: int):
+    """获取节点详情（含接口和链路）"""
+    node, ifaces, links = bridge.get_node(session_id, node_id)
+    return {
+        "node": _node_to_dict(node),
+        "interfaces": [_iface_to_dict(i) for i in ifaces],
+        "links": [_link_to_dict(l) for l in links],
+    }
+
+@app.patch("/api/sessions/{session_id}/nodes/{node_id}")
+async def edit_node(session_id: int, node_id: int, icon: str | None = None):
+    """编辑节点图标"""
+    return {"result": bridge.edit_node(session_id, node_id, icon=icon)}
+
+@app.delete("/api/sessions/{session_id}/nodes/{node_id}")
+async def delete_node(session_id: int, node_id: int):
+    """删除节点"""
+    return {"result": bridge.delete_node(session_id, node_id)}
+
+@app.post("/api/sessions/{session_id}/nodes/{node_id}/move")
+async def move_node(session_id: int, node_id: int,
+                    position: PositionModel | None = None, geo: GeoModel | None = None):
+    """移动节点（坐标或经纬度）"""
+    if not position and not geo:
+        return _error_response(400, "must provide position or geo")
+    pos = wrappers.Position(x=position.x, y=position.y) if position else None
+    g = wrappers.Geo(lat=geo.lat, lon=geo.lon, alt=geo.alt) if geo else None
+    return {"result": bridge.move_node(session_id, node_id, position=pos, geo=g)}
+
+@app.post("/api/sessions/{session_id}/nodes/{node_id}/command")
+async def node_command(session_id: int, node_id: int, body: NodeCommandRequest):
+    """在节点上执行命令（需要会话已启动）"""
+    rc, output = bridge.node_command(session_id, node_id, body.command, body.wait, body.shell)
+    return {"return_code": rc, "output": output}
+
+@app.get("/api/sessions/{session_id}/nodes/{node_id}/terminal")
+async def get_node_terminal(session_id: int, node_id: int):
+    """获取节点的终端命令字符串"""
+    return {"terminal": bridge.get_node_terminal(session_id, node_id)}
+
+
+# ===================================================================
+# Link RPCs
+# ===================================================================
+
+@app.post("/api/sessions/{session_id}/links", status_code=201)
+async def add_link(session_id: int, body: LinkModel):
+    """添加链路"""
+    link = wrappers.Link(
+        node1_id=body.node1_id, node2_id=body.node2_id,
+        iface1=_wrappers_iface(body.iface1), iface2=_wrappers_iface(body.iface2),
+        options=_wrappers_link_opts(body.options),
+    )
+    result, iface1, iface2 = bridge.add_link(session_id, link)
+    return {
+        "result": result,
+        "iface1": _iface_to_dict(iface1) if iface1 else None,
+        "iface2": _iface_to_dict(iface2) if iface2 else None,
+    }
+
+@app.patch("/api/sessions/{session_id}/links")
+async def edit_link(session_id: int, body: LinkModel):
+    """编辑链路参数（bandwidth/delay/loss/jitter等）"""
+    link = wrappers.Link(
+        node1_id=body.node1_id, node2_id=body.node2_id,
+        iface1=_wrappers_iface(body.iface1), iface2=_wrappers_iface(body.iface2),
+        options=_wrappers_link_opts(body.options),
+    )
+    return {"result": bridge.edit_link(session_id, link)}
+
+@app.delete("/api/sessions/{session_id}/links")
+async def delete_link(session_id: int, body: LinkModel):
+    """删除链路"""
+    link = wrappers.Link(
+        node1_id=body.node1_id, node2_id=body.node2_id,
+        iface1=_wrappers_iface(body.iface1), iface2=_wrappers_iface(body.iface2),
+    )
+    return {"result": bridge.delete_link(session_id, link)}
+
+@app.post("/api/sessions/{session_id}/links/linked")
+async def linked(session_id: int, body: LinkedRequest):
+    """切换链路通断（Linked=False 断开, True 接通）"""
+    bridge.linked(session_id, body.node1_id, body.node2_id,
+                  body.iface1_id, body.iface2_id, body.linked)
+    return {"result": True}
+
+
+# ===================================================================
+# WLAN RPCs
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/wlan/{node_id}")
+async def get_wlan_config(session_id: int, node_id: int):
+    """获取 WLAN 配置"""
+    return _config_option_dict_to_dict(bridge.get_wlan_config(session_id, node_id))
+
+@app.post("/api/sessions/{session_id}/wlan")
+async def set_wlan_config(session_id: int, body: SetWlanConfigBody):
+    """设置 WLAN 配置（range/bandwidth/delay/jitter/error等）"""
+    return {"result": bridge.set_wlan_config(session_id, body.wlan_id, body.config)}
+
+@app.post("/api/sessions/{session_id}/wlan/link")
+async def wlan_link(session_id: int, body: WlanLinkBody):
+    """WLAN 节点间链路控制"""
+    return {"result": bridge.wlan_link(session_id, body.wlan_id, body.node1_id,
+                                        body.node2_id, body.linked)}
+
+
+# ===================================================================
+# Mobility RPCs
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/mobility/{node_id}")
+async def get_mobility_config(session_id: int, node_id: int):
+    """获取移动模型配置"""
+    return _config_option_dict_to_dict(bridge.get_mobility_config(session_id, node_id))
+
+@app.post("/api/sessions/{session_id}/mobility")
+async def set_mobility_config(session_id: int, body: SetMobilityConfigBody):
+    """设置移动模型配置"""
+    return {"result": bridge.set_mobility_config(session_id, body.node_id, body.config)}
+
+@app.post("/api/sessions/{session_id}/mobility/action")
+async def mobility_action(session_id: int, body: MobilityActionRequest):
+    """移动模型动作控制 (START/PAUSE/STOP)"""
+    action_map = {"START": wrappers.MobilityAction.START,
+                  "PAUSE": wrappers.MobilityAction.PAUSE,
+                  "STOP": wrappers.MobilityAction.STOP}
+    action = action_map.get(body.action.upper())
+    if action is None:
+        return _error_response(400, "invalid mobility action",
+                               detail=f"supported: {', '.join(action_map)}")
+    return {"result": bridge.mobility_action(session_id, body.node_id, action)}
+
+
+# ===================================================================
+# Service RPCs
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/services/defaults")
+async def get_service_defaults(session_id: int, node_id: int, name: str):
+    """获取服务默认配置"""
+    d = bridge.get_service_defaults(session_id, node_id, name)
+    return {
+        "templates": d.templates,
+        "config": _config_option_dict_to_dict(d.config),
+        "modes": [{"name": m.name, "config": m.config} for m in (d.modes or [])],
+    }
+
+@app.get("/api/sessions/{session_id}/services/node")
+async def get_node_service(session_id: int, node_id: int, name: str):
+    """获取节点上某服务的配置值"""
+    return {"config": bridge.get_node_service(session_id, node_id, name)}
+
+@app.get("/api/sessions/{session_id}/services/rendered")
+async def get_service_rendered(session_id: int, node_id: int, name: str):
+    """获取服务渲染后的文件内容"""
+    return {"rendered": bridge.get_service_rendered(session_id, node_id, name)}
+
+@app.post("/api/sessions/{session_id}/services/action")
+async def service_action(session_id: int, body: ServiceActionRequest):
+    """服务动作: START/STOP/RESTART/VALIDATE"""
+    action_map = {"START": wrappers.ServiceAction.START,
+                  "STOP": wrappers.ServiceAction.STOP,
+                  "RESTART": wrappers.ServiceAction.RESTART,
+                  "VALIDATE": wrappers.ServiceAction.VALIDATE}
+    action = action_map.get(body.action.upper())
+    if action is None:
+        return _error_response(400, "invalid service action",
+                               detail=f"supported: {', '.join(action_map)}")
+    return {"result": bridge.service_action(session_id, body.node_id, body.service, action)}
+
+@app.post("/api/services/create")
+async def create_service(body: CreateServiceRequest):
+    """运行时创建自定义服务"""
+    service = wrappers.Service(
+        name=body.name, group=body.group,
+        executables=body.executables, dependencies=body.dependencies,
+        directories=body.directories, files=body.files,
+        startup=body.startup, validate=body.validate, shutdown=body.shutdown,
+    )
+    return {"result": bridge.create_service(service, body.templates, body.recreate)}
+
+
+# ===================================================================
+# Wireless RPCs
+# ===================================================================
+
+@app.post("/api/sessions/{session_id}/wireless/linked")
+async def wireless_linked(session_id: int, body: WirelessLinkedBody):
+    """控制 Wireless 节点间链路通断"""
+    bridge.wireless_linked(session_id, body.wireless_id, body.node1_id, body.node2_id, body.linked)
+    return {"result": True}
+
+@app.get("/api/sessions/{session_id}/wireless/{node_id}")
+async def get_wireless_config(session_id: int, node_id: int):
+    """获取 Wireless 节点配置"""
+    return _config_option_dict_to_dict(bridge.get_wireless_config(session_id, node_id))
+
+
+# ===================================================================
+# EMANE RPCs
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/emane/model")
+async def get_emane_model_config(session_id: int, node_id: int, model: str, iface_id: int = -1):
+    """获取 EMANE 模型配置"""
+    return _config_option_dict_to_dict(
+        bridge.get_emane_model_config(session_id, node_id, model, iface_id))
+
+@app.post("/api/sessions/{session_id}/emane/model")
+async def set_emane_model_config(session_id: int, body: SetEmaneModelConfigBody):
+    """设置 EMANE 模型配置"""
+    emc = wrappers.EmaneModelConfig(node_id=body.node_id, model=body.model,
+                                     config=body.config, iface_id=body.iface_id)
+    return {"result": bridge.set_emane_model_config(session_id, emc)}
+
+@app.get("/api/sessions/{session_id}/emane/channel")
+async def get_emane_event_channel(session_id: int, nem_id: int):
+    """获取 EMANE 事件通道信息"""
+    ch = bridge.get_emane_event_channel(session_id, nem_id)
+    return {"group": ch.group, "port": ch.port, "device": ch.device}
+
+@app.post("/api/sessions/{session_id}/emane/link")
+async def emane_link(session_id: int, body: EmaneLinkBody):
+    """EMANE NEM 链路控制"""
+    return {"result": bridge.emane_link(session_id, body.nem1, body.nem2, body.linked)}
+
+@app.post("/api/sessions/{session_id}/emane/pathlosses")
+async def emane_pathlosses(session_id: int, body: EmanePathlossesBody):
+    """发布 EMANE 路径损耗（单次）"""
+    pl = client.EmanePathlossesStreamer()
+    import threading
+    t = threading.Thread(target=lambda: bridge.emane_pathlosses(pl), daemon=True)
+    t.start()
+    pl.send(wrappers.EmanePathlossesRequest(
+        session_id=session_id, node1_id=body.node1_id, iface1_id=body.iface1_id,
+        node2_id=body.node2_id, iface2_id=body.iface2_id, rx1=body.rx1, rx2=body.rx2))
+    pl.send(None)
+    t.join(timeout=2)
+    return {"result": True}
+
+
+# ===================================================================
+# XML RPCs
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/xml")
+async def save_xml(session_id: int):
+    """导出会话为 EmulationScript XML"""
+    path = Path(f"/tmp/core_session_{session_id}.xml")
+    bridge.save_xml(session_id, str(path))
+    data = path.read_bytes()
+    return JSONResponse(content={"data": data.decode("utf-8"), "session_id": session_id})
+
+@app.post("/api/xml/open")
+async def open_xml(body: OpenXmlBody):
+    """从 XML 字符串导入会话"""
+    path = Path("/tmp/import_core.xml")
+    path.write_text(body.data)
+    result, session_id = bridge.open_xml(path, body.start)
+    return {"result": result, "session_id": session_id}
+
+
+# ===================================================================
+# Utility RPCs
+# ===================================================================
+
+@app.get("/api/interfaces")
+async def get_interfaces():
+    """获取宿主机可用网络接口"""
+    return {"interfaces": bridge.get_interfaces()}
+
+@app.post("/api/execute")
+async def execute_script(body: ExecuteScriptBody):
+    """在 CoreEmu 上下文中执行 Python 脚本"""
+    path = "/tmp/exec_script.py"
+    Path(path).write_text(body.script)
+    session_id = bridge.execute_script(path, body.args)
+    return {"session_id": session_id}
+
+
+# ===================================================================
+# Global RPCs
+# ===================================================================
+
+@app.get("/api/config")
+async def get_config():
+    """获取系统全局配置（可用服务列表 + EMANE 模型列表）"""
+    cfg = bridge.get_config()
+    return {
+        "services": [{
+            "name": s.name, "group": s.group, "executables": s.executables,
+            "directories": s.directories, "files": s.files,
+            "startup": s.startup, "validate": s.validate, "shutdown": s.shutdown,
+        } for s in cfg.services],
+        "emane_models": cfg.emane_models,
+    }
+
+
+# ===================================================================
+# Server-Streaming → SSE
+# ===================================================================
+
+@app.get("/api/sessions/{session_id}/events/stream")
+async def events_stream(session_id: int):
+    """SSE 事件流"""
+    def generate():
+        q: list[str] = []
+        lock = threading.Lock()
+        stop = threading.Event()
+        def handler(event: wrappers.Event):
+            with lock:
+                q.append(json.dumps({"session_id": event.session_id,
+                                      "type": str(type(event.event_type).__name__)}))
+                stop.set()
+        stream = bridge.events(session_id)
+        try:
+            while not stop.is_set():
+                with lock:
+                    while q:
+                        yield f"data: {q.pop(0)}\n\n"
+                stop.wait(0.1)
+        finally:
+            stream.cancel()
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.get("/api/sessions/{session_id}/throughputs/stream")
+async def throughputs_stream(session_id: int):
+    """SSE 吞吐量流（每 3 秒）"""
+    def generate():
+        tps: list[str] = []
+        lock = threading.Lock()
+        def handler(event: wrappers.ThroughputsEvent):
+            with lock:
+                tps.append(json.dumps({"session_id": event.session_id}))
+        stream = bridge.throughputs(session_id)
+        try:
+            while True:
+                with lock:
+                    while tps:
+                        yield f"data: {tps.pop(0)}\n\n"
+                yield ": heartbeat\n\n"
+                import time; time.sleep(1)
+        finally:
+            stream.cancel()
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.get("/api/cpu-usage/stream")
+async def cpu_usage_stream(delay: int = 1):
+    """SSE CPU 使用率流"""
+    def generate():
+        cpus: list[str] = []
+        lock = threading.Lock()
+        def handler(event: wrappers.CpuUsageEvent):
+            with lock:
+                cpus.append(json.dumps({"usage": event.usage}))
+        stream = bridge.cpu_usage(delay)
+        try:
+            while True:
+                with lock:
+                    while cpus:
+                        yield f"data: {cpus.pop(0)}\n\n"
+                import time; time.sleep(0.5)
+        finally:
+            stream.cancel()
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ===================================================================
+# Client-Streaming → WebSocket
+# ===================================================================
+
+@app.websocket("/api/sessions/{session_id}/move-nodes/ws")
+async def move_nodes_ws(websocket: WebSocket, session_id: int):
+    await websocket.accept()
+    streamer = bridge.move_nodes_streamer(session_id)
+    t = threading.Thread(target=lambda: bridge.move_nodes(streamer), daemon=True)
+    t.start()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("stop"):
+                break
+            if "position" in data:
+                p = data["position"]
+                streamer.send_position(data["node_id"], p.get("x", 0), p.get("y", 0))
+            elif "geo" in data:
+                g = data["geo"]
+                streamer.send_geo(data["node_id"], g.get("lon", 0), g.get("lat", 0), g.get("alt", 0))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        streamer.stop(); t.join(timeout=2)
+
+@app.websocket("/api/sessions/{session_id}/emane-pathlosses/ws")
+async def emane_pathlosses_ws(websocket: WebSocket, session_id: int):
+    await websocket.accept()
+    streamer = bridge.emane_pathlosses_streamer()
+    t = threading.Thread(target=lambda: bridge.emane_pathlosses(streamer), daemon=True)
+    t.start()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("stop"):
+                break
+            streamer.send(wrappers.EmanePathlossesRequest(
+                session_id=session_id, node1_id=data["node1_id"],
+                iface1_id=data.get("iface1_id", 0), node2_id=data["node2_id"],
+                iface2_id=data.get("iface2_id", 0),
+                rx1=data.get("rx1", 0.0), rx2=data.get("rx2", 0.0)))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        streamer.send(None); t.join(timeout=2)
+
+@app.websocket("/api/sessions/{session_id}/emane-events/ws")
+async def emane_events_ws(websocket: WebSocket, session_id: int):
+    await websocket.accept()
+    streamer = bridge.emane_events_streamer()
+    t = threading.Thread(target=lambda: bridge.emane_events(streamer), daemon=True)
+    t.start()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("stop"):
+                break
+            event_type = data.get("type", "location")
+            if event_type == "location":
+                loc = data.get("location", {})
+                event = wrappers.EmaneEventsRequest(
+                    session_id=session_id,
+                    location=wrappers.LocationEvent(
+                        node_id=loc.get("node_id", 0), iface_id=loc.get("iface_id", 0),
+                        lon=loc.get("lon", 0.0), lat=loc.get("lat", 0.0), alt=loc.get("alt", 0.0)))
+            elif event_type == "comm_effect":
+                ce = data.get("comm_effect", {})
+                event = wrappers.EmaneEventsRequest(
+                    session_id=session_id,
+                    comm_effect=wrappers.CommEffectEvent(
+                        node1_id=ce.get("node1_id", 0), iface1_id=ce.get("iface1_id", 0),
+                        node2_id=ce.get("node2_id", 0), iface2_id=ce.get("iface2_id", 0),
+                        delay=ce.get("delay", 0), jitter=ce.get("jitter", 0),
+                        loss=ce.get("loss", 0.0), dup=ce.get("dup", 0)))
+            else:
+                await websocket.send_json({"error": f"unknown event type: {event_type}"})
+                continue
+            streamer.send(event)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        streamer.send(None); t.join(timeout=2)
+
+
+
+# ===================================================================
+# 拓扑导入（JSON / XML）
+# ===================================================================
+
+_NODE_TYPE_MAP = {
+    "default": 0, "router": 0, "host": 0, "PC": 0,
+    "switch": 4, "hub": 5,
+    "wlan": 6, "wireless_lan": 6,
+    "rj45": 7, "tunnel": 8,
+    "emane": 10, "tap_bridge": 11,
+    "docker": 15,
+    "wireless": 17, "podman": 18,
+}
+
+
+async def _build_topology(session_id: int, topo: "TopologyInput"):
+    """将 TopologyInput 转换为 session 中的节点和链路。"""
+    iface_id_counter: dict[int, int] = {}
+
+    def next_iface_id(node_id: int) -> int:
+        iface_id_counter.setdefault(node_id, 0)
+        nid = iface_id_counter[node_id]
+        iface_id_counter[node_id] += 1
+        return nid
+
+    # 1. Create nodes
+    for node in topo.nodes:
+        ntype = _NODE_TYPE_MAP.get(node.type.lower(), 0)
+        node_obj = wrappers.Node(
+            id=node.id, name=node.name,
+            model=node.model,
+            type=wrappers.NodeType(ntype),
+            position=wrappers.Position(x=node.x, y=node.y),
+            services=set(node.services) if node.services else None,
+            icon=node.icon or None,
+        )
+        bridge.add_node(session_id, node_obj)
+
+    # 2. Create WLAN nodes (separate because they have config)
+    for wlan in topo.wlans:
+        node_obj = wrappers.Node(
+            id=wlan.id, name=wlan.name,
+            type=wrappers.NodeType.WIRELESS_LAN,
+            position=wrappers.Position(x=wlan.x, y=wlan.y),
+        )
+        bridge.add_node(session_id, node_obj)
+        # Set WLAN config
+        bridge.set_wlan_config(session_id, wlan.id, {
+            "range": wlan.range, "bandwidth": wlan.bandwidth,
+            "delay": wlan.delay, "jitter": wlan.jitter, "error": wlan.error,
+        })
+
+    # 3. Create links with auto-generated interfaces
+    helper = grpc_client.InterfaceHelper(ip4_prefix="10.0.0.0/24")
+    for link in topo.links:
+        opts = None
+        if any([link.bandwidth, link.delay, link.loss, link.jitter, link.dup]):
+            opts = wrappers.LinkOptions(
+                bandwidth=link.bandwidth or 0,
+                delay=link.delay or 0,
+                loss=link.loss or 0.0,
+                jitter=link.jitter or 0,
+                dup=link.dup or 0,
+            )
+        iface1 = helper.create_iface(link.node1_id, next_iface_id(link.node1_id))
+        iface2 = helper.create_iface(link.node2_id, next_iface_id(link.node2_id))
+        bridge.add_link(session_id, wrappers.Link(
+            node1_id=link.node1_id, node2_id=link.node2_id,
+            iface1=iface1, iface2=iface2, options=opts,
+        ))
+
+
+def _parse_xml_topology(xml_str: str) -> "TopologyInput":
+    """解析 XML 格式的拓扑描述。"""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_str)
+    name = root.get("name", "topology")
+    nodes: list = []
+    links: list = []
+    wlans: list = []
+    for elem in root.findall("node"):
+        nid = int(elem.get("id", 0))
+        nname = elem.get("name", f"n{nid}")
+        ntype_raw = elem.get("type", "default")
+        nx = float(elem.get("x", 200))
+        ny = float(elem.get("y", 200))
+        nmodel = elem.get("model", "PC")
+        services_str = elem.get("services", "")
+        services = [s.strip() for s in services_str.split(",") if s.strip()]
+        if ntype_raw.lower() in ("wlan", "wireless_lan"):
+            wlans.append(TopologyWlan(
+                id=nid, name=nname, x=nx, y=ny,
+                range=elem.get("range", "275"),
+                bandwidth=elem.get("bandwidth", "54000000"),
+                delay=elem.get("delay", "5000"),
+            ))
+        else:
+            nodes.append(TopologyNode(
+                id=nid, name=nname, type=ntype_raw,
+                model=nmodel, x=nx, y=ny,
+                services=services or None,
+            ))
+    for elem in root.findall("link"):
+        node1 = int(elem.get("node1", 0))
+        node2 = int(elem.get("node2", 0))
+        link = TopologyLink(node1_id=node1, node2_id=node2)
+        bw = elem.get("bandwidth")
+        if bw: link.bandwidth = int(bw)
+        dl = elem.get("delay")
+        if dl: link.delay = int(dl)
+        ls = elem.get("loss")
+        if ls: link.loss = float(ls)
+        links.append(link)
+    return TopologyInput(name=name, nodes=nodes, links=links, wlans=wlans)
+
+
+@app.post("/api/topology", status_code=201)
+async def import_topology(request: Request):
+    """导入网络拓扑（JSON 或 XML）。
+
+    JSON (Content-Type: application/json):
+    {
+      "name": "my-top",
+      "nodes": [{"id": 1, "name": "r1", "model": "router", "x": 100, "y": 100}],
+      "links": [{"node1_id": 1, "node2_id": 2}],
+      "wlans": [{"id": 3, "name": "w1", "x": 200, "y": 200}]
+    }
+
+    XML (Content-Type: application/xml):
+    <topology name="my-top">
+      <node id="1" name="r1" model="router" x="100" y="100"/>
+      <link node1="1" node2="2"/>
+      <node id="3" name="w1" type="wlan" x="200" y="200" range="300"/>
+    </topology>
+    """
+    content_type = request.headers.get("content-type", "").lower()
+    if "xml" in content_type or content_type.endswith("+xml"):
+        body = await request.body()
+        try:
+            topo = _parse_xml_topology(body.decode("utf-8"))
+        except Exception as e:
+            return _error_response(400, "invalid XML", detail=str(e),
+                                   hint="请检查 XML 格式是否正确")
+    elif "json" in content_type or not content_type:
+        try:
+            body_dict = await request.json()
+            topo = TopologyInput(**body_dict)
+        except Exception as e:
+            return _error_response(400, "invalid JSON", detail=str(e),
+                                   hint="请检查 JSON 格式是否正确")
+    else:
+        return _error_response(415, "unsupported media type",
+                               detail=f"received: {content_type}",
+                               hint="supported: application/json, application/xml")
+
+    try:
+        session = bridge.create_session()
+        # Build topology directly via gRPC — no start_session needed
+        # (start_session calls session.clear() internally which would wipe everything)
+        await _build_topology(session.id, topo)
+        return {
+            "session_id": session.id,
+            "name": topo.name,
+            "nodes": len(topo.nodes) + len(topo.wlans),
+            "links": len(topo.links),
+        }
+    except Exception as e:
+        try:
+            bridge.delete_session(session.id)
+        except Exception:
+            pass
+        grpc = _parse_grpc_error(e)
+        if grpc:
+            return _error_response(grpc["http"], grpc["detail"],
+                                   detail="gRPC status: " + grpc["status"],
+                                   hint=_hint_from_detail(grpc["detail"]))
+        raise
+
+
+# ===================================================================
+# 入口
+# ===================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)
