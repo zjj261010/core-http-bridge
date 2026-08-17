@@ -124,434 +124,398 @@ curl -X POST http://localhost:8080/api/sessions
 curl http://localhost:8080/api/sessions
 ```
 
+
+
+---
+
 ## 完整 API 接口说明
 
-### 会话管理 Session
+### 通用约定
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions` | 获取所有会话摘要列表 |
-| `POST` | `/api/sessions` | 创建新会话 |
-| `GET` | `/api/sessions/{id}` | 获取指定会话详情 |
-| `DELETE` | `/api/sessions/{id}` | 删除会话 |
-| `GET` | `/api/sessions/{id}/check` | 检查会话是否存在 |
-| `POST` | `/api/sessions/{id}/start` | 启动会话 |
-| `POST` | `/api/sessions/{id}/stop` | 停止会话 |
-| `POST` | `/api/sessions/{id}/alert` | 发送告警消息 |
+- **基础地址**: `http://<host>:8080`
+- **路径前缀**: `/api`
+- **Content-Type**: `application/json`（`POST /api/topology` 也支持 `application/xml`）
+- **错误格式**: `{"error": "描述", "detail": "技术细节", "hint": "操作提示"}`
 
-**start 请求体**：
+---
 
-```json
-{"definition": true}
+### 📁 Session 会话
+
+| 方法 | 路径 | 说明 | 请求体(可选) | 状态码 | 返回值 |
+|:----|:----|:----|:----|:----:|:----|
+| `POST` | `/api/sessions` | 创建会话 | `{"session_id": int}` | `201` | Session对象 |
+| `GET` | `/api/sessions` | 获取会话列表 | — | `200` | SessionSummary[] |
+| `GET` | `/api/sessions/{id}` | 获取会话详情（含节点+链路） | — | `200` | 完整Session |
+| `DELETE` | `/api/sessions/{id}` | 删除会话 | — | `200` | `{"result": bool}` |
+| `GET` | `/api/sessions/{id}/check` | 检查会话是否存在 | — | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{id}/start` | 启动会话 | `{"definition": bool}` | `200` | `{"result","exceptions"}` |
+| `POST` | `/api/sessions/{id}/stop` | 停止会话 | — | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{id}/alert` | 发送告警 | `{"level","source","text","node_id"}` | `200` | `{"result": bool}` |
+
+**创建与启动会话：**
+```bash
+# 创建
+curl -X POST http://localhost:8080/api/sessions \
+  -H "Content-Type: application/json" -d '{}'
+# [201] {"id": 1, "state": 1, "nodes": [], "links": [], ...}
+
+# 启动（definition=true 仅定义，无需 root）
+curl -X POST http://localhost:8080/api/sessions/1/start \
+  -H "Content-Type: application/json" -d '{"definition": true}'
+# [200] {"result": true, "exceptions": []}
+
+# 获取会话详情
+curl http://localhost:8080/api/sessions/1
+# 返回所有节点和链路（修复了！确保使用 for n in s.nodes.values()）
 ```
 
-- `definition=True` — 仅定义拓扑，不实例化（无需 root 权限）
-- `definition=False` — 完整实例化（需要 root 权限创建网络命名空间）
+---
 
-### 节点管理 Node
+### 🖥️ Node 节点
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `POST` | `/api/sessions/{sid}/nodes` | 添加节点 |
-| `GET` | `/api/sessions/{sid}/nodes/{nid}` | 获取节点详情（含接口和链路） |
-| `PATCH` | `/api/sessions/{sid}/nodes/{nid}` | 编辑节点图标 |
-| `DELETE` | `/api/sessions/{sid}/nodes/{nid}` | 删除节点 |
-| `POST` | `/api/sessions/{sid}/nodes/{nid}/move` | 移动节点位置 |
-| `POST` | `/api/sessions/{sid}/nodes/{nid}/command` | 在节点上执行命令 |
-| `GET` | `/api/sessions/{sid}/nodes/{nid}/terminal` | 获取节点终端命令 |
+**NodeType**: `0`=DEFAULT, `4`=SWITCH, `6`=WIRELESS_LAN, `10`=EMANE, `15`=DOCKER, `17`=WIRELESS
 
-**Nodetype 取值**：
+| 方法 | 路径 | 说明 | 请求体/参数 | 状态码 | 返回值 |
+|:----|:----|:----|:----|:----:|:----|
+| `POST` | `/api/sessions/{sid}/nodes` | 添加节点 | `{"id","name","model","type","position","services"}` | `201` | `{"node_id": int}` |
+| `GET` | `/api/sessions/{sid}/nodes/{nid}` | 获取节点详情 | — | `200` | `{"node","interfaces","links"}` |
+| `PATCH` | `/api/sessions/{sid}/nodes/{nid}` | 编辑节点（图标） | `?icon=xxx` | `200` | `{"result": bool}` |
+| `DELETE` | `/api/sessions/{sid}/nodes/{nid}` | 删除节点 | — | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{sid}/nodes/{nid}/move` | 移动节点位置 | `{"position":{"x","y"}}` 或 `{"geo":{...}}` | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{sid}/nodes/{nid}/command` | 在节点上执行命令 | `{"command","wait","shell"}` | `200` | `{"return_code","output"}` |
+| `GET` | `/api/sessions/{sid}/nodes/{nid}/terminal` | 获取终端命令 | — | `200` | `{"terminal": "vcmd ..."}` |
 
-| type | 含义 |
-|:----:|:----|
-| `0` | DEFAULT (默认路由器/主机) |
-| `1` | PHYSICAL (物理接口) |
-| `4` | SWITCH (交换机) |
-| `5` | HUB (集线器) |
-| `6` | WIRELESS_LAN (无线局域网) |
-| `10` | EMANE (电磁频谱模型) |
-| `15` | DOCKER (容器) |
-| `17` | WIRELESS (无线节点) |
-| `18` | PODMAN |
 
-**添加节点示例**：
+
+---
+
+## 实战：构建 PC—Router—PC 拓扑并验证连通性
+
+### 网络拓扑
+
+```
+PC1 (10.0.0.1/24) ─── Router (10.0.0.2/24 + 10.0.1.1/24) ─── PC2 (10.0.1.2/24)
+```
+
+### 完整 bash 脚本
+
+将以下内容保存为 `demo-pc-router-pc.sh` 并执行（确保 `core-daemon` 和 HTTP Bridge 已启动）：
 
 ```bash
-curl -X POST http://localhost:8080/api/sessions/1/nodes \\
-  -H "Content-Type: application/json" \\
-  -d '{"id": 1, "name": "router1", "model": "router",
-       "type": 0, "position": {"x": 100, "y": 100},
-       "services": ["zebra", "OSPFv2"]}'
+#!/bin/bash
+BASE="http://localhost:8080/api"
+
+# 1. 清理残留会话
+for sid in $(curl -s $BASE/sessions | python3 -c "import sys,json; [print(s['id']) for s in json.load(sys.stdin)]" 2>/dev/null); do
+    curl -s -X DELETE "$BASE/sessions/$sid" > /dev/null
+done
+
+# 2. 创建会话
+SID=$(curl -s -X POST "$BASE/sessions" -H "Content-Type: application/json" -d '{}' | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+echo "Session ID: $SID"
+
+# 3. 添加节点：PC1(id=1), Router(id=2), PC2(id=3)
+curl -s -X POST "$BASE/sessions/$SID/nodes" -H "Content-Type: application/json" \
+  -d '{"id":1,"name":"pc1","model":"PC","type":0,"position":{"x":100,"y":100}}'
+curl -s -X POST "$BASE/sessions/$SID/nodes" -H "Content-Type: application/json" \
+  -d '{"id":2,"name":"router","model":"router","type":0,"position":{"x":200,"y":100}}'
+curl -s -X POST "$BASE/sessions/$SID/nodes" -H "Content-Type: application/json" \
+  -d '{"id":3,"name":"pc2","model":"PC","type":0,"position":{"x":300,"y":100}}'
+
+# 4. 添加链路：PC1<->Router<->PC2
+curl -s -X POST "$BASE/sessions/$SID/links" -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1":{"id":0},"iface2":{"id":0}}'
+curl -s -X POST "$BASE/sessions/$SID/links" -H "Content-Type: application/json" \
+  -d '{"node1_id":2,"node2_id":3,"iface1":{"id":1},"iface2":{"id":0}}'
+
+# 5. 启动会话（实例化，需要 root）
+curl -s -X POST "$BASE/sessions/$SID/start" -H "Content-Type: application/json" \
+  -d '{"definition":false}'
+
+# 6. 配置 IP 地址
+## PC1: eth0 = 10.0.0.1/24
+curl -s -X POST "$BASE/sessions/$SID/nodes/1/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip addr add 10.0.0.1/24 dev eth0","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/1/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip link set eth0 up","wait":true,"shell":true}'
+
+## Router: eth0=10.0.0.2/24, eth1=10.0.1.1/24
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip addr add 10.0.0.2/24 dev eth0","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip addr add 10.0.1.1/24 dev eth1","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip link set eth0 up","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip link set eth1 up","wait":true,"shell":true}'
+
+## PC2: eth0 = 10.0.1.2/24
+curl -s -X POST "$BASE/sessions/$SID/nodes/3/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip addr add 10.0.1.2/24 dev eth0","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/3/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip link set eth0 up","wait":true,"shell":true}'
+
+# 7. 启用路由转发
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"sysctl -w net.ipv4.ip_forward=1","wait":true,"shell":true}'
+
+# 8. 添加默认路由
+curl -s -X POST "$BASE/sessions/$SID/nodes/1/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip route add default via 10.0.0.2","wait":true,"shell":true}'
+curl -s -X POST "$BASE/sessions/$SID/nodes/3/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip route add default via 10.0.1.1","wait":true,"shell":true}'
+
+# 9. 测试连通性
+echo ""
+echo "=== Ping Test: PC1 -> PC2 (10.0.1.2) ==="
+curl -s -X POST "$BASE/sessions/$SID/nodes/1/command" -H "Content-Type: application/json" \
+  -d '{"command":"ping -c 3 10.0.1.2","wait":true,"shell":true}' | python3 -c "
+import sys,json
+j=json.load(sys.stdin)
+for line in j['output'].split('\n'):
+    if 'ttl=' in line.lower() or 'transmitted' in line.lower():
+        print(f'  {line}')
+"
+
+echo ""
+echo "=== Ping Test: PC2 -> PC1 (10.0.0.1) ==="
+curl -s -X POST "$BASE/sessions/$SID/nodes/3/command" -H "Content-Type: application/json" \
+  -d '{"command":"ping -c 3 10.0.0.1","wait":true,"shell":true}' | python3 -c "
+import sys,json
+j=json.load(sys.stdin)
+for line in j['output'].split('\n'):
+    if 'ttl=' in line.lower() or 'transmitted' in line.lower():
+        print(f'  {line}')
+"
+
+echo ""
+echo "=== Routing Table: Router ==="
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip route","wait":true,"shell":true}' | python3 -c "import sys,json;print(json.load(sys.stdin)['output'])"
+
+echo ""
+echo "=== Interfaces: Router ==="
+curl -s -X POST "$BASE/sessions/$SID/nodes/2/command" -H "Content-Type: application/json" \
+  -d '{"command":"ip addr","wait":true,"shell":true}' | python3 -c "import sys,json;print(json.load(sys.stdin)['output'][:300])"
+
+# 10. 清理（可选）
+# curl -s -X DELETE "$BASE/sessions/$SID"
 ```
 
-### 链路管理 Link
+### 执行方式
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `POST` | `/api/sessions/{sid}/links` | 添加链路 |
-| `PATCH` | `/api/sessions/{sid}/links` | 修改链路参数 |
-| `DELETE` | `/api/sessions/{sid}/links` | 删除链路 |
-| `POST` | `/api/sessions/{sid}/links/linked` | 切换链路通断 |
+```bash
+chmod +x demo-pc-router-pc.sh
+# 直接运行（bridge 和 core-daemon 需已启动）
+bash demo-pc-router-pc.sh
+```
 
-**LinkOptions 参数**：
+### 预期输出
 
-| 参数 | 单位 | 含义 |
-|:----|:----|:----|
-| `bandwidth` | bps | 带宽 |
-| `delay` | us | 延迟 |
-| `loss` | % | 丢包率 |
-| `jitter` | us | 抖动 |
-| `dup` | % | 重复包率 |
+```
+Session ID: 1
+=== Ping Test: PC1 -> PC2 (10.0.1.2) ===
+  64 bytes from 10.0.1.2: icmp_seq=1 ttl=63 time=0.169 ms
+  64 bytes from 10.0.1.2: icmp_seq=2 ttl=63 time=0.196 ms
+  64 bytes from 10.0.1.2: icmp_seq=3 ttl=63 time=0.206 ms
+  3 packets transmitted, 3 received, 0% packet loss
 
-### 拓扑导入
+=== Ping Test: PC2 -> PC1 (10.0.0.1) ===
+  64 bytes from 10.0.0.1: icmp_seq=1 ttl=63 time=0.136 ms
+  64 bytes from 10.0.0.1: icmp_seq=2 ttl=63 time=0.063 ms
+  64 bytes from 10.0.0.1: icmp_seq=3 ttl=63 time=0.065 ms
+  3 packets transmitted, 3 received, 0% packet loss
 
-| 方法 | 路径 | Content-Type |
-|:----|:----|:----|
-| `POST` | `/api/topology` | JSON 或 XML |
+=== Routing Table: Router ===
+10.0.0.0/24 dev eth0 proto kernel scope link src 10.0.0.2
+10.0.1.0/24 dev eth1 proto kernel scope link src 10.0.1.1
 
-**JSON 示例**：
+=== Interfaces: Router ===
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 10.0.0.2/24 scope global eth0
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 10.0.1.1/24 scope global eth1
+```
 
-```json
+### 关键说明
+
+| 步骤 | 说明 |
+|:----|:----|
+| `definition=false` 启动 | **需要 root 权限**，因为 CORE 会创建网络命名空间和 veth 对 |
+| `ip addr add ... dev eth0` | 在节点的网络命名空间中配置 IP |
+| `ip route add default via ...` | 添加默认路由指向路由器 |
+| `sysctl -w net.ipv4.ip_forward=1` | 在路由器上启用 IP 转发，否则不会路由跨网段流量 |
+| `ping -c 3` | `ttl=63` 说明经过了 1 跳路由器（初始 64，减 1） |
+
+### NodeCommand 接口说明
+
+```bash
+POST /api/sessions/{sid}/nodes/{nid}/command
+Content-Type: application/json
+
 {
-  "name": "my-network",
-  "nodes": [
-    {"id": 1, "name": "router1", "model": "router",
-     "x": 100, "y": 100, "services": ["zebra", "OSPFv2"]},
-    {"id": 2, "name": "pc1", "model": "PC",
-     "x": 300, "y": 200}
-  ],
-  "wlans": [
-    {"id": 3, "name": "wlan0", "x": 200, "y": 200,
-     "range": "300", "bandwidth": "55000000"}
-  ],
-  "links": [
-    {"node1_id": 1, "node2_id": 2,
-     "bandwidth": 10000000, "delay": 5000, "loss": 1.5}
-  ]
+  "command": "要执行的命令",    # 必填
+  "wait": true,                 # 是否等待执行完成（获取输出）
+  "shell": true                 # 是否通过 shell 执行
 }
 ```
 
-**XML 示例**：
+**常用命令参考**：
 
-```xml
-<topology name="my-network">
-  <node id="1" name="router1" model="router" x="100" y="100"
-        services="zebra,OSPFv2"/>
-  <node id="2" name="pc1" model="PC" x="300" y="200"/>
-  <node id="3" name="wlan0" type="wlan" x="200" y="200"
-        range="300" bandwidth="55000000"/>
-  <link node1="1" node2="2" bandwidth="10000000" delay="5000"/>
-</topology>
+| 命令 | 用途 |
+|:----|:----|
+| `ip addr` | 查看 IP 地址和接口状态 |
+| `ip link set eth0 up` | 启用接口 |
+| `ip addr add 10.0.0.1/24 dev eth0` | 配置 IP 地址 |
+| `ip route` | 查看路由表 |
+| `ip route add default via 10.0.0.2` | 添加默认路由 |
+| `ip route add 10.0.0.0/24 via 10.0.0.1` | 添加静态路由 |
+| `ping -c 3 <IP>` | 测试连通性 |
+| `ping -c 3 -I eth0 <IP>` | 指定源接口 ping |
+| `traceroute <IP>` | 追踪路由路径 |
+| `sysctl -w net.ipv4.ip_forward=1` | 启用 IP 转发（路由器） |
+| `iptables -L` | 查看防火墙规则 |
+| `ip neigh` | 查看 ARP 表 |
+| `ethtool eth0` | 查看接口信息 |
+| `tc qdisc show dev eth0` | 查看流量控制（链路延迟/丢包） |
+| `iperf -s` | 启动 iperf 服务端（带宽测试） |
+| `iperf -c <server_ip>` | iperf 客户端测试 |
+
+> **注意**：命令在节点的网络命名空间中执行。会话未实例化时（`definition=true`）节点没有网络命名空间，命令会失败。需要先 `start(definition=false)` 实例化会话（需 root 权限）。
+**添加路由器：**
+```bash
+curl -X POST http://localhost:8080/api/sessions/1/nodes \
+  -H "Content-Type: application/json" \
+  -d '{"id":1,"name":"r1","model":"router","type":0,
+       "position":{"x":100,"y":100},
+       "services":["zebra","OSPFv2"]}'
+# [201] {"node_id": 1}
 ```
 
-**Node 属性说明**：
+**获取节点详情（含接口和链路）：**
+```bash
+curl http://localhost:8080/api/sessions/1/nodes/1
+# [200] {"node":{"id":1,"name":"r1",...}, "interfaces":[...], "links":[...]}
+```
 
-| 属性 | 说明 | 默认值 |
-|:----|:----|:----:|
-| `type` | `default`/`switch`/`wlan`/`wireless`/`docker`/`emane` | `default` |
-| `model` | 服务模型（`PC`/`router`/`host`/`mdr`） | `PC` |
-| `services` | 逗号分隔的服务列表 | 无 |
+---
 
-### WLAN 配置
+### 🔗 Link 链路
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/wlan/{nid}` | 获取 WLAN 配置 |
-| `POST` | `/api/sessions/{sid}/wlan` | 设置 WLAN 配置 |
-| `POST` | `/api/sessions/{sid}/wlan/link` | WLAN 内节点间链路控制 |
+**LinkOptions**: `bandwidth`(bps), `delay`(µs), `loss`(%), `jitter`(µs), `dup`(%)
 
-### 移动模型
+| 方法 | 路径 | 说明 | 请求体 | 状态码 | 返回值 |
+|:----|:----|:----|:----|:----:|:----|
+| `POST` | `/api/sessions/{sid}/links` | 添加链路 | `{"node1_id","node2_id","iface1","iface2","options"}` | `201` | `{"result","iface1","iface2"}` |
+| `PATCH` | `/api/sessions/{sid}/links` | 修改链路参数 | `{"node1_id","node2_id","iface1","iface2","options"}` | `200` | `{"result": bool}` |
+| `DELETE` | `/api/sessions/{sid}/links` | 删除链路 | `{"node1_id","node2_id","iface1","iface2"}` | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{sid}/links/linked` | 切换链路通断 | `{"node1_id","node2_id","iface1_id","iface2_id","linked"}` | `200` | `{"result": bool}` |
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/mobility/{nid}` | 获取移动配置 |
-| `POST` | `/api/sessions/{sid}/mobility` | 设置移动配置 |
-| `POST` | `/api/sessions/{sid}/mobility/action` | 控制移动 START/PAUSE/STOP |
+**添加链路（含带宽/延迟限制）：**
+```bash
+curl -X POST http://localhost:8080/api/sessions/1/links \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,
+       "iface1":{"id":0},"iface2":{"id":0},
+       "options":{"bandwidth":100000000,"delay":5000,"loss":1.5}}'
+# [201] {"result":true, "iface1":{"id":0,"name":"eth0",...}, "iface2":{...}}
+```
 
-### 服务管理
+**拔插网线（Linked 接口）：**
+```bash
+# 断开
+curl -X POST http://localhost:8080/api/sessions/1/links/linked \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":false}'
+# [200] {"result": true}
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/services/defaults` | 获取服务默认配置 |
-| `GET` | `/api/sessions/{sid}/services/node` | 获取节点服务配置值 |
-| `GET` | `/api/sessions/{sid}/services/rendered` | 获取服务渲染文件 |
-| `POST` | `/api/sessions/{sid}/services/action` | 服务动作 START/STOP/RESTART/VALIDATE |
-| `POST` | `/api/services/create` | 运行时创建自定义服务 |
+# 接通
+curl -X POST http://localhost:8080/api/sessions/1/links/linked \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":true}'
+# [200] {"result": true}
+```
 
-### Wireless 节点
+---
 
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `POST` | `/api/sessions/{sid}/wireless/linked` | Wireless 节点间链路控制 |
-| `GET` | `/api/sessions/{sid}/wireless/{nid}` | 获取 Wireless 节点配置 |
-
-### EMANE
-
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/emane/model` | 获取 EMANE 模型配置 |
-| `POST` | `/api/sessions/{sid}/emane/model` | 设置 EMANE 模型配置 |
-| `GET` | `/api/sessions/{sid}/emane/channel` | 获取 EMANE 事件通道 |
-| `POST` | `/api/sessions/{sid}/emane/link` | EMANE NEM 链路控制 |
-
-### XML 导入导出
-
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/xml` | 导出会话为 XML |
-| `POST` | `/api/xml/open` | 从 XML 字符串导入会话 |
-
-### 工具/全局
-
-| 方法 | 路径 | 功能 |
-|:----|:----|:----|
-| `GET` | `/api/interfaces` | 获取宿主机可用网络接口 |
-| `POST` | `/api/execute` | 在 CoreEmu 上下文中执行脚本 |
-| `GET` | `/api/config` | 获取全局配置（可用服务+EMANE模型） |
-
-### 流式接口
-
-#### SSE (Server-Sent Events)
+### 📡 WLAN / 🏃 Mobility / 🛠️ Service
 
 | 方法 | 路径 | 说明 |
 |:----|:----|:----|
-| `GET` | `/api/sessions/{sid}/events/stream` | 会话事件流 |
-| `GET` | `/api/sessions/{sid}/throughputs/stream` | 吞吐量数据流（每 3s） |
-| `GET` | `/api/cpu-usage/stream?delay=1` | CPU 使用率流 |
+| `GET` | `/api/sessions/{sid}/wlan/{nid}` | 获取WLAN无线配置 |
+| `POST` | `/api/sessions/{sid}/wlan` | 设置WLAN配置 `{"wlan_id","config":{...}}` |
+| `GET` | `/api/sessions/{sid}/mobility/{nid}` | 获取移动模型配置 |
+| `POST` | `/api/sessions/{sid}/mobility` | 设置移动配置 `{"node_id","config":{...}}` |
+| `POST` | `/api/sessions/{sid}/mobility/action` | 移动控制 `{"node_id","action":"START\|PAUSE\|STOP"}` |
+| `GET` | `/api/sessions/{sid}/services/defaults` | 服务默认配置 |
+| `GET` | `/api/sessions/{sid}/services/node` | 节点服务配置 |
+| `GET` | `/api/sessions/{sid}/services/rendered` | 服务渲染文件 |
+| `POST` | `/api/sessions/{sid}/services/action` | 服务动作 `{"node_id","service","action":...}` |
+| `POST` | `/api/services/create` | 创建自定义服务 |
 
-**SSE 使用示例**：
+---
 
+### 🌐 拓扑导入（JSON + XML）
+
+#### `POST /api/topology`
+
+`Content-Type: application/json` 或 `application/xml`
+
+**JSON 格式：**
+```json
+{"name":"拓扑名", "nodes":[
+    {"id":1,"name":"r1","model":"router","x":100,"y":100,"services":["zebra","OSPFv2"]}
+  ], "links":[
+    {"node1_id":1,"node2_id":2,"bandwidth":100000000,"delay":5000}
+  ], "wlans":[
+    {"id":3,"name":"wlan0","x":200,"y":200,"range":"300","bandwidth":"55000000"}
+  ]}
+```
+
+**XML 格式：**
+```xml
+<topology name="拓扑名">
+  <node id="1" name="r1" model="router" x="100" y="100" services="zebra,OSPFv2"/>
+  <link node1="1" node2="2" bandwidth="100000000" delay="5000"/>
+  <node id="3" name="wlan0" type="wlan" x="200" y="200" range="300"/>
+</topology>
+```
+
+```bash
+curl -X POST http://localhost:8080/api/topology \
+  -H "Content-Type: application/json" \
+  -d '{"name":"demo","nodes":[{"id":1,"name":"r1","x":100,"y":100}],"links":[]}'
+# [201] {"session_id":3, "name":"demo", "nodes":1, "links":0}
+```
+
+---
+
+### 🗂️ XML / 🛠️ 工具 / 📡 SSE / 🔌 WebSocket
+
+| 方法 | 路径 | 说明 |
+|:----|:----|:----|
+| `GET` | `/api/sessions/{sid}/xml` | 导出会话为XML |
+| `POST` | `/api/xml/open` | 从XML字符串导入会话 |
+| `GET` | `/api/interfaces` | 宿主机网络接口 |
+| `GET` | `/api/config` | 全局系统配置（服务+EMANE模型列表） |
+| `GET` | `/api/sessions/{sid}/events/stream` | SSE 会话事件流 |
+| `GET` | `/api/sessions/{sid}/throughputs/stream` | SSE 吞吐量流 |
+| `GET` | `/api/cpu-usage/stream?delay=N` | SSE CPU使用率流 |
+| `WS` | `/api/sessions/{sid}/move-nodes/ws` | WebSocket 流式移动节点 |
+| `WS` | `/api/sessions/{sid}/emane-pathlosses/ws` | WebSocket EMANE路径损耗 |
+| `WS` | `/api/sessions/{sid}/emane-events/ws` | WebSocket EMANE事件 |
+
+**SSE 使用：**
 ```bash
 curl -N http://localhost:8080/api/sessions/1/events/stream
-
-# 输出格式
-# data: {"session_id": 1, "type": "NodeEvent"}
-# data: {"session_id": 1, "type": "LinkEvent"}
+# data: {"session_id":1, "type":"NodeEvent"}
+# data: {"session_id":1, "type":"LinkEvent"}
 ```
 
-#### WebSocket
-
-| 路径 | 说明 |
-|:----|:----|
-| `/api/sessions/{sid}/move-nodes/ws` | 流式移动节点 |
-| `/api/sessions/{sid}/emane-pathlosses/ws` | 流式 EMANE 路径损耗 |
-| `/api/sessions/{sid}/emane-events/ws` | 流式 EMANE 事件 |
-
-**WebSocket 使用示例**：
-
+**WebSocket 使用：**
 ```javascript
 const ws = new WebSocket("ws://localhost:8080/api/sessions/1/move-nodes/ws");
-ws.send(JSON.stringify({
-    "node_id": 1, "position": {"x": 200, "y": 150}
-}));
-ws.send(JSON.stringify({"stop": true}));
+ws.send(JSON.stringify({node_id:1, position:{x:200, y:200}}));
+ws.send(JSON.stringify({stop: true}));
 ```
 
-## 错误处理
-
-所有错误响应统一格式：
-
-```json
-{
-  "error": "人类可读的错误描述",
-  "detail": "技术细节（可选）",
-  "hint": "可操作的建议（可选）"
-}
-```
-
-### 常见错误
-
-| 状态码 | 错误消息 | 原因 | 解决方法 |
-|:----:|:----|:----|:----|
-| `400` | `invalid service action` | action 参数值无效 | 使用 START/STOP/RESTART/VALIDATE |
-| `400` | `invalid alert level` | level 参数值无效 | 使用 DEFAULT/FATAL/ERROR/WARNING/NOTICE |
-| `400` | `invalid JSON` | JSON 格式错误 | 检查 JSON 语法 |
-| `400` | `invalid XML` | XML 格式错误 | 检查 XML 语法 |
-| `404` | `session X not found` | session_id 不存在 | 先 POST /api/sessions 创建 |
-| `404` | `unknown node id X` | node_id 不存在或不属于会话 | 检查节点是否已添加 |
-| `404` | `node X does not have interface Y` | iface_id 不存在 | 检查接口 ID |
-| `404` | `X is not using BasicRangeModel` | WLAN 未就绪 | 需要先启动会话 |
-| `415` | `unsupported media type` | 不支持的 Content-Type | 使用 application/json 或 application/xml |
-| `422` | `Field required` | 请求体缺少必填字段 | 检查 API 文档 |
-| `422` | `Input should be a valid integer` | 字段类型错误 | 检查字段类型 |
-| `500` | `internal server error` | 服务器内部错误 | 查看服务器日志 |
-| `503` | `bridge unavailable` | core-daemon 未运行 | `systemctl start core-daemon` |
-| `501` | (gRPC UNIMPLEMENTED) | EMANE 未安装 | 安装 EMANE 或忽略 |
-
-## 典型使用流程
-
-```bash
-# 1. 确保 core-daemon 在运行
-sudo core-daemon &
-
-# 2. 启动 HTTP Bridge
-cd /opt/core-http-bridge
-PYTHONPATH="" /opt/core/venv/bin/python3 -m uvicorn app:app &
-# 服务监听 http://localhost:8080
-
-# 3. 创建并配置拓扑
-# 方式 A：通过拓扑导入一键生成
-curl -X POST http://localhost:8080/api/topology \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "name": "demo",
-    "nodes": [
-      {"id": 1, "name": "r1", "model": "router", "x": 100, "y": 100},
-      {"id": 2, "name": "pc1", "model": "PC", "x": 300, "y": 200}
-    ],
-    "links": [
-      {"node1_id": 1, "node2_id": 2, "bandwidth": 10000000}
-    ]
-  }'
-
-# 方式 B：分步创建
-SID=$(curl -s -X POST http://localhost:8080/api/sessions | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-curl -X POST http://localhost:8080/api/sessions/$SID/start \\
-  -H "Content-Type: application/json" -d '{"definition": true}'
-curl -X POST http://localhost:8080/api/sessions/$SID/nodes \\
-  -H "Content-Type: application/json" \\
-  -d '{"id": 1, "name": "r1", "model": "router", "position": {"x": 100, "y": 100}}'
-
-# 4. 启动会话（实例化，需要 root）
-curl -X POST http://localhost:8080/api/sessions/$SID/start \\
-  -H "Content-Type: application/json" -d '{"definition": false}'
-
-# 5. 在节点上执行命令
-curl -X POST http://localhost:8080/api/sessions/$SID/nodes/1/command \\
-  -H "Content-Type: application/json" \\
-  -d '{"command": "ip addr", "wait": true, "shell": true}'
-
-# 6. 清理
-curl -X DELETE http://localhost:8080/api/sessions/$SID
-```
-
-## 完整示例：创建带路由的网络
-
-```bash
-# 创建会话
-SID=$(curl -s -X POST http://localhost:8080/api/sessions \\
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
-
-# 添加路由器（带 OSPF 服务）
-curl -X POST http://localhost:8080/api/sessions/$SID/nodes \\
-  -H "Content-Type: application/json" \\
-  -d '{"id": 1, "name": "r-core", "model": "router",
-       "type": 0, "position": {"x": 200, "y": 100},
-       "services": ["zebra", "OSPFv2"]}'
-
-# 添加两个主机
-curl -X POST http://localhost:8080/api/sessions/$SID/nodes \\
-  -H "Content-Type: application/json" \\
-  -d '{"id": 2, "name": "pc-left", "model": "PC",
-       "type": 0, "position": {"x": 100, "y": 200}}'
-
-curl -X POST http://localhost:8080/api/sessions/$SID/nodes \\
-  -H "Content-Type: application/json" \\
-  -d '{"id": 3, "name": "pc-right", "model": "PC",
-       "type": 0, "position": {"x": 300, "y": 200}}'
-
-# 添加链路（含带宽限制）
-curl -X POST http://localhost:8080/api/sessions/$SID/links \\
-  -H "Content-Type: application/json" \\
-  -d '{"node1_id": 1, "node2_id": 2,
-       "iface1": {"id": 0}, "iface2": {"id": 0},
-       "options": {"bandwidth": 100000000, "delay": 1000}}'
-
-curl -X POST http://localhost:8080/api/sessions/$SID/links \\
-  -H "Content-Type: application/json" \\
-  -d '{"node1_id": 1, "node2_id": 3,
-       "iface1": {"id": 1}, "iface2": {"id": 0},
-       "options": {"bandwidth": 100000000, "delay": 1000}}'
-
-# 启动会话（需要 root）
-curl -X POST http://localhost:8080/api/sessions/$SID/start \\
-  -H "Content-Type: application/json" -d '{"definition": false}'
-
-# 查看节点状态
-curl http://localhost:8080/api/sessions/$SID/nodes/1
-```
-
-## 可能出现的问题
-
-### 1. core-daemon 未运行
-
-**现象**：`/health` 返回 `503`，或调用 `/api/*` 返回 gRPC 错误。
-
-**解决**：
-```bash
-sudo systemctl start core-daemon
-# 或
-sudo core-daemon -d
-# 或前台运行（调试用）
-sudo core-daemon
-```
-
-### 2. Python 环境问题
-
-**现象**：启动时提示 `ModuleNotFoundError: No module named 'fastapi'`
-
-**解决**：确保使用 CORE 的 venv 运行：
-```bash
-PYTHONPATH="" /opt/core/venv/bin/python3 -m uvicorn app:app
-```
-
-### 3. 端口冲突
-
-**现象**：`Address already in use`。
-
-**解决**：
-```bash
-# 更改端口
-PYTHONPATH="" /opt/core/venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8081
-
-# 或查找占用进程
-lsof -i :8080
-kill <PID>
-```
-
-### 4. gRPC 连接失败
-
-**现象**：请求返回 `503 Unavailable`，detail 为 `gRPC status: UNAVAILABLE`。
-
-**原因**：core-daemon 默认只监听 `localhost:50051`。
-
-**解决**：
-```bash
-# 确认 core-daemon 正在监听
-ss -tlnp | grep 50051
-
-# 检查 core-daemon 配置
-cat /etc/core/core.conf | grep port
-```
-
-### 5. 启动会话需要 root 权限
-
-**现象**：`start_session(definition=false)` 失败。
-
-**原因**：完整实例化需要 root 权限创建网络命名空间和 veth 对。
-
-**解决**：
-- 使用 `"definition": true` 仅定义拓扑（不实例化）
-- 以 root 运行 HTTP Bridge，或让 core-daemon 使用 `--grpc` 的认证机制
-
-### 6. EMANE 相关接口不可用
-
-**现象**：EMANE 端点返回 `501 Unimplemented`。
-
-**原因**：环境中未安装 EMANE。
-
-**解决方法**：忽略 EMANE 接口，仅使用其他功能。
-
-### 7. 拓扑导入后节点查询不到
-
-**现象**：`POST /api/topology` 返回成功，但 `GET /nodes/1` 返回 404。
-
-**原因**：拓扑导入返回后 session 可能已清理或节点 ID 被重置。
-
-**解决方法**：使用返回的 `session_id` 立即查询，不要先调用 `start_session`。
-
-### 8. DELETE 请求带 body 在部分客户端中失败
-
-**现象**：某些 HTTP 客户端（如浏览器 `fetch`）不允许 DELETE 带 body。
-
-**解决方法**：对 DELETE 链路操作，可以先 POST 自定义端点，或确保使用的是 httpx/requests 这类支持 DELETE body 的客户端。

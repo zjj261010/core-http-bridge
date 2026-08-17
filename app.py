@@ -369,7 +369,7 @@ def _session_to_dict(s: wrappers.Session) -> dict:
     return {
         "id": s.id,
         "state": _enum_val(s.state),
-        "nodes": [_node_to_dict(n) for n in (s.nodes or [])],
+        "nodes": [_node_to_dict(n) for n in s.nodes.values()],
         "links": [_link_to_dict(l) for l in (s.links or [])],
         "dir": s.dir,
         "user": s.user,
