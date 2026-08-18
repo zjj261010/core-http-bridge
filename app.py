@@ -328,9 +328,13 @@ class TopologyNode(BaseModel):
     icon: str | None = None
 
 class TopologyLink(BaseModel):
-    """拓扑中的链路定义。"""
+    """拓扑中的链路定义。支持自定义接口IP。"""
     node1_id: int
     node2_id: int
+    iface1_ip4: str | None = None
+    iface1_ip4_mask: int | None = None
+    iface2_ip4: str | None = None
+    iface2_ip4_mask: int | None = None
     bandwidth: int | None = None
     delay: int | None = None
     loss: float | None = None
@@ -1067,8 +1071,23 @@ async def _build_topology(session_id: int, topo: "TopologyInput"):
                 jitter=link.jitter or 0,
                 dup=link.dup or 0,
             )
-        iface1 = helper.create_iface(link.node1_id, next_iface_id(link.node1_id))
-        iface2 = helper.create_iface(link.node2_id, next_iface_id(link.node2_id))
+        # Use custom IPs if provided, else auto-assign
+        if link.iface1_ip4:
+            iface1 = wrappers.Interface(
+                id=next_iface_id(link.node1_id),
+                ip4=link.iface1_ip4,
+                ip4_mask=link.iface1_ip4_mask or 24,
+            )
+        else:
+            iface1 = helper.create_iface(link.node1_id, next_iface_id(link.node1_id))
+        if link.iface2_ip4:
+            iface2 = wrappers.Interface(
+                id=next_iface_id(link.node2_id),
+                ip4=link.iface2_ip4,
+                ip4_mask=link.iface2_ip4_mask or 24,
+            )
+        else:
+            iface2 = helper.create_iface(link.node2_id, next_iface_id(link.node2_id))
         bridge.add_link(session_id, wrappers.Link(
             node1_id=link.node1_id, node2_id=link.node2_id,
             iface1=iface1, iface2=iface2, options=opts,
@@ -1109,6 +1128,14 @@ def _parse_xml_topology(xml_str: str) -> "TopologyInput":
         node1 = int(elem.get("node1", 0))
         node2 = int(elem.get("node2", 0))
         link = TopologyLink(node1_id=node1, node2_id=node2)
+        ip1 = elem.get("iface1_ip4")
+        if ip1: link.iface1_ip4 = ip1
+        ip1m = elem.get("iface1_ip4_mask")
+        if ip1m: link.iface1_ip4_mask = int(ip1m)
+        ip2 = elem.get("iface2_ip4")
+        if ip2: link.iface2_ip4 = ip2
+        ip2m = elem.get("iface2_ip4_mask")
+        if ip2m: link.iface2_ip4_mask = int(ip2m)
         bw = elem.get("bandwidth")
         if bw: link.bandwidth = int(bw)
         dl = elem.get("delay")

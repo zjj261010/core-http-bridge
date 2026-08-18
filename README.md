@@ -455,41 +455,58 @@ curl -X POST http://localhost:8080/api/sessions/1/links/linked \
 
 ---
 
-### 🌐 拓扑导入（JSON + XML）
 
-#### `POST /api/topology`
 
-`Content-Type: application/json` 或 `application/xml`
+### 📦 拓扑导入（JSON + XML）
 
-**JSON 格式：**
-```json
-{"name":"拓扑名", "nodes":[
-    {"id":1,"name":"r1","model":"router","x":100,"y":100,"services":["zebra","OSPFv2"]}
-  ], "links":[
-    {"node1_id":1,"node2_id":2,"bandwidth":100000000,"delay":5000}
-  ], "wlans":[
-    {"id":3,"name":"wlan0","x":200,"y":200,"range":"300","bandwidth":"55000000"}
-  ]}
+#### `POST /api/topology` — 导入网络拓扑
+
+通过 `Content-Type` 自动识别格式（`application/json` 或 `application/xml`）。
+
+**链路支持自定义接口 IP：** 在 JSON 的 `links` 或 XML 的 `<link>` 中指定：
+- `iface1_ip4` / `iface1_ip4_mask` — 节点1 的接口 IP
+- `iface2_ip4` / `iface2_ip4_mask` — 节点2 的接口 IP
+
+```bash
+# JSON（含自定义IP）
+curl -X POST http://localhost:8080/api/topology \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":"demo-net",
+    "nodes":[
+      {"id":1,"name":"r1","model":"router","x":100,"y":100,"services":["zebra","OSPFv2"]},
+      {"id":2,"name":"pc1","model":"PC","x":300,"y":200}
+    ],
+    "links":[
+      {"node1_id":1,"node2_id":2,
+       "iface1_ip4":"10.0.0.1","iface1_ip4_mask":24,
+       "iface2_ip4":"10.0.0.2","iface2_ip4_mask":24,
+       "bandwidth":100000000,"delay":5000}
+    ],
+    "wlans":[
+      {"id":3,"name":"wlan0","x":200,"y":200,"range":"300"}
+    ]
+  }'
 ```
-
-**XML 格式：**
-```xml
-<topology name="拓扑名">
-  <node id="1" name="r1" model="router" x="100" y="100" services="zebra,OSPFv2"/>
-  <link node1="1" node2="2" bandwidth="100000000" delay="5000"/>
-  <node id="3" name="wlan0" type="wlan" x="200" y="200" range="300"/>
-</topology>
+```json
+// [201] Response:
+{"session_id":1, "name":"demo-net", "nodes":3, "links":1}
 ```
 
 ```bash
+# XML（含自定义IP）
 curl -X POST http://localhost:8080/api/topology \
-  -H "Content-Type: application/json" \
-  -d '{"name":"demo","nodes":[{"id":1,"name":"r1","x":100,"y":100}],"links":[]}'
-# [201] {"session_id":3, "name":"demo", "nodes":1, "links":0}
+  -H "Content-Type: application/xml" \
+  -d '<topology name="demo-net">
+    <node id="1" name="r1" model="router" x="100" y="100" services="zebra,OSPFv2"/>
+    <node id="2" name="pc1" model="PC" x="300" y="200"/>
+    <node id="3" name="wlan0" type="wlan" x="200" y="200" range="300"/>
+    <link node1="1" node2="2"
+          iface1_ip4="10.0.0.1" iface1_ip4_mask="24"
+          iface2_ip4="10.0.0.2" iface2_ip4_mask="24"
+          bandwidth="100000000" delay="5000"/>
+  </topology>'
 ```
-
----
-
 ### 🗂️ XML / 🛠️ 工具 / 📡 SSE / 🔌 WebSocket
 
 | 方法 | 路径 | 说明 |
@@ -517,5 +534,113 @@ curl -N http://localhost:8080/api/sessions/1/events/stream
 const ws = new WebSocket("ws://localhost:8080/api/sessions/1/move-nodes/ws");
 ws.send(JSON.stringify({node_id:1, position:{x:200, y:200}}));
 ws.send(JSON.stringify({stop: true}));
+```
+
+
+
+
+
+### 🔗 Link 链路管理
+
+**LinkOptions**: `bandwidth`(bps), `delay`(µs), `loss`(%), `jitter`(µs), `dup`(%)
+
+**接口配置（iface1 / iface2）：** 支持以下字段：
+| 字段 | 类型 | 说明 |
+|:----|:----|:----|
+| `id` | int | 接口序号（必填，从 0 开始） |
+| `name` | str | 接口名（默认 eth<id>） |
+| `ip4` | str | IPv4 地址，如 `"10.0.0.1"` |
+| `ip4_mask` | int | IPv4 掩码位数，如 `24` |
+| `mac` | str | MAC 地址（自动生成） |
+
+| 方法 | 路径 | 说明 | 请求体 | 状态码 | 返回值 |
+|:----|:----|:----|:----|:----:|:----|
+| `POST` | `/api/sessions/{sid}/links` | 添加链路 | `{"node1_id","node2_id","iface1","iface2","options"}` | `201` | `{"result","iface1","iface2"}` |
+| `PATCH` | `/api/sessions/{sid}/links` | 修改链路参数 | `{"node1_id","node2_id","iface1","iface2","options"}` | `200` | `{"result": bool}` |
+| `DELETE` | `/api/sessions/{sid}/links` | 删除链路 | `{"node1_id","node2_id","iface1","iface2"}` | `200` | `{"result": bool}` |
+| `POST` | `/api/sessions/{sid}/links/linked` | 切换通断 | `{"node1_id","node2_id","iface1_id","iface2_id","linked"}` | `200` | `{"result": bool}` |
+
+**添加链路（指定 IP + 链路参数）：**
+```bash
+curl -X POST http://localhost:8080/api/sessions/1/links \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,
+       "iface1":{"id":0,"ip4":"10.0.0.1","ip4_mask":24},
+       "iface2":{"id":0,"ip4":"10.0.0.2","ip4_mask":24},
+       "options":{"bandwidth":100000000,"delay":5000,"loss":1.5}}'
+```
+```json
+// [201] Response:
+{"result":true, "iface1":{"id":0,"name":"eth0","ip4":"10.0.0.1","ip4_mask":24,...},
+ "iface2":{"id":0,"name":"eth0","ip4":"10.0.0.2","ip4_mask":24,...}}
+```
+
+**拔插网线（Linked 接口）：**
+```bash
+# 断开
+curl -X POST http://localhost:8080/api/sessions/1/links/linked \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":false}'
+# [200] {"result": true}
+
+# 接通
+curl -X POST http://localhost:8080/api/sessions/1/links/linked \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":true}'
+# [200] {"result": true}
+```
+### 🌐 拓扑导入（JSON + XML）
+
+#### `POST /api/topology` — 一键导入完整拓扑
+
+支持 `Content-Type: application/json` 和 `application/xml` 两种格式。
+
+**链路支持自定义IP：** 在 JSON 链路或 XML `<link>` 中指定 `iface1_ip4`/`iface1_ip4_mask`/`iface2_ip4`/`iface2_ip4_mask` 来设置接口 IP。
+
+**JSON 格式：**
+```json
+{
+  "name": "拓扑名",
+  "nodes": [
+    {"id": 1, "name": "r1", "model": "router", "x": 100, "y": 100,
+     "services": ["zebra", "OSPFv2"]},
+    {"id": 2, "name": "pc1", "model": "PC", "x": 300, "y": 200}
+  ],
+  "links": [
+    {"node1_id": 1, "node2_id": 2,
+     "iface1_ip4": "10.0.0.1", "iface1_ip4_mask": 24,
+     "iface2_ip4": "10.0.0.2", "iface2_ip4_mask": 24,
+     "bandwidth": 100000000, "delay": 5000}
+  ],
+  "wlans": [
+    {"id": 3, "name": "wlan0", "x": 200, "y": 200,
+     "range": "300", "bandwidth": "55000000"}
+  ]
+}
+```
+
+**XML 格式（含自定义IP）：**
+```xml
+<topology name="拓扑名">
+  <node id="1" name="r1" model="router" x="100" y="100" services="zebra,OSPFv2"/>
+  <node id="2" name="pc1" model="PC" x="300" y="200"/>
+  <node id="3" name="wlan0" type="wlan" x="200" y="200" range="300"/>
+  <link node1="1" node2="2"
+        iface1_ip4="10.0.0.1" iface1_ip4_mask="24"
+        iface2_ip4="10.0.0.2" iface2_ip4_mask="24"
+        bandwidth="100000000" delay="5000"/>
+</topology>
+```
+
+```bash
+curl -X POST http://localhost:8080/api/topology \
+  -H "Content-Type: application/json" \
+  -d '{"name":"demo","nodes":[{"id":1,"name":"r1","x":100,"y":100},{"id":2,"name":"pc1","x":300,"y":200}],
+       "links":[{"node1_id":1,"node2_id":2,"iface1_ip4":"10.0.0.1","iface1_ip4_mask":24,
+                 "iface2_ip4":"10.0.0.2","iface2_ip4_mask":24}]}'
+```
+```json
+// [201] Response:
+{"session_id": 3, "name": "demo", "nodes": 2, "links": 1}
 ```
 
