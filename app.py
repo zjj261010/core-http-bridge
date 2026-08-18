@@ -13,9 +13,11 @@ Core HTTP Bridge — FastAPI 服务，将 CORE gRPC 接口暴露为 HTTP REST AP
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import subprocess
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -520,8 +522,26 @@ async def start_session(session_id: int, body: StartSessionRequest):
 
 @app.post("/api/sessions/{session_id}/stop")
 async def stop_session(session_id: int):
-    """停止运行中的会话"""
-    return {"result": bridge.stop_session(session_id)}
+    """停止运行中的会话。停止后保留拓扑定义（节点/链路不丢失），
+    状态重置为 DEFINITION_STATE，可再次 start。"""
+    try:
+        # 1. 保存拓扑定义（在 stop 之前获取，因为 stop 会销毁会话）
+        session_data = bridge.get_session(session_id)
+        # 2. 停止（销毁运行时资源）
+        bridge.stop_session(session_id)
+        # 3. 从保存的定义中恢复拓扑（节点/链路仍保留）
+        bridge.start_session(session_data, definition=True)
+        return {"result": True}
+    except Exception as e:
+        grpc_err = _parse_grpc_error(e)
+        if grpc_err:
+            return _error_response(
+                grpc_err["http"], grpc_err["detail"],
+                detail="gRPC status: " + grpc_err["status"],
+                hint=_hint_from_detail(grpc_err["detail"]),
+            )
+        logger.exception("stop_session failed")
+        return _error_response(500, "internal server error", detail=str(e)[:200])
 
 @app.post("/api/sessions/{session_id}/alert")
 async def session_alert(session_id: int, body: AlertBody):
@@ -1212,6 +1232,100 @@ async def import_topology(request: Request):
 # ===================================================================
 # 入口
 # ===================================================================
+
+@app.websocket("/api/sessions/{session_id}/nodes/{node_id}/terminal/ws")
+async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
+    """WebSocket 交互式终端。通过 vcmd 连接到节点的 bash，实现双向交互。
+
+    用法:
+      const ws = new WebSocket("ws://host:8080/api/sessions/1/nodes/1/terminal/ws");
+      ws.onmessage = (e) => console.log(e.data);     // 收到终端输出
+      ws.send("ping 10.0.0.2\r\n");                  // 发送命令
+      ws.send("\x03");                                 // Ctrl+C 中断
+    """
+    await websocket.accept()
+    process: subprocess.Popen | None = None
+    try:
+        # 获取 vcmd 终端命令
+        terminal = bridge.get_node_terminal(session_id, node_id)
+        if not terminal:
+            await websocket.send_json({"error": "terminal not available (session not instantiated?)"})
+            await websocket.close(code=1011)
+            return
+
+        # 从 "vcmd -c <channel> -- /bin/bash" 构建交互式命令
+        # 添加 -q（静默，无本地I/O）-i（PTY 交互模式）
+        parts = terminal.split(" -- ", 1)
+        if len(parts) == 2:
+            vcmd_part = parts[0]
+            shell_cmd = parts[1]
+            # 在 -c 前插入 -q -i
+            vcmd_part = vcmd_part.replace(" -c ", " -q -i -c ")
+            cmd = f"{vcmd_part} -- {shell_cmd}"
+        else:
+            cmd = terminal
+
+        logger.info("terminal_ws: running %s", cmd)
+
+        # 启动 vcmd 子进程（PTY 模式）
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+
+        async def pipe_stdout_to_ws():
+            """后台任务：将进程 stdout 持续转发到 WebSocket"""
+            try:
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    await websocket.send_text(line.decode(errors="replace"))
+            except (WebSocketDisconnect, ConnectionResetError):
+                pass
+            except Exception:
+                logger.exception("terminal_ws stdout pipe error")
+
+        # 启动后台读取任务
+        reader_task = asyncio.create_task(pipe_stdout_to_ws())
+
+        # 主循环：从 WebSocket 读取 → 写入进程 stdin
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                if process.returncode is not None:
+                    break
+                # 处理 Ctrl+C / Ctrl+D
+                if raw == "\x03":
+                    process.stdin.write(b"\x03")
+                elif raw == "\x04":
+                    process.stdin.write_eof()
+                    break
+                else:
+                    process.stdin.write(raw.encode())
+                await process.stdin.drain()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            reader_task.cancel()
+            try:
+                await reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                process.terminate()
+                await process.wait()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.exception("terminal_ws error")
+        try:
+            await websocket.send_json({"error": str(e)[:200]})
+            await websocket.close(code=1011)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     import uvicorn
