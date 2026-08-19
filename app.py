@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -24,7 +25,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from core.api.grpc import wrappers
@@ -478,11 +480,22 @@ async def health():
         return _error_response(503, "bridge unavailable", detail=str(e)[:100],
                                hint="ensure core-daemon is running on localhost:50051")
 
+# ── Frontend (SPA) ──
+# ── Static files ──
+import os
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
-# ===================================================================
-# Session RPCs
-# ===================================================================
-
+# ── Frontend SPA ──
+@app.get("/", include_in_schema=False)
+async def index():
+    """Serve the frontend SPA from static/."""
+    path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse("<h1>CORE HTTP Bridge</h1><p>Frontend not found.</p>")
 @app.get("/api/sessions")
 async def list_sessions():
     """获取所有会话摘要列表"""
@@ -603,8 +616,10 @@ async def move_node(session_id: int, node_id: int,
 
 @app.post("/api/sessions/{session_id}/nodes/{node_id}/command")
 async def node_command(session_id: int, node_id: int, body: NodeCommandRequest):
-    """在节点上执行命令（需要会话已启动）"""
-    rc, output = bridge.node_command(session_id, node_id, body.command, body.wait, body.shell)
+    """在节点上执行命令（需要会话已启动）。通过线程池执行，不阻塞事件循环。"""
+    import asyncio
+    func = lambda: bridge.node_command(session_id, node_id, body.command, body.wait, body.shell)
+    rc, output = await asyncio.to_thread(func)
     return {"return_code": rc, "output": output}
 
 @app.get("/api/sessions/{session_id}/nodes/{node_id}/terminal")
@@ -1260,7 +1275,7 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             vcmd_part = parts[0]
             shell_cmd = parts[1]
             # 在 -c 前插入 -q -i
-            vcmd_part = vcmd_part.replace(" -c ", " -q -i -c ")
+            vcmd_part = vcmd_part.replace(" -c ", " -i -c ")  # -i=PTY, remove -q (quiet suppresses output)
             cmd = f"{vcmd_part} -- {shell_cmd}"
         else:
             cmd = terminal
@@ -1279,10 +1294,10 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             """后台任务：将进程 stdout 持续转发到 WebSocket"""
             try:
                 while True:
-                    line = await process.stdout.readline()
-                    if not line:
+                    data = await process.stdout.read(4096)
+                    if not data:
                         break
-                    await websocket.send_text(line.decode(errors="replace"))
+                    await websocket.send_text(data.decode(errors="replace"))
             except (WebSocketDisconnect, ConnectionResetError):
                 pass
             except Exception:

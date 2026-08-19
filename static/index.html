@@ -267,14 +267,16 @@ function log(msg, type='info') {
   }
 }
 
-function addLog(msg, type='info') {
-  const entry = document.createElement('div');
-  entry.className = 'log-entry';
-  entry.innerHTML = `<span class="log-time">[${new Date().toLocaleTimeString()}]</span> <span class="log-${type}">${msg}</span>`;
-  const pc = document.getElementById('panelContent');
-  if (document.querySelector('.panel-tab.active')?.textContent.includes('日志')) {
-    pc.appendChild(entry);
-    pc.scrollTop = pc.scrollHeight;
+function addLog(msg, type) {
+  if (!type) type = 'info';
+  var t = new Date().toLocaleTimeString();
+  state.log.push({t: t, msg: msg, type: type});
+  /* also append to DOM if log container exists */
+  var lc = document.getElementById('logContainer');
+  if (lc) {
+    var entry = '<div class="log-entry"><span class="log-time">['+t+']</span> <span class="log-'+type+'">'+msg+'</span></div>';
+    lc.innerHTML += entry;
+    lc.scrollTop = lc.scrollHeight;
   }
 }
 
@@ -590,47 +592,38 @@ function switchPanel(name) {
       <div id="quickCmdResult" style="font-size:12px;color:var(--fg2);margin-top:4px"></div>
     </div>`;
   } else if (name === 'events') {
-    pc.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:8px">
-      <button class="btn btn-secondary btn-sm" onclick="startEvents()">▶ 开启事件流</button>
-      <button class="btn btn-secondary btn-sm" onclick="stopEvents()">⏹ 停止</button>
-    </div>
-    <div id="eventsOutput" style="font-size:12px;color:var(--fg2)">等待开启...</div>`;
+    var existingEvents = document.getElementById('eventsOutput');
+    if (!existingEvents) {
+      pc.innerHTML = '<div style="display:flex;gap:8px;margin-bottom:8px">' +
+        '<button class="btn btn-secondary btn-sm" onclick="startEvents()">▶ 开启事件流</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="stopEvents()">⏹ 停止</button>' +
+        '</div><div id="eventsOutput" style="font-size:12px;color:var(--fg2)">等待开启...</div>';
+    } else {
+      /* events container already exists, just show it */
+      var parent = existingEvents.parentNode;
+      parent.style.display = 'block';
+    }
   } else if (name === 'topology') {
     renderTopologyJson();
   }
 }
 
 function renderLog() {
-  const pc = document.getElementById('panelContent');
-  pc.innerHTML = state.log.slice(-100).map(l =>
-    `<div class="log-entry"><span class="log-time">[${l.t}]</span> <span class="log-${l.type}">${l.msg}</span></div>`
-  ).join('');
+  var pc = document.getElementById('panelContent');
+  var lc = document.getElementById('logContainer');
+  if (!lc) {
+    pc.innerHTML = '<div id="logContainer"></div>';
+    lc = document.getElementById('logContainer');
+  }
+  var items = state.log.slice(-200);
+  var html = '';
+  for (var i = 0; i < items.length; i++) {
+    var l = items[i];
+    html += '<div class="log-entry"><span class="log-time">['+l.t+']</span> <span class="log-'+l.type+'">'+l.msg+'</span></div>';
+  }
+  lc.innerHTML = html;
   pc.scrollTop = pc.scrollHeight;
 }
-
-async function quickCommand() {
-  const nid = parseInt(document.getElementById('quickCmdNode').value);
-  const cmd = document.getElementById('quickCmdInput').value.trim();
-  if (!nid || !cmd) return;
-  state.selectedNode = nid;
-  addLog(`▶ [${state.nodes[nid]?.name}] ${cmd}`, 'info');
-  document.getElementById('quickCmdResult').textContent = '执行中...';
-  try {
-    const resp = await api('POST', `/api/sessions/${state.currentSid}/nodes/${nid}/command`, {
-      command: cmd, wait: true, shell: true
-    });
-    const out = (resp.output || '').slice(0, 2000);
-    document.getElementById('quickCmdResult').innerHTML = `<span style="color:var(--green)">✅ rc=${resp.return_code}</span><pre style="font-size:12px;margin-top:4px;background:var(--bg);padding:8px;border-radius:4px;overflow-x:auto">${out || '(无输出)'}</pre>`;
-    addLog(`✅ rc=${resp.return_code}`, 'ok');
-  } catch(e) {
-    document.getElementById('quickCmdResult').textContent = `❌ ${e.error || e}`;
-    addLog(`❌ ${e.error || e}`, 'err');
-  }
-}
-
-// ── Events SSE ──
-let eventsActive = false;
-
 function startEvents() {
   if (!state.currentSid || eventsActive) return;
   eventsActive = true;
@@ -784,17 +777,29 @@ function saveNodeProps() {
   var nid = parseInt(document.getElementById('pp_id').value);
   var node = state.nodes[nid];
   if (!node) return;
+  var sid = state.currentSid;
   node.name = document.getElementById('pp_name').value;
   node.model = document.getElementById('pp_model').value;
   node.type = parseInt(document.getElementById('pp_type').value);
-  node.x = parseFloat(document.getElementById('pp_x').value);
-  node.y = parseFloat(document.getElementById('pp_y').value);
+  var newX = parseFloat(document.getElementById('pp_x').value);
+  var newY = parseFloat(document.getElementById('pp_y').value);
   var sv = document.getElementById('pp_services').value.trim();
   node.services = sv ? sv.split(',').map(function(s){return s.trim();}).filter(Boolean) : [];
   node.icon = document.getElementById('pp_icon').value || null;
+  /* persist position via API */
+  if (sid && (node.x !== newX || node.y !== newY)) {
+    node.x = newX; node.y = newY;
+    api('POST', '/api/sessions/'+sid+'/nodes/'+nid+'/move', {position:{x:node.x, y:node.y}})
+      .catch(function(e){addLog('Move failed: '+(e.error||e),'err');});
+  }
+  /* persist icon via API */
+  if (sid && node.icon) {
+    api('PATCH', '/api/sessions/'+sid+'/nodes/'+nid+'?icon='+encodeURIComponent(node.icon))
+      .catch(function(e){addLog('Icon update failed: '+(e.error||e),'err');});
+  }
   renderTopology();
   closeModal('propModal');
-  addLog('Node '+nid+' properties updated', 'ok');
+  addLog('Node '+nid+' properties saved', 'ok');
 }
 
 function copyNodeJson(nid) {

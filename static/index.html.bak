@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CORE HTTP Bridge - 管理控制台</title>
+<style>
+:root {
+  --bg: #0f172a; --bg2: #1e293b; --bg3: #334155;
+  --fg: #e2e8f0; --fg2: #94a3b8; --accent: #3b82f6;
+  --accent2: #60a5fa; --green: #22c55e; --red: #ef4444;
+  --yellow: #eab308; --orange: #f97316;
+  --radius: 8px; --shadow: 0 4px 6px -1px rgba(0,0,0,0.3);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; }
+a { color: var(--accent2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Layout ── */
+.app { display: flex; height: 100vh; }
+.sidebar { width: 320px; min-width: 320px; background: var(--bg2); border-right: 1px solid var(--bg3); display: flex; flex-direction: column; overflow: hidden; }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Header ── */
+.header { padding: 16px 20px; background: var(--bg2); border-bottom: 1px solid var(--bg3); display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; font-weight: 600; }
+.header-actions { display: flex; gap: 8px; align-items: center; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+.badge-green { background: rgba(34,197,94,0.2); color: var(--green); }
+.badge-yellow { background: rgba(234,179,8,0.2); color: var(--yellow); }
+.badge-red { background: rgba(239,68,68,0.2); color: var(--red); }
+.badge-gray { background: rgba(148,163,184,0.2); color: var(--fg2); }
+
+/* ── Sidebar sections ── */
+.sidebar-section { padding: 16px 20px; border-bottom: 1px solid var(--bg3); }
+.section-title { font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--fg2); margin-bottom: 12px; letter-spacing: 0.5px; }
+
+.session-list { flex: 1; overflow-y: auto; padding: 8px; }
+.session-item { padding: 10px 12px; border-radius: var(--radius); cursor: pointer; margin-bottom: 4px; display: flex; align-items: center; justify-content: space-between; }
+.session-item:hover { background: var(--bg3); }
+.session-item.active { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); }
+.session-item .name { font-size: 14px; font-weight: 500; }
+.session-item .meta { font-size: 11px; color: var(--fg2); margin-top: 2px; }
+
+/* ── Topology canvas ── */
+.canvas-area { flex: 1; position: relative; overflow: hidden; background: radial-gradient(ellipse at center, #1a2332 0%, #0f172a 100%); }
+.canvas-area svg { width: 100%; height: 100%; }
+.node-box { position: absolute; width: 120px; height: 80px; background: var(--bg2); border: 2px solid var(--bg3); border-radius: var(--radius); cursor: grab; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; box-shadow: var(--shadow); transition: border-color 0.2s; user-select: none; }
+.node-box:hover { border-color: var(--accent); }
+.node-box.selected { border-color: var(--accent2); box-shadow: 0 0 0 3px rgba(59,130,246,0.3); }
+.node-box .icon { font-size: 24px; margin-bottom: 4px; }
+.node-box .label { font-size: 11px; color: var(--fg2); }
+.node-box .ip { font-size: 10px; color: var(--fg2); margin-top: 2px; }
+.link-line { stroke: var(--fg2); stroke-width: 2; fill: none; }
+.link-line:hover { stroke: var(--accent2); stroke-width: 3; }
+
+/* ── Bottom panel ── */
+.bottom-panel { height: 220px; min-height: 220px; background: var(--bg2); border-top: 1px solid var(--bg3); display: flex; flex-direction: column; }
+.panel-tabs { display: flex; background: var(--bg3); }
+.panel-tab { padding: 8px 16px; font-size: 12px; cursor: pointer; border: none; background: transparent; color: var(--fg2); font-weight: 500; border-bottom: 2px solid transparent; }
+.panel-tab:hover { color: var(--fg); }
+.panel-tab.active { color: var(--accent2); border-bottom-color: var(--accent2); background: rgba(59,130,246,0.08); }
+.panel-content { flex: 1; overflow-y: auto; padding: 12px 16px; font-size: 13px; font-family: 'Consolas', 'Courier New', monospace; white-space: pre-wrap; }
+.panel-content .log-entry { padding: 2px 0; }
+.panel-content .log-time { color: var(--fg2); }
+.panel-content .log-info { color: var(--accent2); }
+.panel-content .log-ok { color: var(--green); }
+.panel-content .log-err { color: var(--red); }
+
+/* ── Modal ── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal { background: var(--bg2); border-radius: 12px; width: 640px; max-width: 90vw; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid var(--bg3); display: flex; justify-content: space-between; align-items: center; }
+.modal-header h2 { font-size: 16px; font-weight: 600; }
+.modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+.modal-footer { padding: 12px 20px; border-top: 1px solid var(--bg3); display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ── Buttons / Form ── */
+.btn { padding: 8px 16px; border-radius: var(--radius); border: none; cursor: pointer; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: #2563eb; }
+.btn-secondary { background: var(--bg3); color: var(--fg); }
+.btn-secondary:hover { background: #475569; }
+.btn-danger { background: var(--red); color: #fff; }
+.btn-danger:hover { background: #dc2626; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-icon { width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: var(--radius); border: none; cursor: pointer; background: var(--bg3); color: var(--fg2); }
+.btn-icon:hover { background: var(--bg3); color: var(--fg); }
+
+input, textarea, select { background: var(--bg3); border: 1px solid var(--bg3); color: var(--fg); padding: 8px 12px; border-radius: var(--radius); font-size: 13px; width: 100%; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+textarea { font-family: 'Consolas', 'Courier New', monospace; resize: vertical; }
+label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); margin-bottom: 4px; }
+.form-group { margin-bottom: 12px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-inline { display: flex; gap: 8px; align-items: center; }
+.form-inline input { width: auto; flex: 1; }
+
+/* ── Empty state ── */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--fg2); }
+.empty-state .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
+.empty-state p { font-size: 14px; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ── Drag helper ── */
+.dragging { opacity: 0.7; cursor: grabbing !important; }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+<!-- ── Sidebar ── -->
+<div class="sidebar">
+  <div class="header">
+    <h1>CORE Bridge</h1>
+    <div class="header-actions">
+      <button class="btn btn-primary btn-sm" onclick="showCreateSessionModal()">+ 新建</button>
+    </div>
+  </div>
+
+  <div class="sidebar-section">
+    <div class="section-title">会话</div>
+    <div id="sessionList" class="session-list">
+      <div class="empty-state" style="padding:20px"><p>暂无会话</p></div>
+    </div>
+  </div>
+
+  <div class="sidebar-section" style="border-top:1px solid var(--bg3)">
+    <div class="section-title">操作</div>
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <button class="btn btn-secondary btn-sm" onclick="showImportModal()">📥 导入拓扑 (JSON/XML)</button>
+      <button class="btn btn-secondary btn-sm" id="stopBtn" onclick="stopSession()" style="display:none">⏹ 停止会话</button>
+      <button class="btn btn-secondary btn-sm" id="startBtn" onclick="startSession()" style="display:none">▶ 启动会话</button>
+      <button class="btn btn-secondary btn-sm" id="deleteBtn" onclick="deleteSession()" style="display:none">🗑 删除会话</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main ── -->
+<div class="main">
+  <div class="header">
+    <div id="sessionInfo">
+      <span style="color:var(--fg2);font-size:13px">选择左侧会话开始</span>
+    </div>
+    <div id="connectionStatus" class="badge badge-green">🟢 已连接</div>
+  </div>
+
+  <!-- Canvas -->
+  <div class="canvas-area" id="canvas">
+    <svg id="linksSvg"></svg>
+    <div id="nodesContainer" style="position:absolute;inset:0">
+      <div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>选择一个会话以查看拓扑</p></div>
+    </div>
+  </div>
+
+  <!-- Bottom panel -->
+  <div class="bottom-panel">
+    <div class="panel-tabs">
+      <button class="panel-tab active" onclick="switchPanel('log')">📋 日志</button>
+      <button class="panel-tab" onclick="switchPanel('command')">💻 命令</button>
+      <button class="panel-tab" onclick="switchPanel('events')">📡 事件</button>
+      <button class="panel-tab" onclick="switchPanel('topology')">📦 拓扑 JSON</button>
+    </div>
+    <div class="panel-content" id="panelContent">
+      <span style="color:var(--fg2)">等待操作...</span>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<!-- ════════════════════════════ MODALS ════════════════════════════ -->
+
+<!-- Create Session -->
+<div id="createModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+<div class="modal">
+<div class="modal-header"><h2>创建会话</h2><button class="btn-icon" onclick="closeModal('createModal')">✕</button></div>
+<div class="modal-body">
+  <div class="form-group"><label>会话名称 (可选)</label><input id="sessionName" placeholder="my-network"></div>
+  <div class="form-group"><label>或导入 JSON/XML 拓扑</label><textarea id="importText" rows="8" placeholder='{"name":"demo","nodes":[{"id":1,"name":"r1","x":100,"y":100}],"links":[]}'></textarea></div>
+  <div class="form-row">
+    <div class="form-group"><label>Content-Type</label>
+      <select id="importType"><option value="json">application/json</option><option value="xml">application/xml</option></select>
+    </div>
+    <div style="display:flex;align-items:flex-end">
+      <button class="btn btn-primary" onclick="importTopology()" style="width:100%">📥 导入拓扑</button>
+    </div>
+  </div>
+</div>
+<div class="modal-footer">
+  <button class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
+  <button class="btn btn-primary" onclick="createSession()">创建空会话</button>
+</div>
+</div></div>
+
+<!-- Node command -->
+<div id="commandModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+<div class="modal" style="width:500px">
+<div class="modal-header"><h2>执行命令</h2><button class="btn-icon" onclick="closeModal('commandModal')">✕</button></div>
+<div class="modal-body">
+  <div class="form-group"><label>节点</label><input id="cmdNodeId" readonly></div>
+  <div class="form-group"><label>命令</label><input id="cmdInput" placeholder="ping -c 3 10.0.0.2" onkeydown="if(event.key==='Enter')executeCommand()"></div>
+  <div class="form-group"><label>输出</label><textarea id="cmdOutput" rows="6" readonly style="background:var(--bg);font-size:12px"></textarea></div>
+</div>
+<div class="modal-footer">
+  <button class="btn btn-secondary" onclick="closeModal('commandModal')">关闭</button>
+  <button class="btn btn-primary" onclick="executeCommand()">▶ 执行</button>
+</div>
+</div></div>
+
+<!-- ════════════════════════════ STATE ════════════════════════════ -->
+<script>
+const API = '';
+let state = {
+  sessions: [],
+  currentSid: null,
+  nodes: {},
+  links: [],
+  selectedNode: null,
+  dragging: null,
+  dragOffset: {x:0, y:0},
+  eventSource: null,
+  log: [],
+};
+
+// ── Helpers ──
+async function api(method, path, data) {
+  const opts = { method, headers: {} };
+  if (data !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(data);
+  }
+  const resp = await fetch(`${API}${path}`, opts);
+  const text = await resp.text();
+  try {
+    const json = JSON.parse(text);
+    if (!resp.ok) throw { status: resp.status, ...json };
+    return json;
+  } catch (e) {
+    if (e.status) throw e;
+    if (!resp.ok) throw { status: resp.status, error: text };
+    return text;
+  }
+}
+
+function log(msg, type='info') {
+  const t = new Date().toLocaleTimeString();
+  state.log.push({t, msg, type});
+  if (document.querySelector('.panel-tab.active')?.textContent.includes('日志')) {
+    renderLog();
+  }
+}
+
+function addLog(msg, type='info') {
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="log-time">[${new Date().toLocaleTimeString()}]</span> <span class="log-${type}">${msg}</span>`;
+  const pc = document.getElementById('panelContent');
+  if (document.querySelector('.panel-tab.active')?.textContent.includes('日志')) {
+    pc.appendChild(entry);
+    pc.scrollTop = pc.scrollHeight;
+  }
+}
+
+function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
+// ── Session List ──
+async function loadSessions() {
+  try {
+    const sessions = await api('GET', '/api/sessions');
+    state.sessions = sessions;
+    renderSessions();
+  } catch(e) { addLog(`加载会话列表失败: ${e.error || e}`, 'err'); }
+}
+
+function renderSessions() {
+  const el = document.getElementById('sessionList');
+  if (state.sessions.length === 0) {
+    el.innerHTML = '<div class="empty-state" style="padding:20px"><p>暂无会话</p></div>';
+    return;
+  }
+  el.innerHTML = state.sessions.map(s => `
+    <div class="session-item ${s.id === state.currentSid ? 'active' : ''}" onclick="selectSession(${s.id})">
+      <div>
+        <div class="name">会话 ${s.id}</div>
+        <div class="meta">${s.nodes} 节点 · ${s.state === 4 ? '运行中' : s.state === 1 ? '已定义' : '状态:'+s.state}</div>
+      </div>
+      <span class="badge ${s.state === 4 ? 'badge-green' : 'badge-gray'}">${s.state === 4 ? '运行' : s.state === 1 ? '定义' : '停止'}</span>
+    </div>
+  `).join('');
+}
+
+// ── Session Select ──
+async function selectSession(sid) {
+  state.currentSid = sid;
+  renderSessions();
+  document.getElementById('stopBtn').style.display = 'inline-flex';
+  document.getElementById('startBtn').style.display = 'inline-flex';
+  document.getElementById('deleteBtn').style.display = 'inline-flex';
+  document.getElementById('sessionInfo').innerHTML = `<span style="font-weight:600">会话 ${sid}</span>`;
+  await loadTopology(sid);
+}
+
+async function loadTopology(sid) {
+  try {
+    const data = await api('GET', `/api/sessions/${sid}`);
+    const nodesMap = {};
+    for (const n of (data.nodes || [])) {
+      const pos = n.position || {x: 200, y: 200};
+      nodesMap[n.id] = { ...n, x: pos.x, y: pos.y };
+    }
+    state.nodes = nodesMap;
+    state.links = data.links || [];
+    renderTopology();
+    const _ec = document.getElementById('emptyCanvas'); if (_ec) _ec.style.display = 'none';
+    addLog(`加载拓扑: ${Object.keys(state.nodes).length} 节点, ${state.links.length} 链路`, 'ok');
+    renderTopologyJson();
+  } catch(e) {
+    addLog(`加载拓扑失败: ${e.error || e}`, 'err');
+  }
+}
+
+// ── Topology Render ──
+function renderTopology() {
+  const container = document.getElementById('nodesContainer');
+  const svg = document.getElementById('linksSvg');
+  const nodes = Object.values(state.nodes);
+
+  if (nodes.length === 0) {
+    container.innerHTML = '<div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>此会话无节点</p></div>';
+    svg.innerHTML = '';
+    return;
+  }
+
+  // Auto-layout if all at default position
+  const allDefault = nodes.every(n => n.x === 200 && n.y === 200);
+  if (allDefault) {
+    const cols = Math.min(nodes.length, 4);
+    nodes.forEach((n, i) => {
+      n.x = 80 + (i % cols) * 180;
+      n.y = 80 + Math.floor(i / cols) * 140;
+    });
+  }
+
+  // Compute link lines
+  let linkSvg = '';
+  const linkMap = {};
+  for (const l of state.links) {
+    const n1 = state.nodes[l.node1_id];
+    const n2 = state.nodes[l.node2_id];
+    if (!n1 || !n2) continue;
+    const key = [l.node1_id, l.node2_id].sort().join('-');
+    if (linkMap[key]) continue;
+    linkMap[key] = true;
+    const x1 = n1.x + 60, y1 = n1.y + 40;
+    const x2 = n2.x + 60, y2 = n2.y + 40;
+    const label = l.iface1?.ip4 || l.iface2?.ip4 ? `${l.iface1?.ip4||''} ↔ ${l.iface2?.ip4||''}` : '';
+    linkSvg += `<line class="link-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    if (label) {
+      const mx = (x1+x2)/2, my = (y1+y2)/2;
+      linkSvg += `<text x="${mx}" y="${my-8}" text-anchor="middle" fill="#94a3b8" font-size="10">${label}</text>`;
+    }
+  }
+  svg.innerHTML = linkSvg;
+
+  // Node boxes
+  container.innerHTML = nodes.map(n => {
+    const ifaces = n._interfaces || [];
+    const ip = ifaces.length > 0 ? ifaces[0].ip4 : '';
+    const icon = n.type === 4 ? '🔀' : n.type === 6 ? '📡' : n.model === 'router' ? '📟' : '🖥';
+    return `<div class="node-box ${n.id === state.selectedNode ? 'selected' : ''}"
+      id="node-${n.id}"
+      style="left:${n.x}px;top:${n.y}px"
+      onmousedown="startDrag(event, ${n.id})"
+      onclick="selectNode(${n.id})"
+      ondblclick="showCommandModal(${n.id})">
+      <div class="icon">${icon}</div>
+      <div class="label">${n.name}</div>
+      ${ip ? `<div class="ip">${ip}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── Drag ──
+function startDrag(e, nid) {
+  if (e.button !== 0) return;
+  const box = document.getElementById(`node-${nid}`);
+  if (!box) return;
+  const rect = box.getBoundingClientRect();
+  const canvas = document.getElementById('canvas');
+  const canvasRect = canvas.getBoundingClientRect();
+  state.dragging = nid;
+  state.dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  box.classList.add('dragging');
+
+  function onMove(ev) {
+    if (state.dragging === null) return;
+    const x = ev.clientX - canvasRect.left - state.dragOffset.x;
+    const y = ev.clientY - canvasRect.top - state.dragOffset.y;
+    box.style.left = `${Math.max(0, x)}px`;
+    box.style.top = `${Math.max(0, y)}px`;
+  }
+  function onUp() {
+    if (state.dragging !== null) {
+      const n = state.nodes[state.dragging];
+      if (n) {
+        n.x = parseInt(box.style.left);
+        n.y = parseInt(box.style.top);
+      }
+      box.classList.remove('dragging');
+      state.dragging = null;
+    }
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  e.preventDefault();
+}
+
+// ── Select Node ──
+function selectNode(nid) {
+  state.selectedNode = nid;
+  renderTopology();
+  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel-tab')[1].click(); // switch to command
+  document.getElementById('cmdNodeId').value = `${state.nodes[nid]?.name} (id=${nid})`;
+}
+
+function showCommandModal(nid) {
+  state.selectedNode = nid;
+  document.getElementById('cmdNodeId').value = `${state.nodes[nid]?.name} (id=${nid})`;
+  document.getElementById('cmdOutput').value = '';
+  document.getElementById('commandModal').style.display = 'flex';
+}
+
+// ── Execute Command ──
+async function executeCommand() {
+  const nid = state.selectedNode;
+  if (!nid) return addLog('请先选择节点', 'err');
+  const cmd = document.getElementById('cmdInput').value.trim();
+  if (!cmd) return;
+  addLog(`▶ [${state.nodes[nid]?.name}] ${cmd}`, 'info');
+  document.getElementById('cmdOutput').value = '执行中...';
+  try {
+    const resp = await api('POST', `/api/sessions/${state.currentSid}/nodes/${nid}/command`, {
+      command: cmd, wait: true, shell: true
+    });
+    const out = resp.output || '(无输出)';
+    document.getElementById('cmdOutput').value = out.length > 5000 ? out.slice(0,5000) + '\n... (截断)' : out;
+    addLog(`✅ rc=${resp.return_code}`, resp.return_code === 0 ? 'ok' : 'err');
+  } catch(e) {
+    const msg = e.error || e.toString();
+    document.getElementById('cmdOutput').value = `错误: ${msg}`;
+    addLog(`❌ ${msg}`, 'err');
+  }
+}
+
+// ── Session Actions ──
+async function createSession() {
+  try {
+    const resp = await api('POST', '/api/sessions', {});
+    state.currentSid = resp.id;
+    addLog(`会话 ${resp.id} 已创建`, 'ok');
+    closeModal('createModal');
+    await loadSessions();
+    await loadTopology(resp.id);
+  } catch(e) { addLog(`创建失败: ${e.error||e}`, 'err'); }
+}
+
+async function startSession() {
+  if (!state.currentSid) return;
+  const def = confirm('定义模式(无需root) = 确定\n实例化模式(需root) = 取消');
+  try {
+    const resp = await api('POST', `/api/sessions/${state.currentSid}/start`, { definition: def });
+    addLog(`启动 ${def?'定义':'实例化'}: ${resp.result?'成功':'失败'}`, resp.result ? 'ok' : 'err');
+    if (resp.exceptions?.length) addLog(`异常: ${resp.exceptions.join(', ')}`, 'err');
+    await loadSessions();
+  } catch(e) { addLog(`启动失败: ${e.error||e}`, 'err'); }
+}
+
+async function stopSession() {
+  if (!state.currentSid) return;
+  if (!confirm('停止会话？节点/链路定义将保留。')) return;
+  try {
+    await api('POST', `/api/sessions/${state.currentSid}/stop`, {});
+    addLog('会话已停止 (拓扑保留)', 'ok');
+    await loadSessions();
+    await loadTopology(state.currentSid);
+  } catch(e) { addLog(`停止失败: ${e.error||e}`, 'err'); }
+}
+
+async function deleteSession() {
+  if (!state.currentSid) return;
+  if (!confirm('确定删除此会话？')) return;
+  try {
+    await api('DELETE', `/api/sessions/${state.currentSid}`);
+    addLog(`会话 ${state.currentSid} 已删除`, 'ok');
+    state.currentSid = null;
+    document.getElementById('stopBtn').style.display = 'none';
+    document.getElementById('startBtn').style.display = 'none';
+    document.getElementById('deleteBtn').style.display = 'none';
+    document.getElementById('sessionInfo').innerHTML = '<span style="color:var(--fg2);font-size:13px">选择左侧会话开始</span>';
+    state.nodes = {}; state.links = [];
+    document.getElementById('nodesContainer').innerHTML = '<div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>选择一个会话以查看拓扑</p></div>';
+    document.getElementById('linksSvg').innerHTML = '';
+    await loadSessions();
+  } catch(e) { addLog(`删除失败: ${e.error||e}`, 'err'); }
+}
+
+// ── Import Topology ──
+function showImportModal() {
+  document.getElementById('importText').value = `{\n  "name": "quick-net",\n  "nodes": [\n    {"id":1,"name":"pc1","x":100,"y":100},\n    {"id":2,"name":"router","model":"router","x":200,"y":100},\n    {"id":3,"name":"pc2","x":300,"y":100}\n  ],\n  "links": [\n    {"node1_id":1,"node2_id":2,"iface1_ip4":"10.0.0.1","iface1_ip4_mask":24,"iface2_ip4":"10.0.0.2","iface2_ip4_mask":24},\n    {"node1_id":2,"node2_id":3,"iface1_ip4":"10.0.1.1","iface1_ip4_mask":24,"iface2_ip4":"10.0.1.2","iface2_ip4_mask":24}\n  ]\n}`;
+  document.getElementById('createModal').style.display = 'flex';
+  document.querySelector('#createModal h2').textContent = '导入拓扑';
+}
+
+async function importTopology() {
+  const text = document.getElementById('importText').value.trim();
+  const type = document.getElementById('importType').value;
+  if (!text) return;
+  try {
+    let resp;
+    if (type === 'xml') {
+      const fetchResp = await fetch('/api/topology', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/xml' },
+        body: text
+      });
+      resp = await fetchResp.json();
+    } else {
+      resp = await api('POST', '/api/topology', JSON.parse(text));
+    }
+    if (resp.session_id) {
+      addLog(`拓扑已导入: 会话 ${resp.session_id} (${resp.nodes}节点, ${resp.links}链路)`, 'ok');
+      closeModal('createModal');
+      document.querySelector('#createModal h2').textContent = '创建会话';
+      await loadSessions();
+      state.currentSid = resp.session_id;
+      renderSessions();
+      await loadTopology(resp.session_id);
+    }
+  } catch(e) {
+    addLog(`导入失败: ${e.error || e.message || e}`, 'err');
+  }
+}
+
+function showCreateSessionModal() {
+  document.getElementById('importText').value = '';
+  document.querySelector('#createModal h2').textContent = '创建会话';
+  document.getElementById('createModal').style.display = 'flex';
+}
+
+// ── Panel Switching ──
+function switchPanel(name) {
+  document.querySelectorAll('.panel-tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  const pc = document.getElementById('panelContent');
+
+  if (name === 'log') {
+    renderLog();
+  } else if (name === 'command') {
+    pc.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px;padding:8px 0">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:var(--fg2);font-size:13px">节点:</span>
+        <select id="quickCmdNode" style="width:auto;flex:1" onchange="state.selectedNode=parseInt(this.value)">
+          ${Object.values(state.nodes).map(n => `<option value="${n.id}" ${n.id===state.selectedNode?'selected':''}>${n.name} (id=${n.id})</option>`).join('')}
+        </select>
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="quickCmdInput" placeholder="输入命令..." style="flex:1" onkeydown="if(event.key==='Enter')quickCommand()">
+        <button class="btn btn-primary btn-sm" onclick="quickCommand()">▶ 执行</button>
+      </div>
+      <div id="quickCmdResult" style="font-size:12px;color:var(--fg2);margin-top:4px"></div>
+    </div>`;
+  } else if (name === 'events') {
+    pc.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:8px">
+      <button class="btn btn-secondary btn-sm" onclick="startEvents()">▶ 开启事件流</button>
+      <button class="btn btn-secondary btn-sm" onclick="stopEvents()">⏹ 停止</button>
+    </div>
+    <div id="eventsOutput" style="font-size:12px;color:var(--fg2)">等待开启...</div>`;
+  } else if (name === 'topology') {
+    renderTopologyJson();
+  }
+}
+
+function renderLog() {
+  const pc = document.getElementById('panelContent');
+  pc.innerHTML = state.log.slice(-100).map(l =>
+    `<div class="log-entry"><span class="log-time">[${l.t}]</span> <span class="log-${l.type}">${l.msg}</span></div>`
+  ).join('');
+  pc.scrollTop = pc.scrollHeight;
+}
+
+async function quickCommand() {
+  const nid = parseInt(document.getElementById('quickCmdNode').value);
+  const cmd = document.getElementById('quickCmdInput').value.trim();
+  if (!nid || !cmd) return;
+  state.selectedNode = nid;
+  addLog(`▶ [${state.nodes[nid]?.name}] ${cmd}`, 'info');
+  document.getElementById('quickCmdResult').textContent = '执行中...';
+  try {
+    const resp = await api('POST', `/api/sessions/${state.currentSid}/nodes/${nid}/command`, {
+      command: cmd, wait: true, shell: true
+    });
+    const out = (resp.output || '').slice(0, 2000);
+    document.getElementById('quickCmdResult').innerHTML = `<span style="color:var(--green)">✅ rc=${resp.return_code}</span><pre style="font-size:12px;margin-top:4px;background:var(--bg);padding:8px;border-radius:4px;overflow-x:auto">${out || '(无输出)'}</pre>`;
+    addLog(`✅ rc=${resp.return_code}`, 'ok');
+  } catch(e) {
+    document.getElementById('quickCmdResult').textContent = `❌ ${e.error || e}`;
+    addLog(`❌ ${e.error || e}`, 'err');
+  }
+}
+
+// ── Events SSE ──
+let eventsActive = false;
+
+function startEvents() {
+  if (!state.currentSid || eventsActive) return;
+  eventsActive = true;
+  const es = new EventSource(`/api/sessions/${state.currentSid}/events/stream`);
+  const output = document.getElementById('eventsOutput');
+  output.innerHTML = '🟢 监听事件中...\n';
+  es.onmessage = (e) => {
+    output.innerHTML += e.data + '\n';
+    output.scrollTop = output.scrollHeight;
+    if (output.innerHTML.length > 50000) {
+      output.innerHTML = output.innerHTML.slice(-30000);
+    }
+  };
+  es.onerror = () => { output.innerHTML += '⚠️ 事件流断开\n'; eventsActive = false; };
+  state.eventSource = es;
+}
+
+function stopEvents() {
+  if (state.eventSource) {
+    state.eventSource.close();
+    state.eventSource = null;
+    eventsActive = false;
+    document.getElementById('eventsOutput').innerHTML += '⏹ 已停止\n';
+  }
+}
+
+function renderTopologyJson() {
+  const pc = document.getElementById('panelContent');
+  const topo = {
+    name: `session-${state.currentSid}`,
+    nodes: Object.values(state.nodes).map(n => ({
+      id: n.id, name: n.name, model: n.model || 'PC',
+      type: n.type === 4 ? 'switch' : n.type === 6 ? 'wlan' : 'default',
+      x: n.x, y: n.y,
+      services: n.services?.length ? n.services : undefined
+    })),
+    links: state.links.map(l => ({
+      node1_id: l.node1_id, node2_id: l.node2_id,
+      iface1_ip4: l.iface1?.ip4, iface1_ip4_mask: l.iface1?.ip4_mask,
+      iface2_ip4: l.iface2?.ip4, iface2_ip4_mask: l.iface2?.ip4_mask,
+    }))
+  };
+  pc.innerHTML = `<pre style="font-size:12px;overflow-x:auto">${JSON.stringify(topo, null, 2)}</pre>
+  <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="navigator.clipboard.writeText(JSON.stringify(${JSON.stringify(JSON.stringify(topo))},null,2)).then(()=>addLog('拓扑已复制到剪贴板','ok'))">📋 复制</button>`;
+}
+
+// ── Init ──
+async function init() {
+  addLog('CORE HTTP Bridge 控制台已加载', 'info');
+  await loadSessions();
+
+  // Auto-select first session
+  if (state.sessions.length > 0) {
+    await selectSession(state.sessions[0].id);
+  }
+}
+init();
+</script>
+</body>
+</html>
