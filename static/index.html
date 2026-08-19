@@ -329,6 +329,21 @@ async function loadTopology(sid) {
     }
     state.nodes = nodesMap;
     state.links = data.links || [];
+    /* merge localStorage overrides */
+    try {
+      var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
+      for (var nid2 in stored) {
+        if (state.nodes[nid2]) {
+          var p = stored[nid2];
+          if (p.name) state.nodes[nid2].name = p.name;
+          if (p.model) state.nodes[nid2].model = p.model;
+          if (p.x) state.nodes[nid2].x = p.x;
+          if (p.y) state.nodes[nid2].y = p.y;
+          state.nodes[nid2].services = p.services || [];
+          state.nodes[nid2].icon = p.icon || '';
+        }
+      }
+    } catch(e) {}
     renderTopology();
     const _ec = document.getElementById('emptyCanvas'); if (_ec) _ec.style.display = 'none';
     addLog(`加载拓扑: ${Object.keys(state.nodes).length} 节点, ${state.links.length} 链路`, 'ok');
@@ -797,6 +812,13 @@ function saveNodeProps() {
     api('PATCH', '/api/sessions/'+sid+'/nodes/'+nid+'?icon='+encodeURIComponent(node.icon))
       .catch(function(e){addLog('Icon update failed: '+(e.error||e),'err');});
   }
+  /* persist to localStorage */
+  try {
+    var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
+    stored[nid] = {name: node.name, model: node.model, type: node.type,
+                   x: node.x, y: node.y, services: node.services, icon: node.icon};
+    localStorage.setItem('nodeProps_' + sid, JSON.stringify(stored));
+  } catch(e) {}
   renderTopology();
   closeModal('propModal');
   addLog('Node '+nid+' properties saved', 'ok');
