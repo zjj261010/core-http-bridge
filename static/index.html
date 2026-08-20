@@ -454,10 +454,17 @@ function startDrag(e, nid) {
   }
   function onUp() {
     if (state.dragging !== null) {
-      const n = state.nodes[state.dragging];
+      const nid = state.dragging;
+      const n = state.nodes[nid];
       if (n) {
-        n.x = parseInt(box.style.left);
-        n.y = parseInt(box.style.top);
+        n.x = parseInt(box.style.left) || n.x;
+        n.y = parseInt(box.style.top) || n.y;
+        /* persist new position to backend so it survives session reload */
+        const sid = state.currentSid;
+        if (sid) {
+          api('POST', '/api/sessions/'+sid+'/nodes/'+nid+'/move', {position:{x:n.x, y:n.y}})
+            .catch(function(e){ addLog('Move save failed: '+(e.error||e), 'err'); });
+        }
       }
       box.classList.remove('dragging');
       state.dragging = null;
@@ -706,7 +713,7 @@ function renderTopologyJson() {
 
 // ── Init ──
 async function init() {
-  addLog('CORE HTTP Bridge 控制台已加载', 'info');
+  addLog('CORE HTTP Bridge 控制台已加载 [v-fix-merge]', 'info');
   await loadSessions();
 
   // Auto-select first session
