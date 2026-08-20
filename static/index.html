@@ -341,9 +341,10 @@ async function loadTopology(sid) {
     }
     state.nodes = nodesMap;
     state.links = data.links || [];
-    /* merge localStorage - only if node IDs match */
+
+    /* merge localStorage - only name/model/services/icon, NOT position */
     try {
-      var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
+      var stored = JSON.parse(localStorage.getItem("nodeProps_" + sid) || "{}");
       var valid = true;
       for (var k in stored) {
         if (!(k in nodesMap)) { valid = false; break; }
@@ -352,14 +353,14 @@ async function loadTopology(sid) {
         for (var nid2 in stored) {
           if (state.nodes[nid2]) {
             var p = stored[nid2];
-            state.nodes[nid2].name = p.name || state.nodes[nid2].name;
-            state.nodes[nid2].model = p.model || state.nodes[nid2].model;
-            state.nodes[nid2].services = p.services || state.nodes[nid2].services;
-            state.nodes[nid2].icon = p.icon || state.nodes[nid2].icon;
+            if (p.name) state.nodes[nid2].name = p.name;
+            if (p.model) state.nodes[nid2].model = p.model;
+            state.nodes[nid2].services = p.services || [];
+            state.nodes[nid2].icon = p.icon || "";
           }
         }
       } else {
-        localStorage.removeItem('nodeProps_' + sid);
+        localStorage.removeItem("nodeProps_" + sid);
       }
     } catch(e) {}
     renderTopology();

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+path = "/opt/core-http-bridge/static/index.html"
+c = open(path).read()
+
+marker = "state.links = data.links || [];"
+idx = c.find(marker)
+if idx < 0:
+    print("ERROR: marker not found")
+    exit(1)
+
+end_of_line = c.find("\n", idx) + 1
+
+merge_code = """
+    /* merge localStorage - only name/model/services/icon, NOT position */
+    try {
+      var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
+      var valid = true;
+      for (var k in stored) {
+        if (!(k in nodesMap)) { valid = false; break; }
+      }
+      if (valid) {
+        for (var nid2 in stored) {
+          if (state.nodes[nid2]) {
+            var p = stored[nid2];
+            if (p.name) state.nodes[nid2].name = p.name;
+            if (p.model) state.nodes[nid2].model = p.model;
+            state.nodes[nid2].services = p.services || [];
+            state.nodes[nid2].icon = p.icon || '';
+          }
+        }
+      } else {
+        localStorage.removeItem('nodeProps_' + sid);
+      }
+    } catch(e) {}
+"""
+
+c = c[:end_of_line] + merge_code + c[end_of_line:]
+open(path, "w").write(c)
+print("✅ Re-added localStorage merge (name/model/services/icon only)")
