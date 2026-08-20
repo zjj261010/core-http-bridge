@@ -120,6 +120,18 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 .prop-grid .full { grid-column:1/-1; }
 .prop-label { font-size:11px; color:var(--fg2); margin-bottom:2px; }
 .prop-value { font-size:13px; padding:4px 8px; background:var(--bg); border-radius:4px; border:1px solid var(--bg3); }
+
+/* .term-popup removed - using new tab instead */; background:var(--bg2); border:1px solid var(--bg3); border-radius:var(--radius); box-shadow:0 8px 32px rgba(0,0,0,0.5); width:600px; min-height:300px; display:flex; flex-direction:column; }
+/* .term-header removed */; background:var(--bg3); cursor:grab; display:flex; justify-content:space-between; align-items:center; font-size:13px; font-weight:500; user-select:none; }
+.term-header .close-btn { cursor:pointer; padding:2px 8px; }
+.term-header .close-btn:hover { background:var(--red); color:#fff; border-radius:4px; }
+/* .term-output removed */; background:#000; color:#0f0; padding:8px; font-family:monospace; font-size:13px; overflow-y:auto; white-space:pre-wrap; min-height:200px; }
+/* .term-input-bar removed */; padding:6px 8px; gap:8px; border-top:1px solid var(--bg3); align-items:center; }
+.term-input-bar input { flex:1; background:#111; color:#0f0; border:none; padding:6px 8px; border-radius:4px; font-family:monospace; }
+.term-input-bar input:focus { box-shadow:0 0 0 1px var(--accent); outline:none; }
+.term-conn-btn { padding:4px 12px; border-radius:4px; border:none; cursor:pointer; font-size:12px; background:var(--accent); color:#fff; white-space:nowrap; }
+.term-conn-btn:hover { background:#2563eb; }
+.term-status { font-size:11px; color:var(--fg2); white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -329,19 +341,25 @@ async function loadTopology(sid) {
     }
     state.nodes = nodesMap;
     state.links = data.links || [];
-    /* merge localStorage overrides */
+    /* merge localStorage - only if node IDs match */
     try {
       var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
-      for (var nid2 in stored) {
-        if (state.nodes[nid2]) {
-          var p = stored[nid2];
-          if (p.name) state.nodes[nid2].name = p.name;
-          if (p.model) state.nodes[nid2].model = p.model;
-          if (p.x) state.nodes[nid2].x = p.x;
-          if (p.y) state.nodes[nid2].y = p.y;
-          state.nodes[nid2].services = p.services || [];
-          state.nodes[nid2].icon = p.icon || '';
+      var valid = true;
+      for (var k in stored) {
+        if (!(k in nodesMap)) { valid = false; break; }
+      }
+      if (valid) {
+        for (var nid2 in stored) {
+          if (state.nodes[nid2]) {
+            var p = stored[nid2];
+            if (p.name) state.nodes[nid2].name = p.name;
+            if (p.model) state.nodes[nid2].model = p.model;
+            state.nodes[nid2].services = p.services || [];
+            state.nodes[nid2].icon = p.icon || '';
+          }
         }
+      } else {
+        localStorage.removeItem('nodeProps_' + sid);
       }
     } catch(e) {}
     renderTopology();
@@ -846,77 +864,49 @@ function deleteNode(nid) {
 }
 
 // ── WebSocket Interactive Terminal ──
-var termWs = null;
+// ── Terminal Popups ──
+var termPopups = {};
 
 function openTerminal(nid) {
+  var sid = state.currentSid;
+  if (!sid) return;
+  var nm = (state.nodes[nid]||{}).name || '';
+  window.open('/static/term.html?sid='+sid+'&nid='+nid+'&name='+encodeURIComponent(nm));
   document.getElementById('contextMenu').style.display = 'none';
   state.selectedNode = nid;
-  // Switch to terminal panel
-  var tabs = document.querySelectorAll('.panel-tab');
-  for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
-  if (tabs[1]) tabs[1].classList.add('active');
-  var pc = document.getElementById('panelContent');
+  if (termPopups[nid]) { bringTermToFront(nid); return; }
   var nm = (state.nodes[nid]||{}).name || 'node-'+nid;
-  pc.innerHTML =
-    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
-    '  <span style="color:var(--fg2);font-size:13px">🖥 '+nm+'</span>' +
-    '  <button class="btn btn-sm btn-secondary" id="termBtn" onclick="doConnectTerminal()">🔗 Connect</button>' +
-    '  <span id="termStatus" style="font-size:11px;color:var(--fg2)">(disconnected)</span>' +
+  var popup = document.createElement('div');
+  popup.className = 'term-popup';
+  popup.id = 'term-'+nid;
+  popup.innerHTML =
+    '<div class="term-header">' +
+    '  <span>📟 '+nm+'</span>' +
+    '  <span class="close-btn" onclick="closeTerminal('+nid+')">✕</span>' +
     '</div>' +
-    '<div id="termOut" style="background:#000;color:#0f0;padding:12px;border-radius:4px;font-family:monospace;font-size:13px;height:180px;overflow-y:auto;white-space:pre-wrap"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:8px">' +
-    '  <input id="termIn" placeholder="Type command and press Enter..." style="flex:1;background:#111;color:#0f0;font-family:monospace" disabled>' +
+    '<div class="term-output" id="termOut-'+nid+'"></div>' +
+    '<div class="term-input-bar">' +
+    '  <button class="term-conn-btn" id="termBtn-'+nid+'" onclick="connectTerminal('+nid+')">🔗 Connect</button>' +
+    '  <span class="term-status" id="termSts-'+nid+'">disconnected</span>' +
+    '  <input id="termIn-'+nid+'" placeholder="Type command, Enter to send..." disabled>' +
+    '</div>' +
     '</div>';
+  document.body.appendChild(popup);
+  var cnt = Object.keys(termPopups).length;
+  popup.style.left = (50 + cnt * 30) + 'px';
+  popup.style.top = (50 + cnt * 30) + 'px';
+  makeTermDraggable(popup);
+  termPopups[nid] = popup;
+  connectTerminal(nid);
 }
 
-function doConnectTerminal() {
-  var nid = state.selectedNode;
-  var sid = state.currentSid;
-  if (!nid || !sid) return;
-  var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  var url = proto + location.host + '/api/sessions/' + sid + '/nodes/' + nid + '/terminal/ws';
-  var out = document.getElementById('termOut');
-  var inp = document.getElementById('termIn');
-  var sts = document.getElementById('termStatus');
-  if (termWs) { termWs.close(); termWs = null; }
-  try {
-    termWs = new WebSocket(url);
-    termWs.onopen = function() {
-      sts.textContent = '(connected)';
-      sts.style.color = '#22c55e';
-      inp.disabled = false;
-      inp.focus();
-      out.innerHTML += '[Terminal connected]\n';
-    };
-    termWs.onmessage = function(e) {
-      out.innerHTML += e.data;
-      out.scrollTop = out.scrollHeight;
-      if (out.innerHTML.length > 50000) out.innerHTML = out.innerHTML.slice(-30000);
-    };
-    termWs.onclose = function() {
-      termWs = null;
-      sts.textContent = '(disconnected)';
-      sts.style.color = '#94a3b8';
-      inp.disabled = true;
-      out.innerHTML += '\n[Terminal disconnected]\n';
-    };
-    inp.onkeydown = function(e) {
-      if (!termWs || termWs.readyState !== WebSocket.OPEN) return;
-      if (e.key === 'Enter') {
-        var cmd = inp.value + '\n';
-        termWs.send(cmd);
-        out.innerHTML += cmd;
-        inp.value = '';
-      } else if (e.ctrlKey && e.key === 'c') {
-        termWs.send('\x03');
-      } else if (e.ctrlKey && e.key === 'd') {
-        termWs.send('\x04');
-      }
-    };
-  } catch(e) {
-    out.innerHTML += '[Connection failed: '+e+']\n';
-  }
-}
+
+
+
+
+
+
+
 </script>
 </body>
 </html>

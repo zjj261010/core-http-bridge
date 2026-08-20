@@ -488,6 +488,17 @@ if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 # ── Frontend SPA ──
+
+@app.get("/term.html", include_in_schema=False)
+async def term_page():
+    """Redirect to static term page."""
+    import os
+    path = os.path.join(os.path.dirname(__file__), "static", "term.html")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse("<h1>Terminal page not found</h1>")
+
 @app.get("/", include_in_schema=False)
 async def index():
     """Serve the frontend SPA from static/."""
