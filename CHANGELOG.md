@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.5 (2026-08-21)
+
+- Fix: node name/model/services persisted in localStorage now restore correctly on session reload
+- Fix: node drag position now written to backend via /move on drag end, so it survives session reload
+- Clean: removed corrupted tool-error artifact files from repo
+
 ## v1.1.4 (2026-08-20)
 
 - Frontend: right-click context menu on nodes (Properties / Terminal / Copy / Delete)
