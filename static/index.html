@@ -352,10 +352,10 @@ async function loadTopology(sid) {
         for (var nid2 in stored) {
           if (state.nodes[nid2]) {
             var p = stored[nid2];
-            if (p.name) state.nodes[nid2].name = p.name;
-            if (p.model) state.nodes[nid2].model = p.model;
-            state.nodes[nid2].services = p.services || [];
-            state.nodes[nid2].icon = p.icon || '';
+            state.nodes[nid2].name = p.name || state.nodes[nid2].name;
+            state.nodes[nid2].model = p.model || state.nodes[nid2].model;
+            state.nodes[nid2].services = p.services || state.nodes[nid2].services;
+            state.nodes[nid2].icon = p.icon || state.nodes[nid2].icon;
           }
         }
       } else {
@@ -834,7 +834,7 @@ function saveNodeProps() {
   try {
     var stored = JSON.parse(localStorage.getItem('nodeProps_' + sid) || '{}');
     stored[nid] = {name: node.name, model: node.model, type: node.type,
-                   x: node.x, y: node.y, services: node.services, icon: node.icon};
+                   services: node.services, icon: node.icon};
     localStorage.setItem('nodeProps_' + sid, JSON.stringify(stored));
   } catch(e) {}
   renderTopology();
