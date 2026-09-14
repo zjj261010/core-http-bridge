@@ -545,9 +545,10 @@ curl -X POST http://localhost:8080/api/sessions/1/links \
 
 **用途：修改链路 QoS 参数（bandwidth/delay/loss/jitter/dup 等）。**
 
-> ⚠️ **接口 IP 不支持通过本接口修改。** CORE 的 `EditLinkRequest` 协议只包含 `iface1_id / iface2_id / options` 字段，**没有 ip4 字段** —— 协议层面无法在线改接口 IP。要改 IP 只能**删除链路后以新 IP 重建**（`DELETE /links` + `POST /links`）。
->
-> options 为**合并式更新**：以链路当前 QoS 为基准，只覆盖请求体里传入的字段，未传入的参数保持原值（不会清零）。
+> ✅ **改接口 IP（与 CORE-GUI 行为对齐）：**
+> - **会话未运行**（定义/停止态）：请求体中携带 `iface1`/`iface2` 的 `ip4/ip4_mask` → 桥后端**自动删链重建**（保留原接口 id/MAC 与合并后的 QoS），一次调用即可完成「改 IP + 改 QoS」。返回 `{"action": "replace_ip"}`。
+> - **运行中**（RUNTIME/DATACOLLECT）：请求改 IP → **HTTP 409 拒绝**（CORE 协议 `EditLinkRequest` 无 ip4 字段，运行中接口 IP 被锁定）。需先 `POST /api/sessions/{id}/stop` 停止会话再改；或运行中直接删链（`DELETE /links`）后以新 IP 重建（`POST /links`）。运行中仅 QoS 可改。
+> - options 为**合并式更新**：以链路当前 QoS 为基准，只覆盖请求体里传入的字段，未传入的参数保持原值（不会清零）。
 
 **示例：**
 ```bash
@@ -557,10 +558,17 @@ curl -X PATCH http://localhost:8080/api/sessions/1/links \
   -d '{"node1_id":1,"node2_id":2,"options":{"delay":1000}}'
 # [200] {"result": true}
 
+# 未运行：改接口1 IP → 后端自动删链重建，保留 QoS delay/bandwidth
 curl -X PATCH http://localhost:8080/api/sessions/1/links \
   -H "Content-Type: application/json" \
-  -d'{"node1_id":1,"node2_id":2,"options":{"bandwidth":200000000,"delay":1000}}'
-# [200] {"result": true}
+  -d '{"node1_id":1,"node2_id":2,"iface1":{"ip4":"10.9.9.9","ip4_mask":24}}'
+# [200] {"result": true, "action": "replace_ip", "state": "DEFINITION"}
+
+# 运行中改 IP → 409 拒绝
+curl -X PATCH http://localhost:8080/api/sessions/1/links \
+  -H "Content-Type: application/json" \
+  -d '{"node1_id":1,"node2_id":2,"iface1":{"ip4":"10.9.9.99","ip4_mask":24}}'
+# [409] {"error":"会话运行中(RUNTIME)不可在线修改接口 IP", "detail":"…", "hint":"先停止会话，再改 IP；QoS 可直接改"}
 ```
 
 > 查询链路当前接口 IP / QoS：`GET /api/sessions/{id}` 的 `links[]`，每条的 `iface1/iface2`（`id/ip4/ip4_mask`）与 `options`（QoS）。

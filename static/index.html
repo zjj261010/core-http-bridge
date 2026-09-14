@@ -247,6 +247,7 @@ const API = '';
 let state = {
   sessions: [],
   currentSid: null,
+  sessionState: null,          // 当前会话状态(数字): 1=已定义 2=配置 3=实例化 4=运行 5=收数 6=停止
   nodes: {},
   links: [],
   selectedNode: null,
@@ -256,6 +257,7 @@ let state = {
   eventSource: null,
   log: [],
 };
+function sessionRunning() { return state.sessionState === 4 || state.sessionState === 5; }
 
 // ── Helpers ──
 async function api(method, path, data) {
@@ -347,6 +349,7 @@ async function loadTopology(sid) {
     }
     state.nodes = nodesMap;
     state.links = data.links || [];
+    state.sessionState = data.state ?? null;
     state.selectedLink = null;
 
     /* merge localStorage - only name/model/services/icon, NOT position */
@@ -900,6 +903,7 @@ function showLinkProps() {
   const name2 = n2 ? n2.name : 'node'+l.node2_id;
   const i1 = l.iface1 || {}, i2 = l.iface2 || {};
   const o = l.options || {};
+  const run = sessionRunning();
   document.getElementById('linkModalTitle').textContent =
     `🔗 ${name1} (${l.node1_id}) ↔ ${name2} (${l.node2_id})`;
   document.getElementById('linkModalBody').innerHTML = `
@@ -908,10 +912,14 @@ function showLinkProps() {
         <input class="prop-value" value="${i1.id ?? ''}" readonly></div>
       <div><div class="prop-label">接口2 ID</div>
         <input class="prop-value" value="${i2.id ?? ''}" readonly></div>
-      <div><div class="prop-label">接口1 IP (node ${l.node1_id}, 只读)</div>
-        <input class="prop-value" value="${i1.ip4||'(系统自动分配)'}" readonly></div>
-      <div><div class="prop-label">接口2 IP (node ${l.node2_id}, 只读)</div>
-        <input class="prop-value" value="${i2.ip4||'(系统自动分配)'}" readonly></div>
+      <div><div class="prop-label">接口1 IP (node ${l.node1_id})</div>
+        <input class="prop-value" id="lk_ip1" value="${i1.ip4||''}" placeholder="${run?'运行中锁定':'如 10.0.0.1'}" ${run?'readonly':''}></div>
+      <div><div class="prop-label">接口1 掩码</div>
+        <input class="prop-value" id="lk_mask1" type="number" min="0" max="32" value="${i1.ip4_mask??''}" placeholder="24" ${run?'readonly':''}></div>
+      <div><div class="prop-label">接口2 IP (node ${l.node2_id})</div>
+        <input class="prop-value" id="lk_ip2" value="${i2.ip4||''}" placeholder="${run?'运行中锁定':'如 10.0.0.2'}" ${run?'readonly':''}></div>
+      <div><div class="prop-label">接口2 掩码</div>
+        <input class="prop-value" id="lk_mask2" type="number" min="0" max="32" value="${i2.ip4_mask??''}" placeholder="24" ${run?'readonly':''}></div>
       <div><div class="prop-label">带宽 bandwidth (bps)</div>
         <input class="prop-value" id="lk_bw" type="number" value="${o.bandwidth??''}" placeholder="默认"></div>
       <div><div class="prop-label">延迟 delay (µs)</div>
@@ -923,8 +931,9 @@ function showLinkProps() {
       <div class="full"><div class="prop-label">重复包 dup (%)</div>
         <input class="prop-value" id="lk_dup" type="number" step="0.1" value="${o.dup??''}" placeholder="默认"></div>
       <div class="full" style="color:var(--yellow);font-size:11px">
-        ⚠️ 接口 IP 不支持在线修改（CORE 协议限制），如需改 IP 请删除链路后以新 IP 重建。
-        QoS 参数（带宽/延迟/丢包等）可在线修改，留空保持原值。</div>
+        ${run
+          ? '⚠️ 运行中：接口 IP 已锁定（CORE 协议限制），仅可改 QoS（带宽/延迟/丢包等）。要改 IP 请先停止会话再打开本窗口。'
+          : 'ⓘ 未运行：接口 IP/掩码可编辑，保存时后端自动删链重建（保留原 QoS），一次保存即可完成改 IP + 改 QoS。'}</div>
     </div>`;
   document.getElementById('linkModal').style.display = 'flex';
 }
@@ -934,8 +943,8 @@ function saveLinkProps() {
   if (!l) return;
   const sid = state.currentSid;
   const url = `/api/sessions/${sid}/links`;
-  // 只收集 QoS 参数(options)。接口 IP 不支持在线修改(CORE 协议限制),
-  // 已在前端展示为只读。后端为合并式更新, 只覆盖传入字段, 其余保持。
+  const running = sessionRunning();
+  // QoS 参数：合并式更新，只覆盖传入字段；留空保持原值。
   const opts = {};
   const set = (id, k, num) => {
     const v = document.getElementById(id).value;
@@ -943,10 +952,35 @@ function saveLinkProps() {
   };
   set('lk_bw', 'bandwidth', true); set('lk_delay', 'delay', true);
   set('lk_loss', 'loss', true); set('lk_jitter', 'jitter', true); set('lk_dup', 'dup', true);
-  if (Object.keys(opts).length === 0) { addLog('未填写任何要修改的 QoS 参数', 'err'); return; }
   const body = { node1_id: l.node1_id, node2_id: l.node2_id, options: opts };
+  // 未运行 + 填写了 IP → 前端同时带 iface(新 ip4/ip4_mask)；后端会自动删链重建保留 QoS。
+  // 运行中 → 后端拒绝(409)，前端 IP 字段也已只读，不会走到这里。
+  const ipChanged = () =>
+    (document.getElementById('lk_ip1').value !== '' || document.getElementById('lk_mask1').value !== '')
+    || (document.getElementById('lk_ip2').value !== '' || document.getElementById('lk_mask2').value !== '');
+  if (!running && (Object.keys(opts).length > 0 || ipChanged())) {
+    const i1 = l.iface1 || {}, i2 = l.iface2 || {};
+    const rIp = (v, cur) => v !== '' ? v : (cur ?? null);
+    const rMask = (v, cur) => cur!==undefined && v==='' ? cur : (v==='' ? undefined : parseInt(v));
+    const ip1 = document.getElementById('lk_ip1').value;
+    const ip2 = document.getElementById('lk_ip2').value;
+    const mask1 = document.getElementById('lk_mask1').value;
+    const mask2 = document.getElementById('lk_mask2').value;
+    if (ip1 !== '' || mask1 !== '') {
+      body.iface1 = { id: i1.id !== undefined ? i1.id : 0,
+                      ip4: rIp(ip1, i1.ip4), ip4_mask: rMask(mask1, i1.ip4_mask) };
+    }
+    if (ip2 !== '' || mask2 !== '') {
+      body.iface2 = { id: i2.id !== undefined ? i2.id : 0,
+                      ip4: rIp(ip2, i2.ip4), ip4_mask: rMask(mask2, i2.ip4_mask) };
+    }
+  } else if (Object.keys(opts).length === 0) {
+    addLog('未填写任何要修改的参数', 'err'); return;
+  }
   api('PATCH', url, body)
-    .then(() => { closeModal('linkModal'); addLog(`链路 ${l.node1_id}-${l.node2_id} QoS 已更新`, 'ok'); return loadTopology(sid); })
+    .then(r => { closeModal('linkModal');
+      addLog(r.action === 'replace_ip' ? `链路 ${l.node1_id}-${l.node2_id} 接口 IP 已重建更新` : `链路 ${l.node1_id}-${l.node2_id} QoS 已更新`, 'ok');
+      return loadTopology(sid); })
     .catch(e => addLog('链路更新失败: '+(e.error||e), 'err'));
 }
 

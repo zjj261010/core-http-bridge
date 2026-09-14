@@ -660,27 +660,90 @@ def add_link(session_id: int, body: LinkModel):
 
 @app.patch("/api/sessions/{session_id}/links")
 def edit_link(session_id: int, body: LinkModel):
-    """编辑链路参数（bandwidth/delay/loss/jitter等）。
+    """编辑链路参数（bandwidth/delay/loss/jitter）及(未运行时)接口 IP。
 
-    注意: CORE 的 EditLinkRequest 协议只支持 iface1_id/iface2_id/options,
-    没有接口 ip4 字段 —— 不能通过本接口改接口 IP(需删链重建)。
+    与 CORE-GUI 行为对齐：
+    - 仅改 QoS options：任何状态都支持（CORE 运行中可改链路 QoS）；
+    - 会话运行中（RUNTIME/DATACOLLECT）请求改接口 IP → 拒绝 409
+      （CORE 协议 EditLinkRequest 无 ip4 字段，运行中不可在线改 IP）；
+    - 会话未运行 → 允许改 IP，桥后端内部先删链、再以新 IP 重建
+      （保留合并后的 QoS），前端一次调用即可完成"改 IP + 改 QoS"。
     """
-    # 合并式 options: 以当前链路的 options 为基准, 只覆盖传入的字段。
-    # 好处: 只改 delay 不会把 bandwidth/loss 等清零; options 缺省时也
-    # 复用当前值, 避免 None.to_proto() 崩溃。
+    # --- 1. 合并式 options: 以当前链路 options 为基准, 只覆盖传入字段 ---
     cur_dict: dict = {}
+    cur_if1: wrappers.Interface | None = None
+    cur_if2: wrappers.Interface | None = None
     try:
         s = bridge.get_session(session_id)
         for l in (s.links or []):
             if l.node1_id == body.node1_id and l.node2_id == body.node2_id:
                 if l.options:
                     cur_dict = _link_options_to_dict(l.options)
+                cur_if1 = l.iface1
+                cur_if2 = l.iface2
                 break
     except Exception:
         pass
     if body.options:
         cur_dict.update(body.options.model_dump(exclude_unset=True))
     merged = LinkOptionsModel(**cur_dict) if cur_dict else None
+
+    def _iface_with_ip(m: InterfaceModel | None, cur: wrappers.Interface | None) -> wrappers.Interface | None:
+        """重建接口：以当前接口为基准保留 id/name/mac/node_id/mtu,
+        覆盖 body 传入的 ip4/ip4_mask（未传的字段保留当前值）。"""
+        if m is None:
+            return cur
+        base = cur if cur else wrappers.Interface(id=m.id)
+        return wrappers.Interface(
+            id=base.id,
+            name=m.name if m.name is not None else base.name,
+            mac=m.mac if m.mac is not None else base.mac,
+            ip4=m.ip4 if m.ip4 is not None else base.ip4,
+            ip4_mask=m.ip4_mask if m.ip4_mask is not None else base.ip4_mask,
+            ip6=m.ip6 if m.ip6 is not None else base.ip6,
+            ip6_mask=m.ip6_mask if m.ip6_mask is not None else base.ip6_mask,
+            mtu=m.mtu if m.mtu is not None else base.mtu,
+            node_id=base.node_id,
+        )
+
+    # --- 2. 是否请求了接口 IP 变更 ---
+    want_ip = bool(
+        (body.iface1 and (body.iface1.ip4 is not None or body.iface1.ip4_mask is not None))
+        or (body.iface2 and (body.iface2.ip4 is not None or body.iface2.ip4_mask is not None))
+    )
+
+    if want_ip:
+        state = None
+        try:
+            state = bridge.get_session(session_id).state
+        except Exception:
+            pass
+        running = state in (wrappers.SessionState.RUNTIME, wrappers.SessionState.DATACOLLECT)
+        if running:
+            return _error_response(
+                409,
+                f"会话运行中({state.name})不可在线修改接口 IP",
+                detail="CORE 协议 EditLinkRequest 无 ip4 字段，运行中接口 IP 被锁定；"
+                       "要改 IP 请先停止会话（POST /api/sessions/{id}/stop）再 PATCH，"
+                       "桥后端会自动删链重建；或运行中直接删链后以新 IP 重建。"
+                       "仅 QoS（带宽/时延/丢包等）在运行中可改。",
+                hint="先停止会话，再改 IP；QoS 可直接改",
+            )
+        # 未运行：删链 + 以新 IP 重建（保留原接口 id/name/mac 与合并后的 QoS）
+        nif1 = _iface_with_ip(body.iface1, cur_if1)
+        nif2 = _iface_with_ip(body.iface2, cur_if2)
+        bridge.delete_link(session_id, wrappers.Link(
+            node1_id=body.node1_id, node2_id=body.node2_id,
+            iface1=nif1, iface2=nif2,
+        ))
+        bridge.add_link(session_id, wrappers.Link(
+            node1_id=body.node1_id, node2_id=body.node2_id,
+            iface1=nif1, iface2=nif2,
+            options=_wrappers_link_opts(merged),
+        ))
+        return {"result": True, "action": "replace_ip", "state": state.name}
+
+    # --- 3. 仅 QoS：走 EditLink（保留 id，不含 ip4）---
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
         # 协议只用 iface 的 id(接口序号), ip4 等字段传不上去, 保留 id 即可
