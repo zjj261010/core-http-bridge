@@ -543,15 +543,27 @@ curl -X POST http://localhost:8080/api/sessions/1/links \
 
 **返回（200）：** `{"result": true}`
 
+**用途：修改链路 QoS 参数（bandwidth/delay/loss/jitter/dup 等）。**
+
+> ⚠️ **接口 IP 不支持通过本接口修改。** CORE 的 `EditLinkRequest` 协议只包含 `iface1_id / iface2_id / options` 字段，**没有 ip4 字段** —— 协议层面无法在线改接口 IP。要改 IP 只能**删除链路后以新 IP 重建**（`DELETE /links` + `POST /links`）。
+>
+> options 为**合并式更新**：以链路当前 QoS 为基准，只覆盖请求体里传入的字段，未传入的参数保持原值（不会清零）。
+
 **示例：**
 ```bash
+# 只改 delay（bandwidth 等其他参数保持原值）
 curl -X PATCH http://localhost:8080/api/sessions/1/links \
   -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,
-       "iface1":{"id":0},"iface2":{"id":0},
-       "options":{"bandwidth":200000000,"delay":1000}}'
+  -d '{"node1_id":1,"node2_id":2,"options":{"delay":1000}}'
+# [200] {"result": true}
+
+curl -X PATCH http://localhost:8080/api/sessions/1/links \
+  -H "Content-Type: application/json" \
+  -d'{"node1_id":1,"node2_id":2,"options":{"bandwidth":200000000,"delay":1000}}'
 # [200] {"result": true}
 ```
+
+> 查询链路当前接口 IP / QoS：`GET /api/sessions/{id}` 的 `links[]`，每条的 `iface1/iface2`（`id/ip4/ip4_mask`）与 `options`（QoS）。
 
 ---
 

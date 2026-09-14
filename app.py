@@ -660,11 +660,33 @@ def add_link(session_id: int, body: LinkModel):
 
 @app.patch("/api/sessions/{session_id}/links")
 def edit_link(session_id: int, body: LinkModel):
-    """编辑链路参数（bandwidth/delay/loss/jitter等）"""
+    """编辑链路参数（bandwidth/delay/loss/jitter等）。
+
+    注意: CORE 的 EditLinkRequest 协议只支持 iface1_id/iface2_id/options,
+    没有接口 ip4 字段 —— 不能通过本接口改接口 IP(需删链重建)。
+    """
+    # 合并式 options: 以当前链路的 options 为基准, 只覆盖传入的字段。
+    # 好处: 只改 delay 不会把 bandwidth/loss 等清零; options 缺省时也
+    # 复用当前值, 避免 None.to_proto() 崩溃。
+    cur_dict: dict = {}
+    try:
+        s = bridge.get_session(session_id)
+        for l in (s.links or []):
+            if l.node1_id == body.node1_id and l.node2_id == body.node2_id:
+                if l.options:
+                    cur_dict = _link_options_to_dict(l.options)
+                break
+    except Exception:
+        pass
+    if body.options:
+        cur_dict.update(body.options.model_dump(exclude_unset=True))
+    merged = LinkOptionsModel(**cur_dict) if cur_dict else None
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
-        iface1=_wrappers_iface(body.iface1), iface2=_wrappers_iface(body.iface2),
-        options=_wrappers_link_opts(body.options),
+        # 协议只用 iface 的 id(接口序号), ip4 等字段传不上去, 保留 id 即可
+        iface1=_wrappers_iface(body.iface1) if body.iface1 else None,
+        iface2=_wrappers_iface(body.iface2) if body.iface2 else None,
+        options=_wrappers_link_opts(merged),
     )
     return {"result": bridge.edit_link(session_id, link)}
 

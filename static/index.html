@@ -46,14 +46,19 @@ a:hover { text-decoration: underline; }
 /* ── Topology canvas ── */
 .canvas-area { flex: 1; position: relative; overflow: hidden; background: radial-gradient(ellipse at center, #1a2332 0%, #0f172a 100%); }
 .canvas-area svg { width: 100%; height: 100%; }
-.node-box { position: absolute; width: 120px; height: 80px; background: var(--bg2); border: 2px solid var(--bg3); border-radius: var(--radius); cursor: grab; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; box-shadow: var(--shadow); transition: border-color 0.2s; user-select: none; }
+.node-box { position: absolute; width: 120px; height: 80px; background: var(--bg2); border: 2px solid var(--bg3); border-radius: var(--radius); cursor: grab; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 13px; font-weight: 500; box-shadow: var(--shadow); transition: border-color 0.2s; user-select: none; pointer-events: auto; }
 .node-box:hover { border-color: var(--accent); }
 .node-box.selected { border-color: var(--accent2); box-shadow: 0 0 0 3px rgba(59,130,246,0.3); }
 .node-box .icon { font-size: 24px; margin-bottom: 4px; }
 .node-box .label { font-size: 11px; color: var(--fg2); }
 .node-box .ip { font-size: 10px; color: var(--fg2); margin-top: 2px; }
-.link-line { stroke: var(--fg2); stroke-width: 2; fill: none; }
+.link-line { stroke: var(--fg2); stroke-width: 2; fill: none; pointer-events: none; }
 .link-line:hover { stroke: var(--accent2); stroke-width: 3; }
+.link-line.selected { stroke: var(--accent2); stroke-width: 3; box-shadow: none; }
+/* 透明粗 hit 线承载点击, 命中带 ±7px, 解决细线难选中 */
+.link-hit { stroke: transparent; stroke-width: 16; fill: none; stroke-linecap: round; cursor: pointer; }
+#linksSvg text { pointer-events: all; cursor: pointer; }
+#linksSvg .link-hit:hover + .link-line { stroke: var(--accent2); stroke-width: 3; }
 
 /* ── Bottom panel ── */
 .bottom-panel { height: 220px; min-height: 220px; background: var(--bg2); border-top: 1px solid var(--bg3); display: flex; flex-direction: column; }
@@ -175,8 +180,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 
   <!-- Canvas -->
   <div class="canvas-area" id="canvas">
-    <svg id="linksSvg"></svg>
-    <div id="nodesContainer" style="position:absolute;inset:0">
+    <svg id="linksSvg" style="position:absolute;inset:0;pointer-events:none;z-index:1"></svg>
+    <div id="nodesContainer" style="position:absolute;inset:0;pointer-events:none">
       <div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>选择一个会话以查看拓扑</p></div>
     </div>
   </div>
@@ -245,6 +250,7 @@ let state = {
   nodes: {},
   links: [],
   selectedNode: null,
+  selectedLink: null,
   dragging: null,
   dragOffset: {x:0, y:0},
   eventSource: null,
@@ -341,6 +347,7 @@ async function loadTopology(sid) {
     }
     state.nodes = nodesMap;
     state.links = data.links || [];
+    state.selectedLink = null;
 
     /* merge localStorage - only name/model/services/icon, NOT position */
     try {
@@ -397,6 +404,7 @@ function renderTopology() {
   // Compute link lines
   let linkSvg = '';
   const linkMap = {};
+  const selKey = state.selectedLink ? [state.selectedLink.node1_id, state.selectedLink.node2_id].sort().join('-') : null;
   for (const l of state.links) {
     const n1 = state.nodes[l.node1_id];
     const n2 = state.nodes[l.node2_id];
@@ -407,10 +415,14 @@ function renderTopology() {
     const x1 = n1.x + 60, y1 = n1.y + 40;
     const x2 = n2.x + 60, y2 = n2.y + 40;
     const label = l.iface1?.ip4 || l.iface2?.ip4 ? `${l.iface1?.ip4||''} ↔ ${l.iface2?.ip4||''}` : '';
-    linkSvg += `<line class="link-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    const sel = key === selKey ? ' selected' : '';
+    // 可见细线 stroke-width:2 命中带太小(±1px), 肉眼看着点上实际差 1px 就不触发。
+    // 标准解法: 先垫一条透明粗 hit 线(16px, round cap)承载点击, 可见线不参与命中。
+    linkSvg += `<line class="link-hit" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" onclick="selectLink(${l.node1_id}, ${l.node2_id})"/>`;
+    linkSvg += `<line class="link-line${sel}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
     if (label) {
       const mx = (x1+x2)/2, my = (y1+y2)/2;
-      linkSvg += `<text x="${mx}" y="${my-8}" text-anchor="middle" fill="#94a3b8" font-size="10">${label}</text>`;
+      linkSvg += `<text x="${mx}" y="${my-8}" text-anchor="middle" fill="#94a3b8" font-size="10" onclick="selectLink(${l.node1_id}, ${l.node2_id})" style="cursor:pointer">${label}</text>`;
     }
   }
   svg.innerHTML = linkSvg;
@@ -736,6 +748,16 @@ init();
 </div>
 </div></div>
 
+<div id="linkModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal('linkModal')">
+<div class="modal" style="width:520px">
+<div class="modal-header"><h2 id="linkModalTitle">Link Properties</h2><button class="btn-icon" onclick="closeModal('linkModal')">✕</button></div>
+<div class="modal-body" id="linkModalBody"></div>
+<div class="modal-footer">
+  <button class="btn btn-secondary" onclick="closeModal('linkModal')">Cancel</button>
+  <button class="btn btn-primary" onclick="saveLinkProps()">Save</button>
+</div>
+</div></div>
+
 <script>
 // ── Context Menu ──
 var ctxNodeId = null;
@@ -848,6 +870,84 @@ function saveNodeProps() {
   renderTopology();
   closeModal('propModal');
   addLog('Node '+nid+' properties saved', 'ok');
+}
+
+// ── Link Properties(链路查询/修改) ──
+function linkKey(n1, n2) { return [n1, n2].sort((a,b)=>a-b).join('-'); }
+
+function findLink(n1, n2) {
+  const key = linkKey(n1, n2);
+  for (const l of state.links) {
+    if (linkKey(l.node1_id, l.node2_id) === key) return l;
+  }
+  return null;
+}
+
+function selectLink(n1, n2) {
+  const l = findLink(n1, n2);
+  if (!l) { addLog('链路未找到: '+n1+'-'+n2, 'err'); return; }
+  state.selectedLink = l;
+  renderTopology();
+  showLinkProps();
+}
+
+function showLinkProps() {
+  const l = state.selectedLink;
+  if (!l) return;
+  const n1 = state.nodes[l.node1_id];
+  const n2 = state.nodes[l.node2_id];
+  const name1 = n1 ? n1.name : 'node'+l.node1_id;
+  const name2 = n2 ? n2.name : 'node'+l.node2_id;
+  const i1 = l.iface1 || {}, i2 = l.iface2 || {};
+  const o = l.options || {};
+  document.getElementById('linkModalTitle').textContent =
+    `🔗 ${name1} (${l.node1_id}) ↔ ${name2} (${l.node2_id})`;
+  document.getElementById('linkModalBody').innerHTML = `
+    <div class="prop-grid">
+      <div><div class="prop-label">接口1 ID</div>
+        <input class="prop-value" value="${i1.id ?? ''}" readonly></div>
+      <div><div class="prop-label">接口2 ID</div>
+        <input class="prop-value" value="${i2.id ?? ''}" readonly></div>
+      <div><div class="prop-label">接口1 IP (node ${l.node1_id}, 只读)</div>
+        <input class="prop-value" value="${i1.ip4||'(系统自动分配)'}" readonly></div>
+      <div><div class="prop-label">接口2 IP (node ${l.node2_id}, 只读)</div>
+        <input class="prop-value" value="${i2.ip4||'(系统自动分配)'}" readonly></div>
+      <div><div class="prop-label">带宽 bandwidth (bps)</div>
+        <input class="prop-value" id="lk_bw" type="number" value="${o.bandwidth??''}" placeholder="默认"></div>
+      <div><div class="prop-label">延迟 delay (µs)</div>
+        <input class="prop-value" id="lk_delay" type="number" value="${o.delay??''}" placeholder="默认"></div>
+      <div><div class="prop-label">丢包 loss (%)</div>
+        <input class="prop-value" id="lk_loss" type="number" step="0.1" value="${o.loss??''}" placeholder="默认"></div>
+      <div><div class="prop-label">抖动 jitter (µs)</div>
+        <input class="prop-value" id="lk_jitter" type="number" value="${o.jitter??''}" placeholder="默认"></div>
+      <div class="full"><div class="prop-label">重复包 dup (%)</div>
+        <input class="prop-value" id="lk_dup" type="number" step="0.1" value="${o.dup??''}" placeholder="默认"></div>
+      <div class="full" style="color:var(--yellow);font-size:11px">
+        ⚠️ 接口 IP 不支持在线修改（CORE 协议限制），如需改 IP 请删除链路后以新 IP 重建。
+        QoS 参数（带宽/延迟/丢包等）可在线修改，留空保持原值。</div>
+    </div>`;
+  document.getElementById('linkModal').style.display = 'flex';
+}
+
+function saveLinkProps() {
+  const l = state.selectedLink;
+  if (!l) return;
+  const sid = state.currentSid;
+  const url = `/api/sessions/${sid}/links`;
+  // 只收集 QoS 参数(options)。接口 IP 不支持在线修改(CORE 协议限制),
+  // 已在前端展示为只读。后端为合并式更新, 只覆盖传入字段, 其余保持。
+  const opts = {};
+  const set = (id, k, num) => {
+    const v = document.getElementById(id).value;
+    if (v !== '') opts[k] = num ? (k==='loss'||k==='dup' ? parseFloat(v) : parseInt(v)) : v;
+  };
+  set('lk_bw', 'bandwidth', true); set('lk_delay', 'delay', true);
+  set('lk_loss', 'loss', true); set('lk_jitter', 'jitter', true); set('lk_dup', 'dup', true);
+  if (Object.keys(opts).length === 0) { addLog('未填写任何要修改的 QoS 参数', 'err'); return; }
+  const body = { node1_id: l.node1_id, node2_id: l.node2_id, options: opts };
+  api('PATCH', url, body)
+    .then(() => { closeModal('linkModal'); addLog(`链路 ${l.node1_id}-${l.node2_id} QoS 已更新`, 'ok'); return loadTopology(sid); })
+    .catch(e => addLog('链路更新失败: '+(e.error||e), 'err'));
 }
 
 function copyNodeJson(nid) {
