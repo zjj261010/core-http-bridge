@@ -472,7 +472,7 @@ def _wrappers_link_opts(m: LinkOptionsModel | None) -> wrappers.LinkOptions | No
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
-async def health():
+def health():
     if bridge is None:
         return _error_response(503, "bridge not initialized", hint="check server startup logs")
     try:
@@ -492,7 +492,7 @@ if os.path.isdir(_static_dir):
 # ── Frontend SPA ──
 
 @app.get("/term.html", include_in_schema=False)
-async def term_page():
+def term_page():
     """Redirect to static term page."""
     import os
     path = os.path.join(os.path.dirname(__file__), "static", "term.html")
@@ -502,7 +502,7 @@ async def term_page():
     return HTMLResponse("<h1>Terminal page not found</h1>")
 
 @app.get("/", include_in_schema=False)
-async def index():
+def index():
     """Serve the frontend SPA from static/."""
     path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     if os.path.exists(path):
@@ -510,44 +510,44 @@ async def index():
             return HTMLResponse(content=f.read())
     return HTMLResponse("<h1>CORE HTTP Bridge</h1><p>Frontend not found.</p>")
 @app.get("/api/sessions")
-async def list_sessions():
+def list_sessions():
     """获取所有会话摘要列表"""
     sessions = bridge.get_sessions()
     return [_session_summary_to_dict(s) for s in sessions]
 
 @app.post("/api/sessions", status_code=201)
-async def create_session(body: dict | None = None):
+def create_session(body: dict | None = None):
     """创建新会话"""
     session_id = body.get("session_id") if body else None
     s = bridge.create_session(session_id)
     return _session_to_dict(s)
 
 @app.get("/api/sessions/{session_id}")
-async def get_session(session_id: int):
+def get_session(session_id: int):
     """获取指定会话详情"""
     s = bridge.get_session(session_id)
     return _session_to_dict(s)
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: int):
+def delete_session(session_id: int):
     """删除会话"""
     result = bridge.delete_session(session_id)
     return {"result": result}
 
 @app.get("/api/sessions/{session_id}/check")
-async def check_session(session_id: int):
+def check_session(session_id: int):
     """检查会话是否存在"""
     return {"result": bridge.check_session(session_id)}
 
 @app.post("/api/sessions/{session_id}/start")
-async def start_session(session_id: int, body: StartSessionRequest):
+def start_session(session_id: int, body: StartSessionRequest):
     """启动会话 (definition=True 仅定义, False 实例化并启动服务)"""
     s = bridge.get_session(session_id)
     result, exceptions = bridge.start_session(s, definition=body.definition)
     return {"result": result, "exceptions": exceptions}
 
 @app.post("/api/sessions/{session_id}/stop")
-async def stop_session(session_id: int):
+def stop_session(session_id: int):
     """停止运行中的会话。停止后保留拓扑定义（节点/链路不丢失），
     状态重置为 DEFINITION_STATE，可再次 start。"""
     try:
@@ -570,7 +570,7 @@ async def stop_session(session_id: int):
         return _error_response(500, "internal server error", detail=str(e)[:200])
 
 @app.post("/api/sessions/{session_id}/alert")
-async def session_alert(session_id: int, body: AlertBody):
+def session_alert(session_id: int, body: AlertBody):
     """发送告警到会话"""
     level_map = {
         "DEFAULT": wrappers.AlertLevel.DEFAULT,
@@ -591,14 +591,14 @@ async def session_alert(session_id: int, body: AlertBody):
 # ===================================================================
 
 @app.post("/api/sessions/{session_id}/nodes", status_code=201)
-async def add_node(session_id: int, body: NodeModel):
+def add_node(session_id: int, body: NodeModel):
     """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)"""
     node = _wrappers_node(body)
     node_id = bridge.add_node(session_id, node)
     return {"node_id": node_id}
 
 @app.get("/api/sessions/{session_id}/nodes/{node_id}")
-async def get_node(session_id: int, node_id: int):
+def get_node(session_id: int, node_id: int):
     """获取节点详情（含接口和链路）"""
     node, ifaces, links = bridge.get_node(session_id, node_id)
     return {
@@ -608,17 +608,17 @@ async def get_node(session_id: int, node_id: int):
     }
 
 @app.patch("/api/sessions/{session_id}/nodes/{node_id}")
-async def edit_node(session_id: int, node_id: int, icon: str | None = None):
+def edit_node(session_id: int, node_id: int, icon: str | None = None):
     """编辑节点图标"""
     return {"result": bridge.edit_node(session_id, node_id, icon=icon)}
 
 @app.delete("/api/sessions/{session_id}/nodes/{node_id}")
-async def delete_node(session_id: int, node_id: int):
+def delete_node(session_id: int, node_id: int):
     """删除节点"""
     return {"result": bridge.delete_node(session_id, node_id)}
 
 @app.post("/api/sessions/{session_id}/nodes/{node_id}/move")
-async def move_node(session_id: int, node_id: int,
+def move_node(session_id: int, node_id: int,
                     position: PositionModel | None = None, geo: GeoModel | None = None):
     """移动节点（坐标或经纬度）"""
     if not position and not geo:
@@ -628,15 +628,13 @@ async def move_node(session_id: int, node_id: int,
     return {"result": bridge.move_node(session_id, node_id, position=pos, geo=g)}
 
 @app.post("/api/sessions/{session_id}/nodes/{node_id}/command")
-async def node_command(session_id: int, node_id: int, body: NodeCommandRequest):
-    """在节点上执行命令（需要会话已启动）。通过线程池执行，不阻塞事件循环。"""
-    import asyncio
-    func = lambda: bridge.node_command(session_id, node_id, body.command, body.wait, body.shell)
-    rc, output = await asyncio.to_thread(func)
+def node_command(session_id: int, node_id: int, body: NodeCommandRequest):
+    """在节点上执行命令（需要会话已启动）。同步 def 交由 FastAPI 线程池执行，不阻塞事件循环。"""
+    rc, output = bridge.node_command(session_id, node_id, body.command, body.wait, body.shell)
     return {"return_code": rc, "output": output}
 
 @app.get("/api/sessions/{session_id}/nodes/{node_id}/terminal")
-async def get_node_terminal(session_id: int, node_id: int):
+def get_node_terminal(session_id: int, node_id: int):
     """获取节点的终端命令字符串"""
     return {"terminal": bridge.get_node_terminal(session_id, node_id)}
 
@@ -646,7 +644,7 @@ async def get_node_terminal(session_id: int, node_id: int):
 # ===================================================================
 
 @app.post("/api/sessions/{session_id}/links", status_code=201)
-async def add_link(session_id: int, body: LinkModel):
+def add_link(session_id: int, body: LinkModel):
     """添加链路"""
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
@@ -661,7 +659,7 @@ async def add_link(session_id: int, body: LinkModel):
     }
 
 @app.patch("/api/sessions/{session_id}/links")
-async def edit_link(session_id: int, body: LinkModel):
+def edit_link(session_id: int, body: LinkModel):
     """编辑链路参数（bandwidth/delay/loss/jitter等）"""
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
@@ -671,7 +669,7 @@ async def edit_link(session_id: int, body: LinkModel):
     return {"result": bridge.edit_link(session_id, link)}
 
 @app.delete("/api/sessions/{session_id}/links")
-async def delete_link(session_id: int, body: LinkModel):
+def delete_link(session_id: int, body: LinkModel):
     """删除链路"""
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
@@ -680,7 +678,7 @@ async def delete_link(session_id: int, body: LinkModel):
     return {"result": bridge.delete_link(session_id, link)}
 
 @app.post("/api/sessions/{session_id}/links/linked")
-async def linked(session_id: int, body: LinkedRequest):
+def linked(session_id: int, body: LinkedRequest):
     """切换链路通断（Linked=False 断开, True 接通）"""
     bridge.linked(session_id, body.node1_id, body.node2_id,
                   body.iface1_id, body.iface2_id, body.linked)
@@ -692,17 +690,17 @@ async def linked(session_id: int, body: LinkedRequest):
 # ===================================================================
 
 @app.get("/api/sessions/{session_id}/wlan/{node_id}")
-async def get_wlan_config(session_id: int, node_id: int):
+def get_wlan_config(session_id: int, node_id: int):
     """获取 WLAN 配置"""
     return _config_option_dict_to_dict(bridge.get_wlan_config(session_id, node_id))
 
 @app.post("/api/sessions/{session_id}/wlan")
-async def set_wlan_config(session_id: int, body: SetWlanConfigBody):
+def set_wlan_config(session_id: int, body: SetWlanConfigBody):
     """设置 WLAN 配置（range/bandwidth/delay/jitter/error等）"""
     return {"result": bridge.set_wlan_config(session_id, body.wlan_id, body.config)}
 
 @app.post("/api/sessions/{session_id}/wlan/link")
-async def wlan_link(session_id: int, body: WlanLinkBody):
+def wlan_link(session_id: int, body: WlanLinkBody):
     """WLAN 节点间链路控制"""
     return {"result": bridge.wlan_link(session_id, body.wlan_id, body.node1_id,
                                         body.node2_id, body.linked)}
@@ -713,17 +711,17 @@ async def wlan_link(session_id: int, body: WlanLinkBody):
 # ===================================================================
 
 @app.get("/api/sessions/{session_id}/mobility/{node_id}")
-async def get_mobility_config(session_id: int, node_id: int):
+def get_mobility_config(session_id: int, node_id: int):
     """获取移动模型配置"""
     return _config_option_dict_to_dict(bridge.get_mobility_config(session_id, node_id))
 
 @app.post("/api/sessions/{session_id}/mobility")
-async def set_mobility_config(session_id: int, body: SetMobilityConfigBody):
+def set_mobility_config(session_id: int, body: SetMobilityConfigBody):
     """设置移动模型配置"""
     return {"result": bridge.set_mobility_config(session_id, body.node_id, body.config)}
 
 @app.post("/api/sessions/{session_id}/mobility/action")
-async def mobility_action(session_id: int, body: MobilityActionRequest):
+def mobility_action(session_id: int, body: MobilityActionRequest):
     """移动模型动作控制 (START/PAUSE/STOP)"""
     action_map = {"START": wrappers.MobilityAction.START,
                   "PAUSE": wrappers.MobilityAction.PAUSE,
@@ -740,7 +738,7 @@ async def mobility_action(session_id: int, body: MobilityActionRequest):
 # ===================================================================
 
 @app.get("/api/sessions/{session_id}/services/defaults")
-async def get_service_defaults(session_id: int, node_id: int, name: str):
+def get_service_defaults(session_id: int, node_id: int, name: str):
     """获取服务默认配置"""
     d = bridge.get_service_defaults(session_id, node_id, name)
     return {
@@ -750,17 +748,17 @@ async def get_service_defaults(session_id: int, node_id: int, name: str):
     }
 
 @app.get("/api/sessions/{session_id}/services/node")
-async def get_node_service(session_id: int, node_id: int, name: str):
+def get_node_service(session_id: int, node_id: int, name: str):
     """获取节点上某服务的配置值"""
     return {"config": bridge.get_node_service(session_id, node_id, name)}
 
 @app.get("/api/sessions/{session_id}/services/rendered")
-async def get_service_rendered(session_id: int, node_id: int, name: str):
+def get_service_rendered(session_id: int, node_id: int, name: str):
     """获取服务渲染后的文件内容"""
     return {"rendered": bridge.get_service_rendered(session_id, node_id, name)}
 
 @app.post("/api/sessions/{session_id}/services/action")
-async def service_action(session_id: int, body: ServiceActionRequest):
+def service_action(session_id: int, body: ServiceActionRequest):
     """服务动作: START/STOP/RESTART/VALIDATE"""
     action_map = {"START": wrappers.ServiceAction.START,
                   "STOP": wrappers.ServiceAction.STOP,
@@ -773,7 +771,7 @@ async def service_action(session_id: int, body: ServiceActionRequest):
     return {"result": bridge.service_action(session_id, body.node_id, body.service, action)}
 
 @app.post("/api/services/create")
-async def create_service(body: CreateServiceRequest):
+def create_service(body: CreateServiceRequest):
     """运行时创建自定义服务"""
     service = wrappers.Service(
         name=body.name, group=body.group,
@@ -789,13 +787,13 @@ async def create_service(body: CreateServiceRequest):
 # ===================================================================
 
 @app.post("/api/sessions/{session_id}/wireless/linked")
-async def wireless_linked(session_id: int, body: WirelessLinkedBody):
+def wireless_linked(session_id: int, body: WirelessLinkedBody):
     """控制 Wireless 节点间链路通断"""
     bridge.wireless_linked(session_id, body.wireless_id, body.node1_id, body.node2_id, body.linked)
     return {"result": True}
 
 @app.get("/api/sessions/{session_id}/wireless/{node_id}")
-async def get_wireless_config(session_id: int, node_id: int):
+def get_wireless_config(session_id: int, node_id: int):
     """获取 Wireless 节点配置"""
     return _config_option_dict_to_dict(bridge.get_wireless_config(session_id, node_id))
 
@@ -805,31 +803,31 @@ async def get_wireless_config(session_id: int, node_id: int):
 # ===================================================================
 
 @app.get("/api/sessions/{session_id}/emane/model")
-async def get_emane_model_config(session_id: int, node_id: int, model: str, iface_id: int = -1):
+def get_emane_model_config(session_id: int, node_id: int, model: str, iface_id: int = -1):
     """获取 EMANE 模型配置"""
     return _config_option_dict_to_dict(
         bridge.get_emane_model_config(session_id, node_id, model, iface_id))
 
 @app.post("/api/sessions/{session_id}/emane/model")
-async def set_emane_model_config(session_id: int, body: SetEmaneModelConfigBody):
+def set_emane_model_config(session_id: int, body: SetEmaneModelConfigBody):
     """设置 EMANE 模型配置"""
     emc = wrappers.EmaneModelConfig(node_id=body.node_id, model=body.model,
                                      config=body.config, iface_id=body.iface_id)
     return {"result": bridge.set_emane_model_config(session_id, emc)}
 
 @app.get("/api/sessions/{session_id}/emane/channel")
-async def get_emane_event_channel(session_id: int, nem_id: int):
+def get_emane_event_channel(session_id: int, nem_id: int):
     """获取 EMANE 事件通道信息"""
     ch = bridge.get_emane_event_channel(session_id, nem_id)
     return {"group": ch.group, "port": ch.port, "device": ch.device}
 
 @app.post("/api/sessions/{session_id}/emane/link")
-async def emane_link(session_id: int, body: EmaneLinkBody):
+def emane_link(session_id: int, body: EmaneLinkBody):
     """EMANE NEM 链路控制"""
     return {"result": bridge.emane_link(session_id, body.nem1, body.nem2, body.linked)}
 
 @app.post("/api/sessions/{session_id}/emane/pathlosses")
-async def emane_pathlosses(session_id: int, body: EmanePathlossesBody):
+def emane_pathlosses(session_id: int, body: EmanePathlossesBody):
     """发布 EMANE 路径损耗（单次）"""
     pl = client.EmanePathlossesStreamer()
     import threading
@@ -848,7 +846,7 @@ async def emane_pathlosses(session_id: int, body: EmanePathlossesBody):
 # ===================================================================
 
 @app.get("/api/sessions/{session_id}/xml")
-async def save_xml(session_id: int):
+def save_xml(session_id: int):
     """导出会话为 EmulationScript XML"""
     path = Path(f"/tmp/core_session_{session_id}.xml")
     bridge.save_xml(session_id, str(path))
@@ -856,7 +854,7 @@ async def save_xml(session_id: int):
     return JSONResponse(content={"data": data.decode("utf-8"), "session_id": session_id})
 
 @app.post("/api/xml/open")
-async def open_xml(body: OpenXmlBody):
+def open_xml(body: OpenXmlBody):
     """从 XML 字符串导入会话"""
     path = Path("/tmp/import_core.xml")
     path.write_text(body.data)
@@ -869,12 +867,12 @@ async def open_xml(body: OpenXmlBody):
 # ===================================================================
 
 @app.get("/api/interfaces")
-async def get_interfaces():
+def get_interfaces():
     """获取宿主机可用网络接口"""
     return {"interfaces": bridge.get_interfaces()}
 
 @app.post("/api/execute")
-async def execute_script(body: ExecuteScriptBody):
+def execute_script(body: ExecuteScriptBody):
     """在 CoreEmu 上下文中执行 Python 脚本"""
     path = "/tmp/exec_script.py"
     Path(path).write_text(body.script)
@@ -887,7 +885,7 @@ async def execute_script(body: ExecuteScriptBody):
 # ===================================================================
 
 @app.get("/api/config")
-async def get_config():
+def get_config():
     """获取系统全局配置（可用服务列表 + EMANE 模型列表）"""
     cfg = bridge.get_config()
     return {
@@ -1070,7 +1068,7 @@ _NODE_TYPE_MAP = {
 }
 
 
-async def _build_topology(session_id: int, topo: "TopologyInput"):
+def _build_topology(session_id: int, topo: "TopologyInput"):
     """将 TopologyInput 转换为 session 中的节点和链路。"""
     iface_id_counter: dict[int, int] = {}
 
@@ -1234,10 +1232,10 @@ async def import_topology(request: Request):
                                hint="supported: application/json, application/xml")
 
     try:
-        session = bridge.create_session()
+        session = await asyncio.to_thread(bridge.create_session)
         # Build topology directly via gRPC — no start_session needed
         # (start_session calls session.clear() internally which would wipe everything)
-        await _build_topology(session.id, topo)
+        await asyncio.to_thread(_build_topology, session.id, topo)
         return {
             "session_id": session.id,
             "name": topo.name,
