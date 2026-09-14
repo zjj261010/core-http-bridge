@@ -34,7 +34,7 @@ body { background:#0a0a0a; color:#0f0; font-family:monospace; height:100vh; disp
   <span class="label" id="nodeLabel">node: --</span>
   <span class="label" id="sessionLabel">session: --</span>
 </div>
-<div id="output"><span class="info">[Ready. Click Connect.]</span></div>
+<div id="output"><span class="info">[Connecting...]</span></div>
 <div class="input-bar">
   <button id="connBtn" onclick="toggleConn()">🔗 Connect</button>
   <span id="status">disconnected</span>
@@ -64,6 +64,66 @@ function log(msg, cls) {
   if (out.children.length > 200) out.removeChild(out.firstChild);
 }
 
+// --- ANSI 转义序列解码器 ---
+// 后端给 vcmd 挂了真实 PTY, 交互 bash/readline 会输出 bracketed-paste
+// ([?2004h/[?2004l)、光标定位、颜色等 CSI 转义序列。这些序列直接 append
+// 会显示成乱码, 这里逐字符解码: 剥离 CSI/OSC 序列、正确处理 \r \b 覆盖重绘。
+var _curLine = '';   // 当前物理行(会被 \r 从头覆盖)
+var _pos = 0;        // 当前列位置
+var _ansi = '';      // 正在累积的转义序列
+
+function _appendLine() {
+  var div = document.createElement('div');
+  div.textContent = _curLine;
+  out.appendChild(div);
+  _curLine = ''; _pos = 0;
+  out.scrollTop = out.scrollHeight;
+  if (out.children.length > 200) out.removeChild(out.firstChild);
+}
+
+function _writeChar(c) {
+  if (_pos < _curLine.length) {
+    // 覆盖已渲染的字符(PTY 的 \r + 重绘用)
+    var before = _curLine.slice(0, _pos) + c;
+    var after = _curLine.slice(_pos + 1);
+    _curLine = before + after;
+  } else {
+    _curLine += c;
+  }
+  _pos++;
+}
+
+// 把后端发来的裸字节流渲染成可读文本
+function feedTerminal(data) {
+  for (var i = 0; i < data.length; i++) {
+    var c = data.charAt(i);
+    if (_ansi !== '') {
+      // 正在累积 ESC 序列
+      _ansi += c;
+      // CSI 序列 (ESC[...) 以 0x40-0x7E 的字母结尾; OSC(ESC]、DCS(ESC P)
+      // 等多字节序列走超长保护丢弃
+      if (_ansi.charCodeAt(0) === 27) {
+        if (_ansi.length > 2 && _ansi.charAt(1) === '[') {
+          if (c >= '@' && c <= '~') { _ansi = ''; }       // CSI 结束
+          else if (_ansi.length > 256) { _ansi = ''; }
+        } else if (_ansi.length > 2 && (c === '\x07' || c === '\x9c')) {
+          _ansi = '';                                      // OSC 遇 BEL/ST 结束
+        } else if (_ansi.length > 100) { _ansi = ''; }     // 未知序列丢弃
+      } else {
+        _ansi = '';
+      }
+      continue;
+    }
+    if (c === '\x1b') { _ansi = '\x1b'; continue; }
+    if (c === '\r') { _pos = 0; continue; }   // 回到行首(覆盖重绘)
+    if (c === '\n') { _appendLine(); continue; }
+    if (c === '\x08') { if (_pos > 0) _pos--; continue; }  // 退格
+    if (c === '\x07') { continue; }           // 响铃忽略
+    if (c < '\x20') { continue; }             // 其它控制符忽略
+    _writeChar(c);
+  }
+}
+
 function toggleConn() {
   if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); return; }
   if (!sid || !nid) { log('Missing session or node ID', 'err'); return; }
@@ -78,9 +138,7 @@ function toggleConn() {
       log('[Connected to ' + nm + ']', 'info');
     };
     ws.onmessage = function(e) {
-      out.appendChild(document.createTextNode(e.data));
-      out.scrollTop = out.scrollHeight;
-      if (out.children.length > 200) out.removeChild(out.firstChild);
+      feedTerminal(e.data);
     };
     ws.onclose = function() {
       ws = null;
@@ -93,13 +151,26 @@ function toggleConn() {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (e.key === 'Enter') {
         ws.send(inp.value + '\n');
-        log('$ ' + inp.value, 'prompt');
-        inp.value = '';
+        inp.value = '';   // 远端 PTY 会回显输入, 无需本地再打一行
       } else if (e.ctrlKey && e.key === 'c') { ws.send('\x03'); }
       else if (e.ctrlKey && e.key === 'd') { ws.send('\x04'); }
     };
   } catch(e) { log('Connection error: ' + e, 'err'); }
 }
+
+// 需求1: 打开页面自动连接(无需点击 Connect), 但 sid/nid 缺失时不发起
+window.addEventListener('load', function() {
+  if (!sid || !nid) { log('Missing session or node ID', 'err'); return; }
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toggleConn(); }
+});
+
+// 需求1+2: 关闭/刷新页面自动断开(ws.close → 后端 WS 断开 → killpg 整组回收 vcmd+shell)
+window.addEventListener('pagehide', function() {
+  try { if (ws) { ws.close(); } } catch(e) {}
+});
+window.addEventListener('beforeunload', function() {
+  try { if (ws) { ws.close(); } } catch(e) {}
+});
 </script>
 </body>
 </html>

@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import os
+import pty
 import re
+import signal
 import subprocess
 import threading
 from contextlib import asynccontextmanager
@@ -1280,33 +1282,62 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             return
 
         # 从 "vcmd -c <channel> -- /bin/bash" 构建交互式命令
-        # 添加 -q（静默，无本地I/O）-i（PTY 交互模式）
+        # vcmd 的 -i (PTY 交互) 模式要求 stdin/stdout 是真实终端,
+        # 否则 termioraw()/tcgetattr()/SIGWINCH ioctl() 全失败并打印报错。
+        # 所以用 pty.openpty() 生成一对真实终端, vcmd 挂到 slave 上,
+        # 后端只读写 master 端。
         parts = terminal.split(" -- ", 1)
         if len(parts) == 2:
             vcmd_part = parts[0]
             shell_cmd = parts[1]
-            # 在 -c 前插入 -q -i
-            vcmd_part = vcmd_part.replace(" -c ", " -i -c ")  # -i=PTY, remove -q (quiet suppresses output)
+            # 在 -c 前插入 -i (PTY 交互), 不加 -q(否则静默无回显)
+            vcmd_part = vcmd_part.replace(" -c ", " -i -c ")
             cmd = f"{vcmd_part} -- {shell_cmd}"
         else:
             cmd = terminal
 
         logger.info("terminal_ws: running %s", cmd)
 
-        # 启动 vcmd 子进程（PTY 模式）
+        # 创建真实 PTY 对: vcmd -i 需要 tty, 否则 tcgetattr/ioctl 报错
+        master_fd, slave_fd = pty.openpty()
+
+        # 启动 vcmd 子进程, stdin/stdout/stderr 都挂到 PTY slave 上
+        # start_new_session=True: 让 vcmd 成为独立进程组组长, 便于断开时整组回收
         process = await asyncio.create_subprocess_shell(
             cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            start_new_session=True,
         )
+        os.close(slave_fd)  # 父进程只保留 master 端
+        os.set_blocking(master_fd, False)
+
+        loop = asyncio.get_running_loop()
+        read_queue: asyncio.Queue = asyncio.Queue()
+
+        def _on_master_readable():
+            """PTY master 可读回调: 读数据入队, EOF/IO 错 → None 终止"""
+            try:
+                data = os.read(master_fd, 4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                read_queue.put_nowait(None)
+                return
+            if not data:
+                read_queue.put_nowait(None)
+            else:
+                read_queue.put_nowait(data)
+
+        loop.add_reader(master_fd, _on_master_readable)
 
         async def pipe_stdout_to_ws():
-            """后台任务：将进程 stdout 持续转发到 WebSocket"""
+            """后台任务：PTY master 输出持续转发到 WebSocket"""
             try:
                 while True:
-                    data = await process.stdout.read(4096)
-                    if not data:
+                    data = await read_queue.get()
+                    if data is None:
                         break
                     await websocket.send_text(data.decode(errors="replace"))
             except (WebSocketDisconnect, ConnectionResetError):
@@ -1314,10 +1345,9 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             except Exception:
                 logger.exception("terminal_ws stdout pipe error")
 
-        # 启动后台读取任务
         reader_task = asyncio.create_task(pipe_stdout_to_ws())
 
-        # 主循环：从 WebSocket 读取 → 写入进程 stdin
+        # 主循环：从 WebSocket 读取 → 写入 PTY master (等价真实键盘输入)
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -1325,13 +1355,11 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
                     break
                 # 处理 Ctrl+C / Ctrl+D
                 if raw == "\x03":
-                    process.stdin.write(b"\x03")
+                    os.write(master_fd, b"\x03")  # PTY 会把它变成前台进程的 SIGINT
                 elif raw == "\x04":
-                    process.stdin.write_eof()
-                    break
+                    os.write(master_fd, b"\x04")
                 else:
-                    process.stdin.write(raw.encode())
-                await process.stdin.drain()
+                    os.write(master_fd, raw.encode())
         except WebSocketDisconnect:
             pass
         finally:
@@ -1341,8 +1369,26 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             except (asyncio.CancelledError, Exception):
                 pass
             try:
-                process.terminate()
+                loop.remove_reader(master_fd)
+            except Exception:
+                pass
+            # 关键: vcmd 对 SIGTERM 不响应(见 CLAUDE.md 坑#2), 必须 SIGKILL。
+            # 且 vcmd 会 fork 出 /bin/bash 子进程, 单杀父进程会留孤儿。
+            # 因为启动时挂了 start_new_session=True, 这里整进程组 SIGKILL,
+            # 确保同组的 vcmd + /bin/bash 全部回收。
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
                 await process.wait()
+            except Exception:
+                pass
+            try:
+                os.close(master_fd)
             except Exception:
                 pass
     except Exception as e:
