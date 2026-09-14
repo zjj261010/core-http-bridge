@@ -6,6 +6,7 @@
 - Terminal: real PTY (pty.openpty) for vcmd -i — fixes `ioctl() failed` / `termioraw() tcgetattr() failed` errors on pipe-backed stdin
 - Terminal: ANSI/CSI decoder on frontend — strips bracketed-paste `[?2004h/l` and cursor sequences, handles `\r` redraw and `\x08` backspace
 - Fix: vcmd process group killed via killpg(SIGKILL) on disconnect — no orphan vcmd + /bin/bash residual across terminal page open/close
+- Perf: REST endpoints changed from `async def` to sync `def` — blocking gRPC calls (start ~10s, topology import, move) no longer stall the event loop; `/health`, polling and all WS/SSE streams stay responsive during them
 
 ## v1.1.5 (2026-08-21)
 
