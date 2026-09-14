@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.6 (2026-09-14)
+
+- Terminal: auto-connect on page open, auto-disconnect on page close (no Connect/Disconnect click needed)
+- Terminal: real PTY (pty.openpty) for vcmd -i — fixes `ioctl() failed` / `termioraw() tcgetattr() failed` errors on pipe-backed stdin
+- Terminal: ANSI/CSI decoder on frontend — strips bracketed-paste `[?2004h/l` and cursor sequences, handles `\r` redraw and `\x08` backspace
+- Fix: vcmd process group killed via killpg(SIGKILL) on disconnect — no orphan vcmd + /bin/bash residual across terminal page open/close
+
 ## v1.1.5 (2026-08-21)
 
 - Fix: node name/model/services persisted in localStorage now restore correctly on session reload
