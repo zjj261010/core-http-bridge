@@ -135,6 +135,13 @@ async def lifespan(_app: FastAPI):
     bridge = CoreGrpcBridge()
     bridge.connect()
     logger.info("bridge connected to core-daemon")
+    try:
+        import platform_db
+        platform_db.init()
+        platform_db.start_sampler()   # reconciler + 事件落库 + 指标采样（5s）
+        logger.info("platform db sampler started")
+    except Exception:
+        logger.exception("platform_db startup failed")
     yield
     bridge.close()
     logger.info("bridge closed")
@@ -226,6 +233,7 @@ class NodeModel(BaseModel):
     image: str | None = None
     server: str | None = None
     geo: GeoModel | None = None
+    instance: str | None = None   # 来源实例名——部署即登记引用（实例锁定扳机, 设计 §5.2）
 
 class StartSessionRequest(BaseModel):
     definition: bool = False
@@ -485,6 +493,16 @@ def health():
 # ── Frontend (SPA) ──
 # ── Static files ──
 import os
+
+@app.middleware("http")
+async def _no_cache_html(request, call_next):
+    """HTML 页面禁止缓存，避免前端更新后浏览器仍用旧页面（fetch 接口对不上）"""
+    response = await call_next(request)
+    p = request.url.path
+    if p == "/" or (p.startswith("/static/") and p.endswith(".html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
@@ -517,10 +535,17 @@ def list_sessions():
 
 @app.post("/api/sessions", status_code=201)
 def create_session(body: dict | None = None):
-    """创建新会话"""
+    """创建新会话。同时签发演练身份 drill_id（数据主键; CORE 会话号可回收, 见 platform_db）"""
     session_id = body.get("session_id") if body else None
     s = bridge.create_session(session_id)
-    return _session_to_dict(s)
+    d = _session_to_dict(s)
+    try:
+        import platform_db
+        d["drill_id"] = platform_db.ensure_drill(s.id)
+        platform_db.subscribe_events(s.id)  # 创建即订阅, 头几秒动作不漏录
+    except Exception:
+        logger.exception("issue drill failed")
+    return d
 
 @app.get("/api/sessions/{session_id}")
 def get_session(session_id: int):
@@ -530,8 +555,32 @@ def get_session(session_id: int):
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: int):
-    """删除会话"""
+    """删除会话（演练身份正常关闭; 该会话的 metrics/events 保留供复盘, audit 永久保留）。
+    stop 是异步收尾: 会话仍在 RUNTIME/DATACOLLECT 时先补 stop 并等状态退出（实测立即 delete 会失败）"""
+    import time as _t
+    try:
+        s = bridge.get_session(session_id)
+        st = getattr(s.state, "value", s.state)
+        if st in (4, 5):
+            try:
+                bridge.stop_session(session_id)
+            except Exception:
+                pass
+            for _ in range(20):  # 最多等 10s 让节点收尾
+                _t.sleep(0.5)
+                st2 = getattr(bridge.get_session(session_id).state, "value", None)
+                if st2 not in (4, 5):
+                    break
+    except Exception:
+        pass  # 会话已不存在等情况 → 直接尝试删除
     result = bridge.delete_session(session_id)
+    try:
+        import platform_db
+        platform_db.unsubscribe_events(session_id)
+        platform_db.release_deploy_refs(core_sid=session_id)  # 会话删除 → 实例引用解除
+        platform_db.close_drill(session_id, status="closed")
+    except Exception:
+        logger.exception("close drill failed")
     return {"result": result}
 
 @app.get("/api/sessions/{session_id}/check")
@@ -592,9 +641,19 @@ def session_alert(session_id: int, body: AlertBody):
 
 @app.post("/api/sessions/{session_id}/nodes", status_code=201)
 def add_node(session_id: int, body: NodeModel):
-    """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)"""
+    """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)。
+    body.instance 为来源实例名时自动登记部署引用（实例锁定扳机, 设计 §5.2）"""
     node = _wrappers_node(body)
     node_id = bridge.add_node(session_id, node)
+    if body.instance:
+        try:
+            import platform_db
+            drill_id = platform_db.ensure_drill(session_id)
+            platform_db.register_deploy_ref(drill_id, session_id, node_id, body.instance)
+            platform_db.write_audit("deploy.ref", session_id=session_id, node_id=node_id,
+                                    instance=body.instance, ok=True)
+        except Exception:
+            logger.exception("register deploy ref failed")
     return {"node_id": node_id}
 
 @app.get("/api/sessions/{session_id}/nodes/{node_id}")
@@ -614,7 +673,24 @@ def edit_node(session_id: int, node_id: int, icon: str | None = None):
 
 @app.delete("/api/sessions/{session_id}/nodes/{node_id}")
 def delete_node(session_id: int, node_id: int):
-    """删除节点"""
+    """删除节点。CORE delete_node 不级联删链——孤儿链路在节点 id 复用后会"嫁接"到新节点
+    （实测：删节点→新拖节点同 id→链路视觉自动连上且删不掉）。先删该节点全部链路再删节点"""
+    try:
+        _node, _ifaces, links = bridge.get_node(session_id, node_id)
+        for l in links:
+            try:
+                bridge.delete_link(session_id, wrappers.Link(
+                    node1_id=l.node1_id, node2_id=l.node2_id,
+                    iface1=l.iface1, iface2=l.iface2))
+            except Exception as e:
+                logger.warning("cascade delete link %s-%s failed: %s", l.node1_id, l.node2_id, e)
+    except Exception:
+        pass  # 节点已不存在等情况 → 直接删
+    try:
+        import platform_db
+        platform_db.release_deploy_ref_node(session_id, node_id)  # 节点级引用解除（实例锁定粒度）
+    except Exception:
+        logger.exception("release node deploy ref failed")
     return {"result": bridge.delete_node(session_id, node_id)}
 
 @app.post("/api/sessions/{session_id}/nodes/{node_id}/move")
@@ -645,10 +721,25 @@ def get_node_terminal(session_id: int, node_id: int):
 
 @app.post("/api/sessions/{session_id}/links", status_code=201)
 def add_link(session_id: int, body: LinkModel):
-    """添加链路"""
+    """添加链路。iface 未指定时按 CORE GUI 行为自动取节点下一个空闲接口 id
+    （否则 proto3 默认实例让 daemon 收到 id=0，第二条链路报 interface already exists）"""
+    def _next_iface_id(node_id: int) -> int:
+        _node, ifaces, _links = bridge.get_node(session_id, node_id)
+        used = {i.id for i in ifaces}
+        i = 0
+        while i in used:
+            i += 1
+        return i
+
+    iface1 = body.iface1
+    iface2 = body.iface2
+    if iface1 is None:
+        iface1 = InterfaceModel(id=_next_iface_id(body.node1_id))
+    if iface2 is None:
+        iface2 = InterfaceModel(id=_next_iface_id(body.node2_id))
     link = wrappers.Link(
         node1_id=body.node1_id, node2_id=body.node2_id,
-        iface1=_wrappers_iface(body.iface1), iface2=_wrappers_iface(body.iface2),
+        iface1=_wrappers_iface(iface1), iface2=_wrappers_iface(iface2),
         options=_wrappers_link_opts(body.options),
     )
     result, iface1, iface2 = bridge.add_link(session_id, link)
@@ -987,39 +1078,57 @@ def get_config():
 # Server-Streaming → SSE
 # ===================================================================
 
+def _event_to_dict(event: wrappers.Event) -> dict:
+    """会话事件 → 结构化详情（实现收敛到 platform_db.event_to_dict, 与落库共用一份）"""
+    import platform_db
+    return platform_db.event_to_dict(event)
+
+
 @app.get("/api/sessions/{session_id}/events/stream")
 async def events_stream(session_id: int):
-    """SSE 事件流"""
+    """SSE 会话事件流（持续版）：会话全生命周期内持续推送拓扑层动作
+    （node/link 增删改、alert 告警、session 状态事件），5s 心跳保活。
+    行为变更（2026-11-14）：原实现收到首个事件即断开且只有类型名，无详情。"""
     def generate():
         q: list[str] = []
         lock = threading.Lock()
-        stop = threading.Event()
         def handler(event: wrappers.Event):
             with lock:
-                q.append(json.dumps({"session_id": event.session_id,
-                                      "type": str(type(event.event_type).__name__)}))
-                stop.set()
-        stream = bridge.events(session_id)
+                try:
+                    q.append(json.dumps(_event_to_dict(event), default=str))
+                except Exception:
+                    q.append(json.dumps({"session_id": event.session_id, "type": "unknown"}))
+        stream = bridge.events(session_id, handler=handler)
         try:
-            while not stop.is_set():
+            beat = 0
+            while True:
                 with lock:
                     while q:
                         yield f"data: {q.pop(0)}\n\n"
-                stop.wait(0.1)
+                beat += 1
+                if beat % 50 == 0:  # 5s 心跳兜底: 无事件时前端也知道流是活的
+                    yield ": heartbeat\n\n"
+                import time; time.sleep(0.1)
         finally:
             stream.cancel()
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.get("/api/sessions/{session_id}/throughputs/stream")
 async def throughputs_stream(session_id: int):
-    """SSE 吞吐量流（每 3 秒）"""
+    """SSE 吞吐量流（每 3 秒）。注意 handler 必须传给 bridge（CORE 客户端后台线程驱动）"""
     def generate():
         tps: list[str] = []
         lock = threading.Lock()
         def handler(event: wrappers.ThroughputsEvent):
             with lock:
-                tps.append(json.dumps({"session_id": event.session_id}))
-        stream = bridge.throughputs(session_id)
+                tps.append(json.dumps({
+                    "session_id": event.session_id,
+                    "ifaces": [{"node_id": f.node_id, "iface_id": f.iface_id,
+                                "throughput": f.throughput} for f in event.iface_throughputs],
+                    "bridges": [{"node1_id": b.node1_id, "node2_id": b.node2_id,
+                                 "throughput": b.throughput} for b in event.bridge_throughputs],
+                }))
+        stream = bridge.throughputs(session_id, handler)
         try:
             while True:
                 with lock:
@@ -1033,20 +1142,21 @@ async def throughputs_stream(session_id: int):
 
 @app.get("/api/cpu-usage/stream")
 async def cpu_usage_stream(delay: int = 1):
-    """SSE CPU 使用率流"""
+    """SSE CPU 使用率流。含 1s 心跳兜底（daemon 不发事件时前端也知道流是活的）"""
     def generate():
         cpus: list[str] = []
         lock = threading.Lock()
         def handler(event: wrappers.CpuUsageEvent):
             with lock:
                 cpus.append(json.dumps({"usage": event.usage}))
-        stream = bridge.cpu_usage(delay)
+        stream = bridge.cpu_usage(delay, handler)
         try:
             while True:
                 with lock:
                     while cpus:
                         yield f"data: {cpus.pop(0)}\n\n"
-                import time; time.sleep(0.5)
+                yield ": heartbeat\n\n"
+                import time; time.sleep(1)
         finally:
             stream.cancel()
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1416,19 +1526,66 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
         loop.add_reader(master_fd, _on_master_readable)
 
         async def pipe_stdout_to_ws():
-            """后台任务：PTY master 输出持续转发到 WebSocket"""
+            """后台任务：PTY master 输出持续转发到 WebSocket（同时喂给命令留痕的输出缓冲）"""
             try:
                 while True:
                     data = await read_queue.get()
                     if data is None:
                         break
-                    await websocket.send_text(data.decode(errors="replace"))
+                    text = data.decode(errors="replace")
+                    try:
+                        _feed_output(text)
+                    except Exception:
+                        pass
+                    await websocket.send_text(text)
             except (WebSocketDisconnect, ConnectionResetError):
                 pass
             except Exception:
                 logger.exception("terminal_ws stdout pipe error")
 
         reader_task = asyncio.create_task(pipe_stdout_to_ws())
+
+        # 终端命令留痕+结果（设计 §8.1）：输入行与其后的输出配对入库。
+        # 输出按行缓冲(剥 ANSI), 直到下一命令输入 / Ctrl+C / 断开时 flush 上一条。
+        # 交互式程序(top/vim)的输出归并不保证可读——演练"命令→结果"形态为准。
+        import re as _re
+        _ansi_re = _re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>]')
+        node_name = ""
+        try:
+            node, _ifaces, _links = bridge.get_node(session_id, node_id)
+            node_name = node.name
+        except Exception:
+            pass
+        pending = {"input": None, "output": []}
+
+        def _flush_cmd():
+            if not pending["input"]:
+                return
+            out = "\n".join(pending["output"])[:2000]
+            try:
+                import platform_db
+                platform_db.write_audit("term.node", session_id=session_id, node_id=node_id,
+                                         node=node_name or str(node_id),
+                                         input=pending["input"][:500], output=out)
+            except Exception:
+                logger.exception("terminal audit failed")
+            pending["input"] = None
+            pending["output"] = []
+
+        def _on_line(line: str):
+            line = line.replace("\x7f", "").strip()
+            _flush_cmd()                      # 上一条命令连同其输出落库
+            if line:
+                pending["input"] = line
+                pending["output"] = []
+
+        def _feed_output(chunk: str):
+            for ln in _ansi_re.sub('', chunk.replace('\r', '')).split('\n'):
+                ln = ln.strip()
+                if ln:
+                    pending["output"].append(ln)
+
+        input_buf: list[str] = []
 
         # 主循环：从 WebSocket 读取 → 写入 PTY master (等价真实键盘输入)
         try:
@@ -1439,10 +1596,18 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
                 # 处理 Ctrl+C / Ctrl+D
                 if raw == "\x03":
                     os.write(master_fd, b"\x03")  # PTY 会把它变成前台进程的 SIGINT
+                    _on_line("".join(input_buf) + "^C")
+                    input_buf.clear()
                 elif raw == "\x04":
                     os.write(master_fd, b"\x04")
                 else:
                     os.write(master_fd, raw.encode())
+                    for ch in raw:
+                        if ch in ("\n", "\r"):
+                            _on_line("".join(input_buf))
+                            input_buf.clear()
+                        elif ch >= " ":
+                            input_buf.append(ch)
         except WebSocketDisconnect:
             pass
         finally:
@@ -1459,6 +1624,10 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             # 且 vcmd 会 fork 出 /bin/bash 子进程, 单杀父进程会留孤儿。
             # 因为启动时挂了 start_new_session=True, 这里整进程组 SIGKILL,
             # 确保同组的 vcmd + /bin/bash 全部回收。
+            try:
+                _flush_cmd()  # 断开时把最后一条命令(含其输出)落库
+            except Exception:
+                pass
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except Exception:
@@ -1481,6 +1650,10 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             await websocket.close(code=1011)
         except Exception:
             pass
+
+# ── 靶标包管理路由（Tab1 镜像管理 + Tab2 独立容器管理）──
+from target_admin import router as target_admin_router
+app.include_router(target_admin_router, tags=["靶标管理"])
 
 if __name__ == "__main__":
     import uvicorn

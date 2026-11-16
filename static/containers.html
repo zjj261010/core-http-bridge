@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>容器管理 - 独立容器</title>
+<style>
+:root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--fg:#e2e8f0;--fg2:#94a3b8;--accent:#3b82f6;--ok:#22c55e;--err:#ef4444;--warn:#facc15}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+.header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--bg2);border-bottom:1px solid var(--bg3)}
+.header h1{font-size:18px;font-weight:600}
+.header .sub{color:var(--fg2);font-size:12px;margin-left:12px}
+.header .btns button{margin-left:8px}
+.nav{padding:0 24px;background:var(--bg2);border-bottom:1px solid var(--bg3);display:flex;gap:4px}
+.nav a{display:inline-block;padding:9px 16px;color:var(--fg2);text-decoration:none;font-size:13px;border-bottom:2px solid transparent}
+.nav a.on{color:var(--fg);border-bottom-color:var(--accent)}
+.nav a:hover{color:var(--fg)}
+.btn{display:inline-block;padding:6px 14px;border-radius:6px;border:1px solid var(--bg3);background:var(--bg3);color:var(--fg);cursor:pointer;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{background:transparent;border-color:var(--err);color:var(--err)}
+.btn:hover{filter:brightness(1.15)}
+.table-wrap{padding:16px 24px}
+table{width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden}
+th{background:var(--bg3);padding:10px 12px;text-align:left;font-size:12px;color:var(--fg2);font-weight:600;white-space:nowrap}
+td{padding:10px 12px;border-top:1px solid var(--bg3);font-size:13px;vertical-align:top}
+.mono{font-family:Consolas,Menlo,monospace;font-size:12.5px}
+.actions{white-space:nowrap}
+.actions a{color:var(--accent);text-decoration:none;margin-right:10px;cursor:pointer;font-size:12.5px}
+.actions a.danger{color:var(--err)}
+.st{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600}
+.st.up{background:#052e16;color:#4ade80;border:1px solid #14532d}
+.st.down{background:#3b2f05;color:var(--warn);border:1px solid #713f12}
+.toast{position:fixed;top:60px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;z-index:300;display:none;max-width:420px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none}
+.modal-box{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg2);border:1px solid var(--bg3);border-radius:10px;padding:24px;width:480px}
+h3{margin-bottom:16px;font-size:15px}
+label{display:block;margin-bottom:4px;color:var(--fg2);font-size:12px;margin-top:10px}
+input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:13px}
+.execbar{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--bg3);padding:10px 24px;display:none;align-items:center;gap:10px;z-index:150}
+.execbar input{flex:1;font-family:Consolas,monospace}
+.execout{position:fixed;left:0;right:0;bottom:52px;max-height:40vh;overflow:auto;background:#0a0a0a;color:#0f0;font-family:Consolas,monospace;font-size:12.5px;padding:12px 24px;display:none;white-space:pre-wrap;z-index:150;border-top:1px solid var(--bg3)}
+.empty{color:var(--fg2);text-align:center;padding:28px}
+.note{padding:0 24px 8px;color:var(--fg2);font-size:12px}
+</style>
+</head>
+<body>
+<div class="header">
+  <div style="display:flex;align-items:baseline">
+    <h1>容器管理</h1><span class="sub">仅 standalone-* 独立容器（CORE 拓扑容器随会话生命周期，此处物理不可见）</span>
+  </div>
+  <div class="btns">
+    <button class="btn primary" onclick="showModal('runModal')">新建容器</button>
+  </div>
+</div>
+<div class="nav">
+  <a href="/static/target-admin.html">镜像管理</a>
+  <a class="on" href="/static/containers.html">容器管理</a>
+  <a href="/">拓扑画布（原 SPA）</a>
+  <a href="/static/monitor.html">数据监测</a>
+  <a href="/static/audit.html">审计</a>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>容器名</th><th>镜像</th><th>状态</th><th>操作</th></tr></thead>
+<tbody id="ctList"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+</table>
+</div>
+<div class="note">操作说明：终端 = 交互式 bash（WebSocket）；exec = 单条命令。所有启停/删除/exec 均留审计痕（设计 §4.4）。</div>
+
+<div class="execout" id="execOut"></div>
+<div class="execbar" id="execBar">
+  <span class="mono" id="execCt" style="color:var(--fg2)"></span>
+  <input type="text" id="execCmd" placeholder="容器内执行命令，如: ls / 或 cat /etc/os-release">
+  <button class="btn" onclick="doExec()">执行</button>
+  <button class="btn danger" onclick="closeExec()">关闭</button>
+</div>
+
+<!-- 新建容器弹窗 -->
+<div class="modal-bg" id="runModal">
+<div class="modal-box">
+<h3>新建独立容器（普通隔离，验证用）</h3>
+<label>镜像（来自镜像管理）</label>
+<select id="runImage"><option value="">加载中…</option></select>
+<label>容器名（留空自动 standalone-镜像名）</label>
+<input type="text" id="runName" placeholder="standalone-dmz">
+<label>端口映射（可选，逗号分隔，如 8080:80,9200:9200）</label>
+<input type="text" id="runPorts" placeholder="">
+<label>启动命令（可选——路线 B 镜像无 CMD，填 tail -f /dev/null 保活后再 exec）</label>
+<input type="text" id="runCmd" placeholder="tail -f /dev/null">
+<div style="margin-top:14px;text-align:right">
+  <button class="btn" onclick="hideModal('runModal')">取消</button>
+  <button class="btn primary" onclick="doRun()">启动</button>
+</div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+if (window.self !== window.top) { var _sn = document.querySelector('.nav'); if (_sn) _sn.style.display = 'none'; } // iframe 嵌入时隐藏顶栏导航(由 shell 接管)
+function $(id) { return document.getElementById(id); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function toast(msg, ok) {
+  var t = $('toast'); t.textContent = msg;
+  t.style.background = ok ? '#22c55e' : '#ef4444'; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(function() { t.style.display = 'none'; }, 3500);
+}
+function showModal(id) { $(id).style.display = 'block'; }
+function hideModal(id) { $(id).style.display = 'none'; }
+
+async function api(method, path, body) {
+  var opt = { method: method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opt.body = JSON.stringify(body);
+  var r = await fetch(path, opt);
+  var d = null;
+  try { d = await r.json(); } catch (e) { throw new Error('HTTP ' + r.status); }
+  if (!d.ok) {
+    var err = d.error;
+    var msg = (typeof err === 'string') ? err : ((err && err.message) || d.message || ('HTTP ' + r.status));
+    throw new Error(msg);
+  }
+  return d.data;
+}
+
+// ── 列表 ──
+async function loadContainers() {
+  var tb = $('ctList');
+  tb.innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
+  try {
+    var items = await api('GET', '/containers/standalone');
+    if (!items.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">暂无独立容器，点右上角「新建容器」</td></tr>'; return; }
+    tb.innerHTML = items.map(function(c) {
+      var up = c.status.indexOf('Up') === 0;
+      var n = esc(c.name);
+      return '<tr>'
+        + '<td class="mono">' + n + '</td>'
+        + '<td class="mono">' + esc(c.image) + '</td>'
+        + '<td><span class="st ' + (up ? 'up' : 'down') + '">' + esc(c.status) + '</span></td>'
+        + '<td class="actions">'
+        + '<a href="javascript:void(0)" onclick="openTerm(\'' + n + '\')">终端</a>'
+        + '<a href="javascript:void(0)" onclick="openExec(\'' + n + '\')">exec</a>'
+        + (up
+          ? '<a href="javascript:void(0)" onclick="ctStop(\'' + n + '\')">停止</a>'
+          : '<a href="javascript:void(0)" onclick="ctStart(\'' + n + '\')">启动</a>')
+        + '<a class="danger" href="javascript:void(0)" onclick="ctDelete(\'' + n + '\')">删除</a>'
+        + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    console.error(e);
+    tb.innerHTML = '<tr><td colspan="4" class="empty" style="color:#ef4444">✗ 加载失败: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function ctStop(n)   { api('POST', '/containers/standalone/' + encodeURIComponent(n) + '/stop').then(function(){ toast('已停止 ✓', true); loadContainers(); }).catch(function(e){ toast(e.message, false); }); }
+function ctStart(n)  { api('POST', '/containers/standalone/' + encodeURIComponent(n) + '/start').then(function(){ toast('已启动 ✓', true); loadContainers(); }).catch(function(e){ toast(e.message, false); }); }
+function ctDelete(n) {
+  if (!confirm('确认删除容器 ' + n + ' ？')) return;
+  api('DELETE', '/containers/standalone/' + encodeURIComponent(n)).then(function(){ toast('已删除 ✓', true); loadContainers(); }).catch(function(e){ toast(e.message, false); });
+}
+function openTerm(n) { window.open('/static/cterm.html?name=' + encodeURIComponent(n), '_blank', 'width=820,height=560'); }
+
+// ── exec ──
+var execTarget = null;
+function openExec(n) {
+  execTarget = n;
+  $('execCt').textContent = n + ' $';
+  $('execCmd').value = '';
+  $('execOut').style.display = 'block';
+  $('execOut').textContent = '';
+  $('execBar').style.display = 'flex';
+  $('execCmd').focus();
+}
+function closeExec() {
+  $('execBar').style.display = 'none';
+  $('execOut').style.display = 'none';
+  execTarget = null;
+}
+function doExec() {
+  if (!execTarget) return;
+  var cmd = $('execCmd').value.trim();
+  if (!cmd) return;
+  $('execOut').textContent += '$ ' + cmd + '\n';
+  $('execCmd').value = '';
+  api('POST', '/containers/standalone/' + encodeURIComponent(execTarget) + '/exec', { cmd: cmd })
+    .then(function(d) {
+      $('execOut').textContent += (d.output || '') + (d.return_code ? ('\n[exit ' + d.return_code + ']') : '') + '\n';
+      $('execOut').scrollTop = $('execOut').scrollHeight;
+    })
+    .catch(function(e) {
+      $('execOut').textContent += '✗ ' + e.message + '\n';
+      $('execOut').scrollTop = $('execOut').scrollHeight;
+    });
+}
+
+// ── 新建容器 ──
+async function loadImagesForSelect() {
+  try {
+    var d = await api('GET', '/targets');
+    var imgs = d.images || [];
+    $('runImage').innerHTML = imgs.map(function(i) { return '<option value="' + esc(i.ref) + '">' + esc(i.ref) + '</option>'; }).join('');
+  } catch (e) {
+    $('runImage').innerHTML = '<option value="">镜像列表加载失败: ' + esc(e.message) + '</option>';
+  }
+}
+function doRun() {
+  var image = $('runImage').value;
+  if (!image) return toast('请选镜像', false);
+  var name = $('runName').value.trim();
+  var ports = $('runPorts').value.trim();
+  var body = { image: image };
+  if (name) body.name = name;
+  if (ports) body.ports = ports.split(',').map(function(p) { return p.trim(); }).filter(Boolean);
+  var cmd = $('runCmd').value.trim();
+  if (cmd) body.command = cmd;
+  api('POST', '/containers/standalone/run', body).then(function(d) {
+    toast(d.hint ? (d.name + ' 已创建，但' + d.hint) : ('已启动 ' + d.name + ' ✓'), !d.hint);
+    hideModal('runModal'); loadContainers();
+  }).catch(function(e) { toast(e.message || '启动失败', false); });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  loadContainers(); loadImagesForSelect();
+  setInterval(loadContainers, 5000);  // 状态自动轮询: Exited/Up 变化可见
+});
+$('execCmd').addEventListener('keydown', function(e) { if (e.key === 'Enter') doExec(); });
+</script>
+</body>
+</html>

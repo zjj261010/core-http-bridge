@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审计日志</title>
+<style>
+:root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--fg:#e2e8f0;--fg2:#94a3b8;--accent:#3b82f6;--err:#ef4444;--warn:#facc15}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+.header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--bg2);border-bottom:1px solid var(--bg3)}
+.header h1{font-size:18px;font-weight:600}
+.header .sub{color:var(--fg2);font-size:12px;margin-left:12px}
+.nav{padding:0 24px;background:var(--bg2);border-bottom:1px solid var(--bg3);display:flex;gap:4px}
+.nav a{display:inline-block;padding:9px 16px;color:var(--fg2);text-decoration:none;font-size:13px;border-bottom:2px solid transparent}
+.nav a.on{color:var(--fg);border-bottom-color:var(--accent)}
+.controls{padding:14px 24px;display:flex;gap:10px;align-items:center}
+.controls select,.controls input,.controls button{padding:6px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:13px}
+.controls button{cursor:pointer}
+.table-wrap{padding:0 24px 24px}
+table{width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden}
+th{background:var(--bg3);padding:10px 12px;text-align:left;font-size:12px;color:var(--fg2);font-weight:600;white-space:nowrap}
+td{padding:9px 12px;border-top:1px solid var(--bg3);font-size:13px}
+.mono{font-family:Consolas,Menlo,monospace;font-size:12.5px}
+.tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600}
+.tag.ok{background:#052e16;color:#4ade80;border:1px solid #14532d}
+.tag.fail{background:#450a0a;color:#f87171;border:1px solid #7f1d1d}
+.empty{color:var(--fg2);text-align:center;padding:28px}
+.count{color:var(--fg2);font-size:12px;margin-left:auto}
+</style>
+</head>
+<body>
+<div class="header">
+  <div style="display:flex;align-items:baseline">
+    <h1>审计日志</h1><span class="sub">全部变更类操作留痕（who/when/what，设计 §8.2）— audit.jsonl</span>
+  </div>
+</div>
+<div class="nav">
+  <a href="/static/target-admin.html">镜像管理</a>
+  <a href="/static/containers.html">容器管理</a>
+  <a href="/static/instances.html">节点实例</a>
+  <a href="/">拓扑画布</a>
+  <a href="/static/monitor.html">数据监测</a>
+  <a class="on" href="/static/audit.html">审计</a>
+</div>
+<div class="controls">
+  <label style="color:var(--fg2);font-size:12px">动作</label>
+  <select id="actionSel">
+    <option value="">全部</option>
+    <option value="image.import">image.import</option>
+    <option value="image.delete">image.delete</option>
+    <option value="services.import">services.import</option>
+    <option value="manifest.save">manifest.save</option>
+    <option value="manifest.edit">manifest.edit</option>
+    <option value="container.run">container.run</option>
+    <option value="container.stop">container.stop</option>
+    <option value="container.start">container.start</option>
+    <option value="container.delete">container.delete</option>
+    <option value="container.exec">container.exec</option>
+    <option value="term.node">term.node（CORE 节点终端命令）</option>
+    <option value="instance.create">instance.create</option>
+    <option value="instance.update">instance.update</option>
+    <option value="instance.delete">instance.delete</option>
+    <option value="instance.clone">instance.clone</option>
+  </select>
+  <label style="color:var(--fg2);font-size:12px">会话</label>
+  <select id="drillSel"><option value="">全部</option></select>
+  <label style="color:var(--fg2);font-size:12px">条数</label>
+  <select id="limitSel"><option>50</option><option selected>100</option><option>500</option></select>
+  <button onclick="loadAudit()">查询</button>
+  <span class="count" id="total"></span>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>时间</th><th>动作</th><th>对象</th><th>结果</th></tr></thead>
+<tbody id="audList"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+</table>
+</div>
+<script>
+'use strict';
+if (window.self !== window.top) { var _sn = document.querySelector('.nav'); if (_sn) _sn.style.display = 'none'; } // iframe 嵌入时隐藏顶栏导航(由 shell 接管)
+function $(id) { return document.getElementById(id); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+async function loadDrills() {
+  try {
+    var r = await fetch('/drills');
+    var drills = (await r.json()).data || [];
+    $('drillSel').innerHTML = '<option value="">全部</option>' + drills.map(function(d) {
+      return '<option value="' + d.core_sid + '">会话 ' + d.core_sid + ' · ' + esc(d.drill_id) + ' (' + d.status + ')</option>';
+    }).join('');
+  } catch (e) { console.error(e); }
+}
+
+async function loadAudit() {
+  var tb = $('audList');
+  tb.innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
+  try {
+    var action = $('actionSel').value;
+    var limit = $('limitSel').value;
+    var sid = $('drillSel').value;
+    var r = await fetch('/audit?limit=' + limit
+      + (action ? '&action=' + action : '')
+      + (sid ? '&session_id=' + sid : ''));
+    var d = (await r.json()).data;
+    $('total').textContent = '共 ' + d.total + ' 条（显示最近 ' + d.entries.length + ' 条）';
+    if (!d.entries.length) { tb.innerHTML = '<tr><td colspan="4" class="empty">暂无审计记录</td></tr>'; return; }
+    tb.innerHTML = d.entries.map(function(e) {
+      var detail = e.target || '';
+      var det = e.detail || {};
+      var outHtml = '';
+      if (det.output) {
+        outHtml = '<div class="mono" style="white-space:pre-wrap;background:#0a0a0a;color:#0f0;padding:6px;border-radius:4px;margin-top:4px;font-size:11.5px;max-height:140px;overflow:auto">$ ' + esc(det.input || '') + '\n' + esc(det.output) + '</div>';
+      }
+      var extra = Object.keys(det).filter(function(k) { return !['ok','input','output'].includes(k); })
+        .map(function(k) { return k + '=' + JSON.stringify(det[k]); }).join(' ');
+      var sess = e.session_id !== null && e.session_id !== undefined ? ' <span class="tag ok">会话' + e.session_id + '</span>' : '';
+      return '<tr>'
+        + '<td class="mono">' + esc(e.ts) + '</td>'
+        + '<td class="mono">' + esc(e.action) + sess + '</td>'
+        + '<td class="mono">' + esc(detail) + (extra ? ' <span style="color:var(--fg2)">' + esc(extra) + '</span>' : '') + outHtml + '</td>'
+        + '<td>' + (e.ok === undefined ? '<span class="tag ok">记录</span>'
+                    : e.ok ? '<span class="tag ok">成功</span>' : '<span class="tag fail">失败</span>') + '</td>'
+        + '</tr>';
+    }).join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="4" class="empty" style="color:#ef4444">✗ 加载失败: ' + esc(String(e)) + '</td></tr>';
+  }
+}
+loadDrills();
+loadAudit();
+</script>
+</body>
+</html>

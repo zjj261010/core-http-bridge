@@ -56,8 +56,41 @@ a:hover { text-decoration: underline; }
 .link-line:hover { stroke: var(--accent2); stroke-width: 3; }
 .link-line.selected { stroke: var(--accent2); stroke-width: 3; box-shadow: none; }
 /* 透明粗 hit 线承载点击, 命中带 ±7px, 解决细线难选中 */
-.link-hit { stroke: transparent; stroke-width: 16; fill: none; stroke-linecap: round; cursor: pointer; }
+/* ★ pointer-events:all 必须——父 svg 是 pointer-events:none, 不覆盖则点击热区继承失效 */
+.link-hit { stroke: transparent; stroke-width: 16; fill: none; stroke-linecap: round; cursor: pointer; pointer-events: all; }
 #linksSvg text { pointer-events: all; cursor: pointer; }
+
+/* ── Tab4 画布扩展: 缩放平移 world 层 ── */
+#world { position: absolute; inset: 0; transform-origin: 0 0; }
+#canvas.panning { cursor: grabbing; }
+#canvas.linking .node-box { cursor: crosshair; }
+#canvas.linking .node-box:hover { border-color: var(--accent2); }
+.node-box.link-src { border-color: var(--ok) !important; box-shadow: 0 0 0 3px rgba(34,197,94,.35); }
+.link-preview { stroke: var(--ok); stroke-width: 2; stroke-dasharray: 6 4; fill: none; pointer-events: none; }
+.zoom-label { color: var(--fg2); font-size: 11px; margin-left: 4px; }
+.canvas-tools { position: absolute; top: 12px; right: 12px; z-index: 6; display: flex; gap: 6px; align-items: center; background: rgba(30,41,59,.92); padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--bg3); }
+.freeze-chip { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 6; background: rgba(59,47,5,.95); color: var(--warn); border: 1px solid #713f12; padding: 5px 14px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+/* ── Tab4 实例库面板（拖拽建节点）── */
+.instance-lib { position: absolute; left: 12px; top: 12px; z-index: 5; width: 224px; max-height: 62%; overflow: auto; background: rgba(30,41,59,.95); border: 1px solid var(--bg3); border-radius: var(--radius); padding: 8px; }
+.instance-lib .il-title { font-size: 12px; color: var(--fg2); margin-bottom: 6px; font-weight: 600; }
+.instance-lib .il-item { padding: 7px 9px; border: 1px solid var(--bg3); border-radius: 6px; margin-bottom: 5px; cursor: grab; font-size: 12.5px; background: var(--bg); }
+.instance-lib .il-item:hover { border-color: var(--accent); }
+.instance-lib .il-item .rt { font-size: 10px; color: var(--fg2); margin-top: 2px; }
+.instance-lib .il-item.dragging-item { opacity: .5; }
+.instance-lib.frozen { opacity: .45; pointer-events: none; }
+.instance-lib .il-empty { color: var(--fg2); font-size: 12px; padding: 6px; }
+.instance-lib .il-group { font-size: 11px; color: var(--fg2); margin: 8px 0 4px; cursor: pointer; user-select: none; }
+.instance-lib .il-group:hover { color: var(--fg); }
+.instance-lib .il-fav { float: right; cursor: pointer; opacity: .45; }
+.instance-lib .il-fav.on { opacity: 1; }
+
+/* ── 5-Tab 左侧导航壳（设计 §2.1: 同一单页内路由切换, 无多页跳转）── */
+.side-nav { padding: 6px 8px; border-bottom: 1px solid var(--bg3); }
+.side-nav .sn-title { font-size: 11px; color: var(--fg2); padding: 6px 8px; font-weight: 600; letter-spacing: .5px; }
+.side-tab { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius); cursor: pointer; font-size: 13.5px; color: var(--fg2); margin-bottom: 2px; }
+.side-tab:hover { background: var(--bg3); color: var(--fg); }
+.side-tab.on { background: rgba(59,130,246,0.15); color: var(--fg); border: 1px solid rgba(59,130,246,0.3); }
+#tabFrame { display: none; position: absolute; inset: 0; width: 100%; height: 100%; border: 0; z-index: 20; background: var(--bg); }
 #linksSvg .link-hit:hover + .link-line { stroke: var(--accent2); stroke-width: 3; }
 
 /* ── Bottom panel ── */
@@ -151,6 +184,17 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
     </div>
   </div>
 
+  <!-- 5-Tab 管理平台导航（设计 §2.1 顺序; 默认视图=镜像管理） -->
+  <div class="side-nav" id="sideNav">
+    <div class="sn-title">管理平台</div>
+    <div class="side-tab" data-tab="images" onclick="switchTab('images')">💾 镜像管理</div>
+    <div class="side-tab" data-tab="containers" onclick="switchTab('containers')">📦 容器管理</div>
+    <div class="side-tab" data-tab="instances" onclick="switchTab('instances')">🧩 节点实例</div>
+    <div class="side-tab" data-tab="topo" onclick="switchTab('topo')">🗺 拓扑管理</div>
+    <div class="side-tab" data-tab="monitor" onclick="switchTab('monitor')">📈 数据监测</div>
+    <div class="side-tab" data-tab="audit" onclick="switchTab('audit')">📜 审计</div>
+  </div>
+
   <div class="sidebar-section">
     <div class="section-title">会话</div>
     <div id="sessionList" class="session-list">
@@ -170,7 +214,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 </div>
 
 <!-- ── Main ── -->
-<div class="main">
+<div class="main" style="position:relative">
+  <iframe id="tabFrame" title="管理平台视图"></iframe>
   <div class="header">
     <div id="sessionInfo">
       <span style="color:var(--fg2);font-size:13px">选择左侧会话开始</span>
@@ -180,9 +225,27 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 
   <!-- Canvas -->
   <div class="canvas-area" id="canvas">
-    <svg id="linksSvg" style="position:absolute;inset:0;pointer-events:none;z-index:1"></svg>
-    <div id="nodesContainer" style="position:absolute;inset:0;pointer-events:none">
-      <div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>选择一个会话以查看拓扑</p></div>
+    <div id="freezeChip" class="freeze-chip" style="display:none">🔒 RUNTIME 编辑已冻结（新建/连线/删除禁用，设计 §6.2）</div>
+    <div class="canvas-tools">
+      <button class="btn btn-secondary btn-sm" id="linkModeBtn" onclick="toggleLinkMode()" title="点两个节点创建链路">🔗 连线</button>
+      <button class="btn btn-secondary btn-sm" id="precheckBtn" onclick="runPrecheck()" title="环境与声明一致性检查（RUNTIME 后可用）">🩺 预检</button>
+      <button class="btn btn-secondary btn-sm" onclick="addComponent('switch')" title="添加交换机（纯二层构件，无服务）">🔀 交换机</button>
+      <button class="btn btn-secondary btn-sm" onclick="addComponent('hub')" title="添加集线器（纯二层构件，无服务）">🔗 集线器</button>
+      <button class="btn btn-secondary btn-sm" onclick="zoomBy(1.2)" title="放大">＋</button>
+      <button class="btn btn-secondary btn-sm" onclick="zoomBy(1/1.2)" title="缩小">－</button>
+      <button class="btn btn-secondary btn-sm" onclick="resetView()" title="重置视图">1:1</button>
+      <span class="zoom-label" id="zoomLabel">100%</span>
+    </div>
+    <div class="instance-lib" id="instanceLib">
+      <div class="il-title">节点实例库（拖到画布创建）</div>
+      <input type="text" id="ilSearch" placeholder="🔍 搜索实例…" oninput="renderInstanceLib(true)" style="width:100%;padding:4px 8px;margin-bottom:6px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:11.5px;outline:none">
+      <div id="ilItems"><div class="il-empty">加载中…</div></div>
+    </div>
+    <div id="world">
+      <svg id="linksSvg" style="position:absolute;inset:0;pointer-events:none;z-index:1"></svg>
+      <div id="nodesContainer" style="position:absolute;inset:0;pointer-events:none">
+        <div class="empty-state" id="emptyCanvas"><div class="icon">🔌</div><p>选择一个会话以查看拓扑</p></div>
+      </div>
     </div>
   </div>
 
@@ -201,6 +264,14 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 </div>
 
 </div>
+
+<!-- Precheck -->
+<div id="precheckModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+<div class="modal" style="width:760px;max-height:82vh">
+<div class="modal-header"><h2>🩺 环境就绪度预检 <span id="pcVerdict"></span></h2><button class="btn-icon" onclick="closeModal('precheckModal')">✕</button></div>
+<div class="modal-body" id="pcBody" style="font-size:12.5px"></div>
+<div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal('precheckModal')">关闭</button></div>
+</div></div>
 
 <!-- ════════════════════════════ MODALS ════════════════════════════ -->
 
@@ -256,8 +327,122 @@ let state = {
   dragOffset: {x:0, y:0},
   eventSource: null,
   log: [],
+  view: {x:0, y:0, s:1},       // Tab4 画布视图(平移+缩放)
+  linkMode: false,             // Tab4 连线模式
+  linkFrom: null,              // 连线起点 nid
+  instanceLib: [],             // Tab3 节点实例库(拖拽建节点)
 };
 function sessionRunning() { return state.sessionState === 4 || state.sessionState === 5; }
+
+// ── Tab4 画布缩放平移 ──
+function applyView() {
+  document.getElementById('world').style.transform = `translate(${state.view.x}px, ${state.view.y}px) scale(${state.view.s})`;
+  document.getElementById('zoomLabel').textContent = Math.round(state.view.s * 100) + '%';
+}
+function zoomAt(mx, my, factor) {
+  const s2 = Math.min(3, Math.max(0.2, state.view.s * factor));
+  state.view.x = mx - (mx - state.view.x) * (s2 / state.view.s);
+  state.view.y = my - (my - state.view.y) * (s2 / state.view.s);
+  state.view.s = s2;
+  applyView();
+}
+function zoomBy(factor) {
+  const canvas = document.getElementById('canvas');
+  zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, factor);
+}
+function resetView() { state.view = {x:0, y:0, s:1}; applyView(); }
+function screenToWorld(cx, cy) {
+  const rect = document.getElementById('canvas').getBoundingClientRect();
+  return { x: (cx - rect.left - state.view.x) / state.view.s, y: (cy - rect.top - state.view.y) / state.view.s };
+}
+
+// ── Tab4 实例库 ──
+let _ilSig = '';
+// ── P-库: 实例库检索（搜索/分组折叠/常用置顶, 状态存 localStorage）──
+var ilQuery = '';
+var ilCollapsed = JSON.parse(localStorage.getItem('ilCollapsed') || '{"docker":false,"netns":false}');
+var ilFavs = JSON.parse(localStorage.getItem('ilFavs') || '[]');
+function ilPersist() {
+  localStorage.setItem('ilCollapsed', JSON.stringify(ilCollapsed));
+  localStorage.setItem('ilFavs', JSON.stringify(ilFavs));
+}
+function ilQueryChange() { ilQuery = document.getElementById('ilSearch').value.trim().toLowerCase(); renderInstanceLib(true); }
+function ilToggleGroup(g) { ilCollapsed[g] = !ilCollapsed[g]; ilPersist(); renderInstanceLib(true); }
+function ilToggleFav(ev, name) {
+  ev.stopPropagation();
+  ilFavs = ilIsFav(name) ? ilFavs.filter(n => n !== name) : ilFavs.concat([name]);
+  ilPersist(); renderInstanceLib(true);
+}
+function ilIsFav(name) { return ilFavs.includes(name); }
+
+async function loadInstanceLib() {
+  try {
+    const env = await api('GET', '/instances');   // 信封 {ok, data} — api() 返回完整响应
+    state.instanceLib = (env && env.data) || [];
+    renderInstanceLib();
+  } catch (e) {
+    document.getElementById('ilItems').innerHTML = `<div class="il-empty">实例库加载失败: ${esc(String(e.error || e))}</div>`;
+  }
+}
+function renderInstanceLib(force) {
+  const el = document.getElementById('ilItems');
+  if (!state.instanceLib.length) {
+    if (_ilSig !== 'empty') {
+      el.innerHTML = '<div class="il-empty">暂无实例（去「节点实例」页创建）<br><a href="/static/instances.html" style="color:var(--accent)">打开实例管理 →</a></div>';
+      _ilSig = 'empty';
+    }
+    return;
+  }
+  const q = ilQuery.toLowerCase();
+  const matches = state.instanceLib.filter(i => !q ||
+    [i.name, i.image_tag || '', (i.services || []).map(s => s.name).join(' ')].join(' ').toLowerCase().includes(q));
+  if (!force && JSON.stringify([q, ilFavs, ilCollapsed, matches.map(i => [i.name, i.runtime_type])]) === _ilSig) return;
+  _ilSig = JSON.stringify([q, ilFavs, ilCollapsed, matches.map(i => [i.name, i.runtime_type])]);
+  // 分组: docker 靶标容器 / netns 系统节点; 组内常用置顶
+  const groups = [
+    { key: 'docker', label: '🐳 靶标容器', items: matches.filter(i => i.runtime_type === 'docker') },
+    { key: 'netns', label: '🖥 系统节点', items: matches.filter(i => i.runtime_type === 'netns') },
+  ];
+  groups.forEach(g => g.items.sort((a, b) => (ilIsFav(b.name) ? 1 : 0) - (ilIsFav(a.name) ? 1 : 0)));
+  let html = '';
+  groups.forEach(g => {
+    if (!g.items.length) return;
+    html += `<div class="il-group" onclick="ilToggleGroup('${g.key}')">${g.label}${ilCollapsed[g.key] ? ' ▸' : ' ▾'} (${g.items.length})</div>`;
+    if (ilCollapsed[g.key]) return;
+    g.items.forEach(inst => {
+      const fav = ilIsFav(inst.name);
+      html += `<div class="il-item" draggable="true" data-name="${esc(inst.name)}"
+        ondragstart="ilDragStart(event,'${esc(inst.name)}')" ondragend="ilDragEnd(event)" ondblclick="ilToggleFav(event,'${esc(inst.name)}')">
+        ${inst.runtime_type === 'docker' ? '🐳' : '🖥'} ${esc(inst.name)}<span class="il-fav ${fav ? 'on' : ''}" onclick="ilToggleFav(event,'${esc(inst.name)}')" title="常用置顶">⭐</span>
+        <div class="rt">${inst.runtime_type === 'docker' ? esc(inst.image_tag || '') : 'netns（宿主 rootfs）'}${(inst.services||[]).length ? ' · ' + inst.services.length + ' 服务' : ''}</div>
+      </div>`;
+    });
+  });
+  el.innerHTML = html || '<div class="il-empty">无匹配实例（调整搜索词）</div>';
+}
+function ilDragStart(e, name) {
+  e.dataTransfer.setData('text/instance-name', name);
+  e.dataTransfer.effectAllowed = 'copy';
+  e.target.classList.add('dragging-item');
+}
+function ilDragEnd(e) { e.target.classList.remove('dragging-item'); }
+async function createNodeFromInstance(inst, wx, wy) {
+  if (!state.currentSid) { addLog('先选择/创建会话', 'err'); return; }
+  if (sessionRunning()) { addLog('🔒 RUNTIME 已冻结：不可新建节点（停止会话后再编辑，设计 §6.2）', 'err'); return; }
+  const used = Object.values(state.nodes).map(n => n.name);
+  let name = inst.name, i = 2;
+  while (used.includes(name)) { name = inst.name + '-' + i; i++; }
+  const body = { name, position: { x: Math.round(wx - 60), y: Math.round(wy - 40) }, instance: inst.name };
+  if (inst.runtime_type === 'docker') { body.type = 15; body.image = inst.image_tag; }
+  else { body.type = 0; if (inst.model) body.model = inst.model; }
+  const svcNames = (inst.services || []).map(s => s.name).filter(Boolean);
+  if (svcNames.length) body.services = svcNames;
+  try {
+    const r = await api('POST', `/api/sessions/${state.currentSid}/nodes`, body);
+    addLog(`+ 节点 ${name} (id=${r.node_id}) ← 实例 ${inst.name}${svcNames.length ? ' 服务: ' + svcNames.join(',') : ''}`, 'ok');
+    await loadTopology(state.currentSid);
+  } catch (e) { addLog('创建节点失败: ' + (e.error?.detail || e.error || e), 'err'); }
+}
 
 // ── Helpers ──
 async function api(method, path, data) {
@@ -278,6 +463,8 @@ async function api(method, path, data) {
     return text;
   }
 }
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
 
 function log(msg, type='info') {
   const t = new Date().toLocaleTimeString();
@@ -374,6 +561,7 @@ async function loadTopology(sid) {
       }
     } catch(e) {}
     renderTopology();
+    updateFreezeUi();
     const _ec = document.getElementById('emptyCanvas'); if (_ec) _ec.style.display = 'none';
     addLog(`加载拓扑: ${Object.keys(state.nodes).length} 节点, ${state.links.length} 链路`, 'ok');
     renderTopologyJson();
@@ -434,18 +622,24 @@ function renderTopology() {
   container.innerHTML = nodes.map(n => {
     const ifaces = n._interfaces || [];
     const ip = ifaces.length > 0 ? ifaces[0].ip4 : '';
-    const icon = n.type === 4 ? '🔀' : n.type === 6 ? '📡' : n.model === 'router' ? '📟' : '🖥';
-    return `<div class="node-box ${n.id === state.selectedNode ? 'selected' : ''}"
+    const icon = n.type === 4 ? '🔀' : n.type === 6 ? '📡' : n.type === 15 ? '🐳' : n.model === 'router' ? '📟' : '🖥';
+    return `<div class="node-box ${n.id === state.selectedNode ? 'selected' : ''} ${state.linkMode && n.id === state.linkFrom ? 'link-src' : ''}"
       id="node-${n.id}"
       style="left:${n.x}px;top:${n.y}px"
       onmousedown="startDrag(event, ${n.id})"
-      onclick="selectNode(${n.id})"
+      onclick="onNodeClick(${n.id})"
       ondblclick="showCommandModal(${n.id})">
       <div class="icon">${icon}</div>
       <div class="label">${n.name}</div>
       ${ip ? `<div class="ip">${ip}</div>` : ''}
     </div>`;
   }).join('');
+
+  // Tab4 连线模式: 起点 → 鼠标位置的预览虚线
+  if (state.linkMode && state.linkFrom !== null && state.nodes[state.linkFrom]) {
+    const fn = state.nodes[state.linkFrom];
+    svg.innerHTML += `<line class="link-preview" x1="${fn.x + 60}" y1="${fn.y + 40}" x2="${fn.x + 140}" y2="${fn.y + 40}"/>`;
+  }
 }
 
 // ── Drag ──
@@ -453,17 +647,18 @@ function startDrag(e, nid) {
   if (e.button !== 0) return;
   const box = document.getElementById(`node-${nid}`);
   if (!box) return;
-  const rect = box.getBoundingClientRect();
   const canvas = document.getElementById('canvas');
-  const canvasRect = canvas.getBoundingClientRect();
+  // Tab4: 画布有缩放平移, 拖拽坐标一律走世界坐标系
+  const w = screenToWorld(e.clientX, e.clientY);
   state.dragging = nid;
-  state.dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  state.dragOffset = { x: w.x - state.nodes[nid].x, y: w.y - state.nodes[nid].y };
   box.classList.add('dragging');
 
   function onMove(ev) {
     if (state.dragging === null) return;
-    const x = ev.clientX - canvasRect.left - state.dragOffset.x;
-    const y = ev.clientY - canvasRect.top - state.dragOffset.y;
+    const wv = screenToWorld(ev.clientX, ev.clientY);
+    const x = wv.x - state.dragOffset.x;
+    const y = wv.y - state.dragOffset.y;
     box.style.left = `${Math.max(0, x)}px`;
     box.style.top = `${Math.max(0, y)}px`;
   }
@@ -490,6 +685,173 @@ function startDrag(e, nid) {
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
   e.preventDefault();
+}
+
+// ── Tab4 连线模式（点起点 → 点终点 → POST /links）──
+function toggleLinkMode() {
+  if (!state.linkMode && sessionRunning()) {
+    addLog('🔒 RUNTIME 已冻结：不可连线（停止会话后再编辑，设计 §6.2）', 'err');
+    return;
+  }
+  state.linkMode = !state.linkMode;
+  state.linkFrom = null;
+  const canvas = document.getElementById('canvas');
+  canvas.classList.toggle('linking', state.linkMode);
+  document.getElementById('linkModeBtn').classList.toggle('btn-primary', state.linkMode);
+  if (state.linkMode) addLog('连线模式：先点起点节点，再点终点节点（ESC 退出）', 'info');
+  renderTopology();
+}
+function onNodeClick(nid) {
+  if (state.linkMode) { handleLinkClick(nid); return; }
+  selectNode(nid);
+}
+async function handleLinkClick(nid) {
+  if (state.linkFrom === null) {
+    state.linkFrom = nid;
+    renderTopology();
+    addLog(`连线: 起点 [${state.nodes[nid]?.name}]，再点另一个节点`, 'info');
+    return;
+  }
+  if (state.linkFrom === nid) { state.linkFrom = null; renderTopology(); return; }
+  const a = state.linkFrom, b = nid;
+  state.linkFrom = null;
+  if (sessionRunning()) { addLog('🔒 RUNTIME 已冻结：不可连线（设计 §6.2）', 'err'); renderTopology(); return; }
+  try {
+    await api('POST', `/api/sessions/${state.currentSid}/links`, { node1_id: a, node2_id: b });
+    addLog(`+ 链路 [${state.nodes[a]?.name}] ↔ [${state.nodes[b]?.name}] 已创建`, 'ok');
+    await loadTopology(state.currentSid);
+  } catch (e) { addLog('连线失败: ' + (e.error?.detail || e.error || e), 'err'); }
+}
+
+// ── Tab4 画布事件: 滚轮缩放 / 空白拖动平移 / 实例拖放 ──
+(function initCanvasEvents() {
+  const canvas = document.getElementById('canvas');
+  canvas.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.15 : 1/1.15);
+  }, { passive: false });
+
+  canvas.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    if (e.target.closest('.node-box') || e.target.closest('.instance-lib') || e.target.closest('.canvas-tools')) return;
+    const startX = e.clientX, startY = e.clientY;
+    const v0 = { ...state.view };
+    function onMove(ev) {
+      state.view.x = v0.x + (ev.clientX - startX);
+      state.view.y = v0.y + (ev.clientY - startY);
+      applyView();
+    }
+    function onUp() {
+      canvas.classList.remove('panning');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    canvas.classList.add('panning');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  canvas.addEventListener('dragover', function(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  canvas.addEventListener('drop', function(e) {
+    e.preventDefault();
+    const name = e.dataTransfer.getData('text/instance-name');
+    const inst = state.instanceLib.find(i => i.name === name);
+    if (!inst) return;
+    const w = screenToWorld(e.clientX, e.clientY);
+    createNodeFromInstance(inst, w.x, w.y);
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && state.linkMode) toggleLinkMode();
+  });
+})();
+
+// ── P-画布构件: switch/hub 直接创建（纯二层构件, 无服务概念, 不经实例库）──
+async function addComponent(kind) {
+  if (!state.currentSid) { addLog('先选择/创建会话', 'err'); return; }
+  if (sessionRunning()) { addLog('🔒 RUNTIME 已冻结：不可新建节点（设计 §6.2）', 'err'); return; }
+  var type = kind === 'hub' ? 5 : 4;
+  var prefix = kind === 'hub' ? 'hub' : 'switch';
+  var used = Object.values(state.nodes).map(n => n.name);
+  var name = prefix, i = 2;
+  while (used.includes(name)) { name = prefix + i; i++; }
+  var canvas = document.getElementById('canvas');
+  var wx = canvas.clientWidth / 2, wy = canvas.clientHeight / 2;
+  var w = screenToWorld(canvas.getBoundingClientRect().left + wx, canvas.getBoundingClientRect().top + wy);
+  try {
+    const r = await api('POST', `/api/sessions/${state.currentSid}/nodes`, {
+      name, type, position: { x: Math.round(w.x - 60), y: Math.round(w.y - 40) } });
+    addLog(`+ ${kind} 构件 ${name} (id=${r.node_id})`, 'ok');
+    await loadTopology(state.currentSid);
+  } catch (e) { addLog('创建失败: ' + (e.error?.detail || e.error || e), 'err'); }
+}
+
+// ── Tab4 冻结门禁 UI 同步（§6.2: RUNTIME 后新建/连线/删除禁用）──
+function updateFreezeUi() {
+  const frozen = sessionRunning();
+  const chip = document.getElementById('freezeChip');
+  if (chip) chip.style.display = frozen ? 'block' : 'none';
+  const lib = document.getElementById('instanceLib');
+  if (lib) lib.classList.toggle('frozen', frozen);
+  const lb = document.getElementById('linkModeBtn');
+  if (lb) {
+    lb.disabled = frozen;
+    lb.style.opacity = frozen ? .5 : 1;
+  }
+  // 预检只在 RUNTIME 后有意义（与编辑类按钮语义相反）
+  const pb = document.getElementById('precheckBtn');
+  if (pb) {
+    pb.disabled = !frozen;
+    pb.style.opacity = frozen ? 1 : .5;
+  }
+  if (frozen && state.linkMode) toggleLinkMode();
+}
+
+// ── A1 环境就绪度预检（声明一致性: 容器/服务 validate/编目端口; 平台不窥探镜像内容）──
+async function runPrecheck() {
+  if (!state.currentSid) { addLog('先选择会话', 'err'); return; }
+  if (!sessionRunning()) { addLog('会话未运行——节点实例化后预检才有意义', 'err'); return; }
+  addLog('🩺 预检中…', 'info');
+  try {
+    const env = await api('POST', `/precheck?session_id=${state.currentSid}`, {});
+    renderPrecheck(env.data);   // 信封 {ok, data}
+  } catch (e) { addLog('预检失败: ' + (e.error?.detail || e.error || e), 'err'); }
+}
+function renderPrecheck(d) {
+  const v = d.verdict;
+  document.getElementById('pcVerdict').innerHTML = v === 'READY'
+    ? '<span style="background:#052e16;color:#4ade80;border:1px solid #14532d;padding:2px 10px;border-radius:10px;font-size:12px">READY 就绪</span>'
+    : '<span style="background:#450a0a;color:#f87171;border:1px solid #7f1d1d;padding:2px 10px;border-radius:10px;font-size:12px">NOT_READY 不就绪</span>';
+  const rows = (d.nodes || []).map(n => {
+    const svc = (n.services || []).map(s => {
+      const color = s.result === 'ok' ? '#4ade80' : (s.result === 'no-validate' ? '#94a3b8' : '#f87171');
+      return '<div style="font-size:12px;margin-bottom:2px"><span style="color:' + color + '">●</span> '
+        + esc(s.name) + ' <span style="color:var(--fg2)">[' + esc(s.result) + ']</span>'
+        + (s.validate && s.validate.length ? ' <span class="mono" style="font-size:11px;color:var(--fg2)">' + esc(s.validate.join(' && ')) + '</span>' : '')
+        + '</div>';
+    }).join('') || '<div style="font-size:12px;color:var(--fg2)">无服务声明</div>';
+    const ports = (n.ports || []).map(p => {
+      const color = p.result === 'open' ? '#4ade80' : '#f87171';
+      return '<span style="color:' + color + '">' + esc(p.port) + '/' + esc(p.result) + '</span>';
+    }).join('  ') || '<span style="color:var(--fg2)">—</span>';
+    const notes = (n.notes || []).map(x => '<div style="font-size:11px;color:var(--warn)">⚠ ' + esc(x) + '</div>').join('');
+    return '<tr>'
+      + '<td class="mono" style="padding:6px;border-top:1px solid var(--bg3)">' + esc(n.name) + ' (id=' + n.node_id + ')</td>'
+      + '<td style="padding:6px;border-top:1px solid var(--bg3)">' + n.runtime + '</td>'
+      + '<td style="padding:6px;border-top:1px solid var(--bg3)">' + (n.runtime === 'docker' ? esc(n.container || '—') : '—') + '</td>'
+      + '<td style="padding:6px;border-top:1px solid var(--bg3)">' + svc + '</td>'
+      + '<td class="mono" style="padding:6px;border-top:1px solid var(--bg3)">' + ports + '</td>'
+      + '<td style="padding:6px;border-top:1px solid var(--bg3)">' + notes + '</td></tr>';
+  }).join('');
+  document.getElementById('pcBody').innerHTML =
+    '<table style="width:100%;border-collapse:collapse">'
+    + '<thead><tr><th style="text-align:left;padding:6px;color:var(--fg2)">节点</th><th style="text-align:left;padding:6px;color:var(--fg2)">类型</th>'
+    + '<th style="text-align:left;padding:6px;color:var(--fg2)">容器</th><th style="text-align:left;padding:6px;color:var(--fg2)">声明服务 (validate)</th>'
+    + '<th style="text-align:left;padding:6px;color:var(--fg2)">编目端口</th><th style="text-align:left;padding:6px;color:var(--fg2)">备注</th></tr></thead>'
+    + '<tbody>' + rows + '</tbody></table>';
+  document.getElementById('precheckModal').style.display = 'flex';
+  addLog('🩺 预检完成: ' + v, v === 'READY' ? 'ok' : 'err');
 }
 
 // ── Select Node ──
@@ -550,6 +912,7 @@ async function startSession() {
     addLog(`启动 ${def?'定义':'实例化'}: ${resp.result?'成功':'失败'}`, resp.result ? 'ok' : 'err');
     if (resp.exceptions?.length) addLog(`异常: ${resp.exceptions.join(', ')}`, 'err');
     await loadSessions();
+    await loadTopology(state.currentSid);
   } catch(e) { addLog(`启动失败: ${e.error||e}`, 'err'); }
 }
 
@@ -726,9 +1089,48 @@ function renderTopologyJson() {
   <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="navigator.clipboard.writeText(JSON.stringify(${JSON.stringify(JSON.stringify(topo))},null,2)).then(()=>addLog('拓扑已复制到剪贴板','ok'))">📋 复制</button>`;
 }
 
+// ── 5-Tab 前端路由（设计 §2.1: 同一单页内切换, hash 保持刷新/前进后退）──
+const TAB_SRC = {
+  images:    '/static/target-admin.html',
+  containers:'/static/containers.html',
+  instances: '/static/instances.html',
+  monitor:   '/static/monitor.html',
+  audit:     '/static/audit.html',
+};
+function switchTab(name) {
+  const frame = document.getElementById('tabFrame');
+  document.querySelectorAll('.side-tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  if (name === 'topo') {
+    // 拓扑 = 本页 canvas 视图; 离开监测等定时视图时释放 iframe 资源
+    frame.style.display = 'none';
+    frame.src = 'about:blank';
+    frame.removeAttribute('data-src');  // ★ 必须清缓存, 否则 topo→X 时误判"src 没变"不再加载 → 空白
+    loadInstanceLib();  // 切回拓扑时刷新实例库(实例可能在其它页面被增删)
+    if (location.hash && location.hash !== '#topo') history.replaceState(null, '', '#topo');
+    return;
+  }
+  const src = TAB_SRC[name];
+  if (!src) return;
+  if (frame.getAttribute('data-src') !== src) {
+    frame.src = src + '?embedded=1';
+    frame.setAttribute('data-src', src);
+  }
+  frame.style.display = 'block';
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+}
+function tabFromHash() {
+  const h = (location.hash || '#images').replace('#', '');
+  return TAB_SRC[h] ? h : 'images';   // 默认视图 = 镜像管理
+}
+window.addEventListener('hashchange', () => switchTab(tabFromHash()));
+
 // ── Init ──
 async function init() {
   addLog('CORE HTTP Bridge 控制台已加载 [v-fix-merge]', 'info');
+  applyView();
+  loadInstanceLib();
+  setInterval(loadInstanceLib, 30000);  // 实例库自动刷新(实例可能在其它页面被增删)
+  switchTab(tabFromHash());
   await loadSessions();
 
   // Auto-select first session
@@ -756,6 +1158,7 @@ init();
 <div class="modal-header"><h2 id="linkModalTitle">Link Properties</h2><button class="btn-icon" onclick="closeModal('linkModal')">✕</button></div>
 <div class="modal-body" id="linkModalBody"></div>
 <div class="modal-footer">
+  <button class="btn btn-danger" id="lkDeleteBtn" onclick="deleteSelectedLink()" style="float:left">🗑 删除链路</button>
   <button class="btn btn-secondary" onclick="closeModal('linkModal')">Cancel</button>
   <button class="btn btn-primary" onclick="saveLinkProps()">Save</button>
 </div>
@@ -766,19 +1169,65 @@ init();
 var ctxNodeId = null;
 
 document.addEventListener('contextmenu', function(e) {
+  var menu = document.getElementById('contextMenu');
   var box = e.target.closest('.node-box');
-  if (!box) { document.getElementById('contextMenu').style.display = 'none'; return; }
+  if (!box) {
+    // Tab4: 画布空白右键 → 实例快捷创建（仅定义态；RUNTIME 冻结, §6.2）
+    if (state.currentSid && !sessionRunning() && state.instanceLib.length &&
+        (e.target.id === 'canvas' || e.target.closest('#world') || e.target.id === 'world')) {
+      e.preventDefault();
+      const w = screenToWorld(e.clientX, e.clientY);
+      const items = state.instanceLib.slice(0, 10).map((inst, i) => ({
+        label: (inst.runtime_type === 'docker' ? '🐳 ' : '🖥 ') + inst.name,
+        action: `createNodeFromInstanceAt(${i}, ${Math.round(w.x - 60)}, ${Math.round(w.y - 40)})`,
+      }));
+      if (state.instanceLib.length > 10) items.push({ label: '… 更多实例请从左侧实例库拖入', action: 'hideCtx()' });
+      showCtxMenu(e.clientX, e.clientY, items);
+      return;
+    }
+    menu.style.display = 'none';
+    return;
+  }
   e.preventDefault();
   ctxNodeId = parseInt(box.id.replace('node-', ''));
-  showCtxMenu(e.clientX, e.clientY, [
+  // Tab4 §6.2: RUNTIME 冻结后右键仅剩「查看/终端」, 删除与连线入口全部禁用
+  var items = [];
+  var ctxNd = state.nodes[ctxNodeId];
+  var isComp = ctxNd && (ctxNd.type === 4 || ctxNd.type === 5);  // switch/hub 纯构件: 无终端
+  if (state.linkMode && state.linkFrom !== null && state.linkFrom !== ctxNodeId && !sessionRunning()) {
+    items.push({ label: '🔗 连线到此节点', action: 'handleLinkClick('+ctxNodeId+')' }, { type: 'divider' });
+  }
+  items.push(
     { label: '📟 Properties', action: 'showNodeProps('+ctxNodeId+')' },
-    { label: '💻 Terminal', action: 'openTerminal('+ctxNodeId+')' },
+  );
+  if (!isComp) items.push({ label: '💻 Terminal', action: 'openTerminal('+ctxNodeId+')' });
+  items.push(
     { type: 'divider' },
     { label: '📋 Copy JSON', action: 'copyNodeJson('+ctxNodeId+')' },
-    { type: 'divider' },
-    { label: '🗑 Delete', action: 'deleteNode('+ctxNodeId+')', danger: true },
-  ]);
+  );
+  if (!sessionRunning()) {
+    items.push(
+      { type: 'divider' },
+      { label: '🔗 设为连线起点', action: 'ctxLinkFrom('+ctxNodeId+')' },
+      { type: 'divider' },
+      { label: '🗑 Delete', action: 'deleteNode('+ctxNodeId+')', danger: true },
+    );
+  }
+  showCtxMenu(e.clientX, e.clientY, items);
 });
+
+function ctxLinkFrom(nid) {
+  document.getElementById('contextMenu').style.display = 'none';
+  if (!state.linkMode) toggleLinkMode();
+  state.linkFrom = nid;
+  renderTopology();
+  addLog(`连线: 起点 [${state.nodes[nid]?.name}]，再点另一个节点（或右键另一节点选连线起点）`, 'info');
+}
+function createNodeFromInstanceAt(idx, x, y) {
+  document.getElementById('contextMenu').style.display = 'none';
+  createNodeFromInstance(state.instanceLib[idx], x + 60, y + 40);
+}
+function hideCtx() { document.getElementById('contextMenu').style.display = 'none'; }
 
 document.addEventListener('click', function(e) {
   if (!e.target.closest('.context-menu')) {
@@ -894,6 +1343,26 @@ function selectLink(n1, n2) {
   showLinkProps();
 }
 
+// 删除链路（定义态; RUNTIME 冻结由按钮禁用 + 双重校验, §6.2）
+async function deleteSelectedLink() {
+  const l = state.selectedLink;
+  if (!l) return;
+  if (sessionRunning()) { addLog('🔒 RUNTIME 已冻结：不可删除链路（设计 §6.2）', 'err'); return; }
+  const n1 = state.nodes[l.node1_id]?.name || l.node1_id;
+  const n2 = state.nodes[l.node2_id]?.name || l.node2_id;
+  if (!confirm(`删除链路 ${n1} ↔ ${n2} ？`)) return;
+  try {
+    await api('DELETE', `/api/sessions/${state.currentSid}/links`, {
+      node1_id: l.node1_id, node2_id: l.node2_id,
+      iface1: { id: l.iface1?.id ?? 0 }, iface2: { id: l.iface2?.id ?? 0 },
+    });
+    addLog(`🗑 链路 [${n1}] ↔ [${n2}] 已删除`, 'ok');
+    closeModal('linkModal');
+    state.selectedLink = null;
+    await loadTopology(state.currentSid);
+  } catch (e) { addLog('删除链路失败: ' + (e.error?.detail || e.error || e), 'err'); }
+}
+
 function showLinkProps() {
   const l = state.selectedLink;
   if (!l) return;
@@ -904,6 +1373,13 @@ function showLinkProps() {
   const i1 = l.iface1 || {}, i2 = l.iface2 || {};
   const o = l.options || {};
   const run = sessionRunning();
+  // 删除链路按钮: RUNTIME 冻结(§6.2, CORE 运行中不可删链)
+  const delBtn = document.getElementById('lkDeleteBtn');
+  if (delBtn) {
+    delBtn.disabled = run;
+    delBtn.style.opacity = run ? .5 : 1;
+    delBtn.title = run ? '运行中不可删除链路（CORE 协议限制）' : '';
+  }
   document.getElementById('linkModalTitle').textContent =
     `🔗 ${name1} (${l.node1_id}) ↔ ${name2} (${l.node2_id})`;
   document.getElementById('linkModalBody').innerHTML = `
@@ -995,6 +1471,7 @@ function copyNodeJson(nid) {
 
 function deleteNode(nid) {
   document.getElementById('contextMenu').style.display = 'none';
+  if (sessionRunning()) { addLog('🔒 RUNTIME 已冻结：不可删除节点（设计 §6.2）', 'err'); return; }
   if (!confirm('Delete node '+nid+'?')) return;
   var sid = state.currentSid;
   if (!sid) return;

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator, Iterator
+from typing import Any, Callable, Generator, Iterator
 
 from core.api.grpc import client as grpc_client
 from core.api.grpc import wrappers
@@ -347,25 +347,26 @@ class CoreGrpcBridge:
         self,
         session_id: int,
         event_types: list[wrappers.EventType] | None = None,
+        handler: Callable[[wrappers.Event], None] | None = None,
     ) -> grpc_client.CoreGrpcClient._CoreGrpcClient__EventsCall:
-        """返回 grpc 流对象，由外部线程驱动回调。"""
+        """返回 grpc 流对象（CORE 客户端起后台线程驱动 handler）。"""
         if event_types is None:
             event_types = []
         return self.client.events(
             session_id,
-            lambda e: None,  # handler 由外层注册
+            handler or (lambda e: None),
             event_types,
         )
 
     def throughputs(
-        self, session_id: int
+        self, session_id: int, handler: Callable[[wrappers.ThroughputsEvent], None] | None = None
     ) -> grpc_client.CoreGrpcClient._CoreGrpcClient__ThroughputsCall:
-        return self.client.throughputs(session_id, lambda e: None)
+        return self.client.throughputs(session_id, handler or (lambda e: None))
 
     def cpu_usage(
-        self, delay: int
+        self, delay: int, handler: Callable[[wrappers.CpuUsageEvent], None] | None = None
     ) -> grpc_client.CoreGrpcClient._CoreGrpcClient__CpuUsageCall:
-        return self.client.cpu_usage(delay, lambda e: None)
+        return self.client.cpu_usage(delay, handler or (lambda e: None))
 
     # ------------------------------------------------------------------
     # Streaming — client-stream (返回 streamer 对象供 WebSocket 驱动)

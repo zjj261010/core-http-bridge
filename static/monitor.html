@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据监测</title>
+<style>
+:root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--fg:#e2e8f0;--fg2:#94a3b8;--accent:#3b82f6;--ok:#22c55e;--err:#ef4444;--warn:#facc15}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+.header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--bg2);border-bottom:1px solid var(--bg3)}
+.header h1{font-size:18px;font-weight:600}
+.header .sub{color:var(--fg2);font-size:12px;margin-left:12px}
+.nav{padding:0 24px;background:var(--bg2);border-bottom:1px solid var(--bg3);display:flex;gap:4px}
+.nav a{display:inline-block;padding:9px 16px;color:var(--fg2);text-decoration:none;font-size:13px;border-bottom:2px solid transparent}
+.nav a.on{color:var(--fg);border-bottom-color:var(--accent)}
+.nav a:hover{color:var(--fg)}
+.wrap{padding:16px 24px;display:flex;flex-direction:column;gap:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.card{background:var(--bg2);border:1px solid var(--bg3);border-radius:8px;padding:14px}
+.card h4{font-size:12px;color:var(--fg2);margin-bottom:8px;font-weight:600}
+.card .big{font-size:24px;font-weight:700;font-family:Consolas,monospace}
+.card .sub{font-size:11px;color:var(--fg2);margin-top:4px}
+.bar{height:6px;background:var(--bg);border-radius:3px;margin-top:8px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);border-radius:3px;transition:width .4s}
+.bar>i.warn{background:var(--warn)}
+.bar>i.err{background:var(--err)}
+.section{background:var(--bg2);border:1px solid var(--bg3);border-radius:8px;padding:14px}
+.section h3{font-size:14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+.section h3 .hint{font-size:11px;color:var(--fg2);font-weight:400}
+table{width:100%;border-collapse:collapse}
+th{background:var(--bg3);padding:8px 10px;text-align:left;font-size:11.5px;color:var(--fg2);font-weight:600;white-space:nowrap}
+td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
+.mono{font-family:Consolas,monospace;font-size:12px}
+.tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600}
+.tag.core{background:#052e16;color:#4ade80;border:1px solid #14532d}
+.tag.st{background:#1e3a8a;color:#93c5fd;border:1px solid #1e40af}
+.tag.ot{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+.empty{color:var(--fg2);text-align:center;padding:14px;font-size:12.5px}
+.streams{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.logbox{background:#0a0a0a;color:#0f0;font-family:Consolas,monospace;font-size:12px;padding:10px;border-radius:6px;height:180px;overflow:auto;white-space:pre-wrap}
+.controls select,.controls button{padding:5px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:12.5px;cursor:pointer}
+.controls{display:flex;gap:8px;align-items:center}
+.controls button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="header">
+  <div style="display:flex;align-items:baseline">
+    <h1>数据监测</h1><span class="sub">宿主载荷 + CORE 会话容器（深监测）+ 独立容器/其他（列表可见，设计 §7.1）</span>
+  </div>
+  <div class="controls">
+    <span style="color:var(--fg2);font-size:12px">刷新间隔 3s</span>
+    <button id="pauseBtn" onclick="togglePause()">⏸ 暂停</button>
+  </div>
+</div>
+<div class="nav">
+  <a href="/static/target-admin.html">镜像管理</a>
+  <a href="/static/containers.html">容器管理</a>
+  <a href="/static/instances.html">节点实例</a>
+  <a href="/">拓扑画布</a>
+  <a class="on" href="/static/monitor.html">数据监测</a>
+  <a href="/static/audit.html">审计</a>
+</div>
+
+<div class="wrap">
+  <!-- 宿主载荷 -->
+  <div class="cards" id="hostCards">
+    <div class="card"><h4>CPU 使用率</h4><div class="big" id="cpuPct">—</div><div class="bar"><i id="cpuBar" style="width:0%"></i></div><div class="sub" id="loadavg">load: —</div></div>
+    <div class="card"><h4>内存</h4><div class="big" id="memPct">—</div><div class="bar"><i id="memBar" style="width:0%"></i></div><div class="sub" id="memSub">—</div></div>
+    <div class="card" id="diskCard0"><h4>磁盘 /</h4><div class="big" id="disk0Pct">—</div><div class="bar"><i id="disk0Bar" style="width:0%"></i></div><div class="sub" id="disk0Sub">—</div></div>
+    <div class="card" id="diskCard1" style="display:none"><h4>磁盘 /opt</h4><div class="big" id="disk1Pct">—</div><div class="bar"><i id="disk1Bar" style="width:0%"></i></div><div class="sub" id="disk1Sub">—</div></div>
+  </div>
+
+  <!-- CORE 实时流 -->
+  <div class="section">
+    <h3>CORE 实时流（bridge SSE 透传）
+      <span class="controls">
+        <select id="sessSel"><option value="">选择会话…</option></select>
+        <button id="subBtn" onclick="toggleStreams()">▶ 订阅</button>
+      </span>
+    </h3>
+    <div class="streams">
+      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">CPU 流（core-daemon 宿主 CPU 使用率，值 0~1，×100=%）— /api/cpu-usage/stream</div><div class="logbox" id="cpuLog">未订阅</div></div>
+      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">Throughputs 流（每节点接口的实时流量速率，CORE 3 秒差分，单位 bit/s = 收+发合计；节点N/M=节点N接口M；空=当前无流量）— /api/sessions/{sid}/throughputs/stream</div><div class="logbox" id="tpLog">未订阅</div></div>
+    </div>
+    <div style="margin-top:12px"><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">会话动作时间线（Events 流持续版：节点/链路增删改、告警、会话事件）</div><div class="logbox" id="evLog" style="height:220px">未订阅</div></div>
+  </div>
+
+  <!-- 历史指标（落库） -->
+  <div class="section">
+    <h3>历史指标（platform.db 落库, 采样线程 RUNTIME 期间 5s 一拍）
+      <span class="controls">
+        <select id="histDrill"><option value="">选择演练…</option></select>
+        <button onclick="loadHistory()">查询</button>
+      </span>
+    </h3>
+    <div id="histTbl"><div class="empty">选择演练后查询</div></div>
+  </div>
+
+  <!-- 三分组 -->
+  <div class="section"><h3><span class="tag core">CORE 会话容器</span> 深监测（stats + 节点名匹配 + 演练归属）</h3><div id="coreTbl"></div></div>
+  <div class="section"><h3><span class="tag st">独立容器</span> 仅列表（生命周期独立，不深监测，设计 §7.1）</h3><div id="stTbl"></div></div>
+  <div class="section"><h3><span class="tag ot">其他容器</span> 列表可见，不深监测</h3><div id="otTbl"></div></div>
+</div>
+
+<script>
+'use strict';
+if (window.self !== window.top) { var _sn = document.querySelector('.nav'); if (_sn) _sn.style.display = 'none'; } // iframe 嵌入时隐藏顶栏导航(由 shell 接管)
+var PAUSED = false;
+var lastTicks = null;
+var esCpu = null, esTp = null, esEv = null;
+
+function fmtBps(v) {
+  // CORE throughput 单位 bit/s(收+发合计) → 可读单位
+  if (v == null || isNaN(v)) return '0 bit/s';
+  if (v >= 1e9) return (v/1e9).toFixed(2) + ' Gbit/s';
+  if (v >= 1e6) return (v/1e6).toFixed(2) + ' Mbit/s';
+  if (v >= 1e3) return (v/1e3).toFixed(1) + ' Kbit/s';
+  return Math.round(v) + ' bit/s';
+}
+function evDesc(d) {
+  // 事件详情 → 人话（设计 §7 动作时间线）。CORE 动作: add/delete/none(none=节点信息/状态更新, 非增删)
+  var actMap = {add: '新增', delete: '删除', none: '状态更新', cri: '严重'};
+  var act = actMap[d.action] || d.action || '';
+  if (d.type === 'node') return '节点[' + (d.node.name || d.node.id) + '] ' + act + ' (id=' + d.node.id + ')';
+  if (d.type === 'link') return '链路 ' + act + ' ' + d.link.node1_id + ' ↔ ' + d.link.node2_id;
+  if (d.type === 'alert') return '⚠ 告警 node=' + d.node_id + ' [' + d.level + '] ' + d.source + ': ' + d.text;
+  if (d.type === 'session') return '会话事件 ' + (d.name || '') + ' ' + (d.data || '');
+  return JSON.stringify(d).slice(0, 120);
+}
+
+function $(id) { return document.getElementById(id); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function barColor(p) { return p >= 90 ? 'err' : (p >= 70 ? 'warn' : ''); }
+
+function togglePause() {
+  PAUSED = !PAUSED;
+  $('pauseBtn').textContent = PAUSED ? '▶ 继续' : '⏸ 暂停';
+}
+
+async function pollHost() {
+  if (PAUSED) return;
+  try {
+    var r = await fetch('/monitor/host');
+    var d = (await r.json()).data;
+    // CPU%: 前端两次采样差分（/proc/stat ticks）
+    if (d.cpu_ticks && d.cpu_ticks.total) {
+      var t = d.cpu_ticks.total;
+      if (lastTicks) {
+        var dt = 0, du = 0;
+        for (var i = 0; i < t.length; i++) { dt += t[i] - lastTicks[i]; }
+        du = dt - (t[3] + t[4] - lastTicks[3] - lastTicks[4]);  // 去掉 idle+iowait
+        if (dt > 0) {
+          var pct = Math.max(0, Math.min(100, Math.round(du / dt * 100)));
+          $('cpuPct').textContent = pct + '%';
+          $('cpuBar').style.width = pct + '%';
+          $('cpuBar').className = barColor(pct);
+        }
+      }
+      lastTicks = t;
+    }
+    $('loadavg').textContent = 'load: ' + d.loadavg.join(' / ');
+    if (d.mem && d.mem.total_gb) {
+      $('memPct').textContent = d.mem.used_pct + '%';
+      $('memBar').style.width = d.mem.used_pct + '%';
+      $('memBar').className = barColor(d.mem.used_pct);
+      $('memSub').textContent = d.mem.used_gb + ' / ' + d.mem.total_gb + ' GB';
+    }
+    (d.disks || []).forEach(function(dk, i) {
+      var idx = dk.path === '/opt' ? 1 : 0;
+      $('diskCard' + idx).style.display = 'block';
+      $('disk' + idx + 'Pct').textContent = dk.used_pct + '%';
+      $('disk' + idx + 'Bar').style.width = dk.used_pct + '%';
+      $('disk' + idx + 'Bar').className = barColor(dk.used_pct);
+      $('disk' + idx + 'Sub').textContent = dk.used_gb + ' / ' + dk.total_gb + ' GB (' + dk.path + ')';
+    });
+  } catch (e) { console.error(e); }
+}
+
+function tbl(items, deep) {
+  if (!items.length) return '<div class="empty">无容器</div>';
+  return '<table><thead><tr><th>名称</th><th>镜像</th><th>状态</th>'
+    + (deep ? '<th>所属演练</th><th>CPU</th><th>内存</th><th>网络 IO</th>' : '')
+    + '</tr></thead><tbody>'
+    + items.map(function(c) {
+        var st = c.stats;
+        return '<tr><td class="mono">' + esc(c.name) + '</td><td class="mono">' + esc(c.image) + '</td>'
+          + '<td>' + esc(c.status) + '</td>'
+          + (deep ? '<td class="mono" style="font-size:11px">' + esc((c.drills || []).join(', ') || '—') + '</td>'
+          + '<td class="mono">' + esc(st ? st.cpu : '—') + '</td>'
+          + '<td class="mono">' + esc(st ? st.mem_usage + ' (' + st.mem_pct + ')' : '—') + '</td>'
+          + '<td class="mono">' + esc(st ? st.net_io : '—') + '</td>' : '')
+          + '</tr>';
+      }).join('') + '</tbody></table>';
+}
+
+// ── 历史指标（platform.db）──
+async function loadDrillOptions() {
+  try {
+    var r = await fetch('/drills');
+    var drills = (await r.json()).data || [];
+    var opts = '<option value="">选择演练…</option>' + drills.map(function(d) {
+      return '<option value="' + esc(d.drill_id) + '">' + esc(d.drill_id)
+        + '（会话' + d.core_sid + ', ' + d.status + '）</option>';
+    }).join('');
+    $('histDrill').innerHTML = opts;
+  } catch (e) { console.error(e); }
+}
+async function loadHistory() {
+  var drill = $('histDrill').value;
+  if (!drill) return;
+  try {
+    var r = await fetch('/metrics?drill_id=' + encodeURIComponent(drill) + '&limit=2000');
+    var entries = (await r.json()).data.entries || [];
+    if (!entries.length) { $('histTbl').innerHTML = '<div class="empty">该演练暂无采样数据（RUNTIME 期间才开始采样）</div>'; return; }
+    // 按节点聚合: 最新一拍 + 采样数
+    var byNode = {};
+    entries.forEach(function(m) {
+      var k = m.node_id + '|' + m.name;
+      if (!byNode[k]) byNode[k] = { name: m.name, nid: m.node_id, last: m, count: 0 };
+      byNode[k].count++;
+    });
+    $('histTbl').innerHTML = '<table><thead><tr><th>节点</th><th>最新采样时间</th><th>CPU</th><th>内存</th><th>网络 IO</th><th>采样条数</th></tr></thead><tbody>'
+      + Object.values(byNode).map(function(n) {
+        return '<tr><td class="mono">' + esc(n.name) + ' (id=' + n.nid + ')</td>'
+          + '<td class="mono">' + esc(n.last.ts) + '</td>'
+          + '<td class="mono">' + esc(n.last.cpu) + '</td>'
+          + '<td class="mono">' + esc(n.last.mem_usage) + '</td>'
+          + '<td class="mono">' + esc(n.last.net_io) + '</td>'
+          + '<td class="mono">' + n.count + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) { $('histTbl').innerHTML = '<div class="empty" style="color:#ef4444">✗ ' + esc(String(e)) + '</div>'; }
+}
+
+async function pollContainers() {
+  if (PAUSED) return;
+  try {
+    var r = await fetch('/monitor/containers');
+    var g = (await r.json()).data.groups;
+    $('coreTbl').innerHTML = tbl(g.core, true);
+    $('stTbl').innerHTML = tbl(g.standalone, false);
+    $('otTbl').innerHTML = tbl(g.others, false);
+  } catch (e) { console.error(e); }
+}
+
+// ── 会话选择 + SSE 透传 ──
+async function loadSessions() {
+  try {
+    var r = await fetch('/api/sessions');
+    var ss = await r.json();
+    $('sessSel').innerHTML = '<option value="">选择会话…</option>'
+      + (Array.isArray(ss) ? ss : []).map(function(s) {
+          return '<option value="' + s.id + '">会话 ' + s.id + '（state=' + s.state + '）</option>';
+        }).join('');
+  } catch (e) { console.error(e); }
+}
+function closeStreams() {
+  try { if (esCpu) esCpu.close(); } catch (e) {}
+  try { if (esTp) esTp.close(); } catch (e) {}
+  try { if (esEv) esEv.close(); } catch (e) {}
+  esCpu = esTp = esEv = null;
+  $('subBtn').textContent = '▶ 订阅';
+  $('subBtn').classList.remove('on');
+}
+function logLine(el, msg, cap) {
+  if (el.textContent === '未订阅') el.textContent = '';
+  el.textContent += msg + '\n';
+  if (el.children === undefined && el.textContent.length > cap) el.textContent = el.textContent.slice(-cap);
+  el.scrollTop = el.scrollHeight;
+}
+function toggleStreams() {
+  if (esCpu || esTp) { closeStreams(); return; }
+  var sid = $('sessSel').value;
+  if (!sid) { alert('先选择会话'); return; }
+  var proto = location.protocol === 'https:' ? 'https://' : 'http://';
+  esCpu = new EventSource(proto + location.host + '/api/cpu-usage/stream?delay=1');
+  esCpu.onmessage = function(e) {
+    try { var d = JSON.parse(e.data); logLine($('cpuLog'), new Date().toLocaleTimeString() + '  cpu ' + (d.usage !== undefined ? (d.usage * 100).toFixed(1) + '%' : JSON.stringify(d)), 4000); }
+    catch (e) {}
+  };
+  esCpu.onerror = function() { logLine($('cpuLog'), '[cpu 流断开]', 4000); };
+  esTp = new EventSource(proto + location.host + '/api/sessions/' + sid + '/throughputs/stream');
+  esTp.onmessage = function(e) {
+    try {
+      var d = JSON.parse(e.data);
+      var parts = [];
+      (d.ifaces || []).forEach(function(f) { parts.push('节点' + f.node_id + '/' + f.iface_id + ': ' + fmtBps(f.throughput)); });
+      (d.bridges || []).forEach(function(b) { parts.push('网桥' + b.node_id + ': ' + fmtBps(b.throughput)); });
+      logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + (parts.join(' | ') || '(无流量)'), 6000);
+    } catch (err) { logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + e.data.slice(0, 180), 4000); }
+  };
+  esTp.onerror = function() { logLine($('tpLog'), '[throughputs 流断开/无数据]', 4000); };
+  // 动作时间线（Events 持续流, 设计 §7）—— 先回填持久化历史, 再挂实时
+  fetch('/events?limit=200').then(function(r){ return r.json(); }).then(function(d) {
+    var mine = (d.data.entries || []).filter(function(e) { return e.core_sid == sid; }).slice(-20);
+    mine.forEach(function(e) {
+      try {
+        var d2 = Object.assign({type: e.type, action: e.action}, e.detail || {});
+        logLine($('evLog'), e.ts + '  [' + (e.type || '?') + '] ' + evDesc(d2), 8000);
+      } catch (err) {}
+    });
+    if (mine.length) logLine($('evLog'), '── 以上为历史（platform.db 回填），以下为实时 ──', 8000);
+    else logLine($('evLog'), '[无历史事件; 拓扑动作/告警发生时实时显示]', 8000);
+  }).catch(function(){});
+  esEv = new EventSource(proto + location.host + '/api/sessions/' + sid + '/events/stream');
+  esEv.onmessage = function(e) {
+    if (!e.data || e.data.indexOf('heartbeat') >= 0) return;
+    try {
+      var d = JSON.parse(e.data);
+      logLine($('evLog'), new Date().toLocaleTimeString() + '  [' + (d.type || '?') + '] ' + evDesc(d), 8000);
+    } catch (err) { logLine($('evLog'), new Date().toLocaleTimeString() + '  ' + e.data.slice(0, 160), 8000); }
+  };
+  esEv.onerror = function() { logLine($('evLog'), '[events 流断开]', 8000); };
+  $('subBtn').textContent = '⏹ 退订';
+  $('subBtn').classList.add('on');
+}
+
+function tick() { pollHost(); pollContainers(); }
+loadSessions();
+loadDrillOptions();
+tick();
+setInterval(tick, 3000);
+setInterval(loadDrillOptions, 30000);  // 新演练出现后下拉自动补齐
+</script>
+</body>
+</html>

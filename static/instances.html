@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>节点实例管理</title>
+<style>
+:root{--bg:#0f172a;--bg2:#1e293b;--bg3:#334155;--fg:#e2e8f0;--fg2:#94a3b8;--accent:#3b82f6;--ok:#22c55e;--err:#ef4444;--warn:#facc15}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
+.header{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:var(--bg2);border-bottom:1px solid var(--bg3)}
+.header h1{font-size:18px;font-weight:600}
+.header .sub{color:var(--fg2);font-size:12px;margin-left:12px}
+.header .btns button{margin-left:8px}
+.nav{padding:0 24px;background:var(--bg2);border-bottom:1px solid var(--bg3);display:flex;gap:4px}
+.nav a{display:inline-block;padding:9px 16px;color:var(--fg2);text-decoration:none;font-size:13px;border-bottom:2px solid transparent}
+.nav a.on{color:var(--fg);border-bottom-color:var(--accent)}
+.nav a:hover{color:var(--fg)}
+.btn{display:inline-block;padding:6px 14px;border-radius:6px;border:1px solid var(--bg3);background:var(--bg3);color:var(--fg);cursor:pointer;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{background:transparent;border-color:var(--err);color:var(--err)}
+.btn:hover{filter:brightness(1.15)}
+.btn.mini{padding:3px 10px;font-size:12px}
+.table-wrap{padding:16px 24px}
+table{width:100%;border-collapse:collapse;background:var(--bg2);border-radius:8px;overflow:hidden}
+th{background:var(--bg3);padding:10px 12px;text-align:left;font-size:12px;color:var(--fg2);font-weight:600;white-space:nowrap}
+td{padding:10px 12px;border-top:1px solid var(--bg3);font-size:13px;vertical-align:top}
+.mono{font-family:Consolas,Menlo,monospace;font-size:12.5px}
+.actions{white-space:nowrap}
+.actions a{color:var(--accent);text-decoration:none;margin-right:10px;cursor:pointer;font-size:12.5px}
+.actions a.danger{color:var(--err)}
+.tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600}
+.tag.dk{background:#1e3a8a;color:#93c5fd;border:1px solid #1e40af}
+.tag.ns{background:#312e81;color:#a5b4fc;border:1px solid #3730a3}
+.tag.lock{background:#3b2f05;color:var(--warn);border:1px solid #713f12}
+.mode-tag{display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:600;margin-right:6px}
+.mode-tag.n{background:#052e16;color:#4ade80;border:1px solid #14532d}
+.mode-tag.v{background:#450a0a;color:#f87171;border:1px solid #7f1d1d}
+.mode-tag.s{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+.toast{position:fixed;top:60px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;z-index:300;display:none;max-width:440px}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none;overflow:auto}
+.modal-box{position:absolute;top:6vh;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--bg3);border-radius:10px;padding:24px;width:640px;margin-bottom:6vh}
+h3{margin-bottom:12px;font-size:15px}
+label{display:block;margin-bottom:4px;color:var(--fg2);font-size:12px;margin-top:10px}
+input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:13px}
+.svcgrp{border:1px solid var(--bg3);border-radius:8px;padding:8px 12px;margin-top:8px;background:var(--bg)}
+.svcgrp .sw{font-size:12px;color:var(--fg2);margin-bottom:6px}
+.svcgrp label.opt{display:inline-block;margin-right:14px;margin-top:0;color:var(--fg);font-size:12.5px;cursor:pointer}
+.svcgrp input{vertical-align:-2px}
+.sysgrp{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.sysgrp label.opt{color:var(--fg);font-size:12.5px;cursor:pointer}
+.lockmsg{color:var(--warn);font-size:12.5px;margin-top:10px}
+.empty{color:var(--fg2);text-align:center;padding:28px}
+.note{padding:0 24px 8px;color:var(--fg2);font-size:12px}
+</style>
+</head>
+<body>
+<div class="header">
+  <div style="display:flex;align-items:baseline">
+    <h1>节点实例管理</h1><span class="sub">实例 = 模板（拓扑按引用绑定）；同软件 normal/vuln 互斥；被引用锁定</span>
+  </div>
+  <div class="btns">
+    <button class="btn primary" onclick="openEditor(null)">新建实例</button>
+  </div>
+</div>
+<div class="nav">
+  <a href="/static/target-admin.html">镜像管理</a>
+  <a href="/static/containers.html">容器管理</a>
+  <a class="on" href="/static/instances.html">节点实例</a>
+  <a href="/">拓扑画布（原 SPA）</a>
+  <a href="/static/monitor.html">数据监测</a>
+  <a href="/static/audit.html">审计</a>
+</div>
+<div class="table-wrap">
+<table>
+<thead><tr><th>实例名</th><th>运行时</th><th>镜像</th><th>服务声明</th><th>被引用</th><th>操作</th></tr></thead>
+<div class="tabs" style="padding:14px 24px 0;display:flex;gap:4px">
+  <button class="btn" id="tabDocker" onclick="switchInstTab('docker')" style="border-color:var(--accent)">🐳 docker 靶标容器</button>
+  <button class="btn" id="tabNetns" onclick="switchInstTab('netns')">🖥 netns 系统节点</button>
+</div>
+<table style="margin:14px 24px 0;width:calc(100% - 48px)">
+<tbody id="instList"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+</table>
+</div>
+<div class="note">引用式设计：拓扑绑定实例名，不复制数据；改实例对所有引用拓扑下次部署生效。被引用锁定时出路：① 拓扑解除引用 ② 复制实例再改（设计 §5.2）。</div>
+
+<!-- 实例编辑器 -->
+<div class="modal-bg" id="edModal">
+<div class="modal-box">
+<h3 id="edTitle">新建实例</h3>
+<label>实例名（唯一，引用锚点，创建后不可改）</label>
+<input type="text" id="edName" placeholder="dmz-httpd-vuln">
+<label>运行时类型（创建后固定）</label>
+<select id="edRuntime">
+  <option value="docker">docker（容器节点，需绑定镜像）</option>
+  <option value="netns">netns（CORE 原生节点，共享宿主 rootfs，无镜像）</option>
+</select>
+<div id="edModelWrap" style="display:none">
+  <label>netns 型号 model（决定 CORE 默认服务组与节点形象；创建后可改）</label>
+  <select id="edModel">
+    <option value="">不选（裸节点——全部服务手动声明）</option>
+    <option value="router">router 路由器（zebra/OSPFv2/OSPFv3/IPForward）</option>
+    <option value="host">host 主机（DefaultRoute/SSH）</option>
+    <option value="PC">PC（DefaultRoute）</option>
+    <option value="mdr">mdr 无线路由（zebra/OSPFv3MDR/IPForward）</option>
+  </select>
+</div>
+
+<div id="edImageWrap">
+  <label>镜像（来自镜像管理）</label>
+  <select id="edImage"><option value="">加载中…</option></select>
+</div>
+<label style="margin-top:14px">演练服务（同软件 normal/vuln 二选一；跨软件可组合）</label>
+<div id="edDrillSvcs"></div>
+<label style="margin-top:14px">基础服务（CORE 内置，仅 netns 型常用；docker 型选了也会被 CORE 投递）</label>
+<div id="edSysSvcs" class="sysgrp"></div>
+<label>备注（可选，JSON：ports/cve/flags 等）</label>
+<input type="text" id="edExtra" placeholder='{"ports":[80],"cve":["CVE-2021-41773"]}'>
+<div id="edLockMsg" class="lockmsg" style="display:none"></div>
+<div style="margin-top:16px;text-align:right">
+  <button class="btn" onclick="hideModal('edModal')">取消</button>
+  <button class="btn primary" onclick="saveInstance()">保存</button>
+</div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+<script>
+'use strict';
+if (window.self !== window.top) { var _sn = document.querySelector('.nav'); if (_sn) _sn.style.display = 'none'; } // iframe 嵌入时隐藏顶栏导航(由 shell 接管)
+var AVAIL = {drill: [], system: []};
+var EDITING = null; // null=新建；字符串=正在编辑的实例名
+var IMAGES = [];
+
+function $(id) { return document.getElementById(id); }
+function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function toast(msg, ok) {
+  var t = $('toast'); t.textContent = msg;
+  t.style.background = ok ? '#22c55e' : '#ef4444'; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(function() { t.style.display = 'none'; }, 3500);
+}
+function showModal(id) { $(id).style.display = 'block'; }
+function hideModal(id) { $(id).style.display = 'none'; }
+
+async function api(method, path, body) {
+  var opt = { method: method, headers: {'Content-Type': 'application/json'} };
+  if (body !== undefined) opt.body = JSON.stringify(body);
+  var r = await fetch(path, opt);
+  var d = null;
+  try { d = await r.json(); } catch (e) { throw new Error('HTTP ' + r.status); }
+  if (!d.ok) {
+    var err = d.error;
+    throw new Error((typeof err === 'string') ? err : ((err && err.message) || ('HTTP ' + r.status)));
+  }
+  return d.data;
+}
+
+// ── 列表 ──
+async function loadInstances() {
+  var tb = $('instList');
+  tb.innerHTML = '<tr><td colspan="6" class="empty">加载中…</td></tr>';
+  try {
+    var items = (await api('GET', '/instances')).filter(function(i) { return i.runtime_type === instTab; });
+    if (!items.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">当前 Tab 无实例（切换上方 Tab 或新建）</td></tr>'; return; }
+    tb.innerHTML = items.map(function(i) {
+      var n = esc(i.name);
+      var rtTag = i.runtime_type === 'docker' ? '<span class="tag dk">docker</span>' : '<span class="tag ns">netns</span>';
+      var svc = (i.services || []).map(function(s) {
+        var m = s.mode === 'vuln' ? 'v' : (s.mode === 'normal' ? 'n' : 's');
+        return '<span class="mode-tag ' + m + '">' + esc(s.mode || 'svc') + '</span>' + esc(s.name);
+      }).join('<br>') || '<span style="color:var(--fg2)">无</span>';
+      var refs = (i.referenced_by || []).join(', ');
+      var lock = i.locked ? '<span class="tag lock">🔒 演练使用中</span> ' + esc(refs) : '<span style="color:var(--fg2)">—</span>';
+      return '<tr>'
+        + '<td class="mono">' + n + '</td>'
+        + '<td>' + rtTag + '</td>'
+        + '<td class="mono">' + esc(i.image_tag || '—（宿主 rootfs）') + '</td>'
+        + '<td class="mono" style="font-size:12px">' + svc + '</td>'
+        + '<td style="font-size:12px">' + lock + '</td>'
+        + '<td class="actions">'
+        + '<a href="javascript:void(0)" onclick="openEditor(\'' + n + '\')">' + (i.locked ? '查看' : '编辑') + '</a>'
+        + '<a href="javascript:void(0)" onclick="cloneInstance(\'' + n + '\')">复制</a>'
+        + '<a class="danger" href="javascript:void(0)" onclick="delInstance(\'' + n + '\')">删除</a>'
+        + '</td></tr>';
+    }).join('');
+  } catch (e) {
+    console.error(e);
+    tb.innerHTML = '<tr><td colspan="6" class="empty" style="color:#ef4444">✗ 加载失败: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function delInstance(n) {
+  if (!confirm('确认删除实例 ' + n + ' ？')) return;
+  api('DELETE', '/instances/' + encodeURIComponent(n)).then(function() {
+    toast('已删除 ✓', true); loadInstances();
+  }).catch(function(e) { toast(e.message, false); });
+}
+function cloneInstance(n) {
+  api('POST', '/instances/' + encodeURIComponent(n) + '/clone', {}).then(function(d) {
+    toast('已复制为 ' + d.name + ' ✓', true); loadInstances();
+  }).catch(function(e) { toast(e.message, false); });
+}
+
+// ── 编辑器 ──
+async function renderSvcPicker(selected) {
+  // 按运行时类型区分服务来源（Tab3 分组规则，前提⑤⁺）:
+  //   netns  → 仅 system 基础服务（宿主 rootfs 可用）; drill 服务是容器靶标专属, 不显示
+  //   docker → 仅【绑定镜像清单声明】的演练服务对（按清单过滤——redis 错配在选的时候就被挡住）
+  var rt = $('edRuntime').value;
+  var sel = {};
+  (selected || []).forEach(function(s) { sel[s.name] = true; });
+
+  // drill 服务组（仅 docker; 池 = 绑定镜像清单声明的服务）
+  var drillHtml = '';
+  var drillPool = [];
+  var manifestMissing = false;
+  if (rt === 'docker') {
+    var img = $('edImage').value;
+    if (img) {
+      try {
+        var det = await api('POST', '/targets/image/detail', { ref: img });
+        var declared = (det.service_pairs || []).map(function(p) { return p.name; });
+        drillPool = AVAIL.drill.filter(function(d) { return declared.includes(d.name); });
+        manifestMissing = !det.pieces.manifest;
+      } catch (e) { manifestMissing = true; }
+    }
+    var groups = {};
+    drillPool.forEach(function(d) {
+      (groups[d.software] = groups[d.software] || []).push(d);
+    });
+    var html = Object.keys(groups).sort().map(function(sw) {
+      var pair = groups[sw];
+      var normal = pair.filter(function(p) { return p.mode === 'normal'; })[0];
+      var vuln = pair.filter(function(p) { return p.mode === 'vuln'; })[0];
+      var cur = vuln && sel[vuln.name] ? 'vuln' : (normal && sel[normal.name] ? 'normal' : 'none');
+      // 单模式服务（无 normal/vuln 对，如 svc-forward）：checkbox 启用/不启用
+      if (!normal && !vuln) {
+        var svc = pair[0];
+        var on = sel[svc.name];
+        return '<div class="svcgrp"><div class="sw">' + esc(sw) + '（单模式）</div>'
+          + '<label class="opt"><input type="checkbox" name="sw_' + esc(sw) + '" value="' + esc(svc.name) + '"' + (on ? ' checked' : '') + '> 启用</label>'
+          + '</div>';
+      }
+      return '<div class="svcgrp"><div class="sw">' + esc(sw) + '</div>'
+        + '<label class="opt"><input type="radio" name="sw_' + esc(sw) + '" value="none"' + (cur === 'none' ? ' checked' : '') + '> 不启用</label>'
+        + (normal ? '<label class="opt"><input type="radio" name="sw_' + esc(sw) + '" value="' + esc(normal.name) + '"' + (cur === 'normal' ? ' checked' : '') + '> normal <span class="mono">' + esc(normal.name) + '</span></label>' : '')
+        + (vuln ? '<label class="opt"><input type="radio" name="sw_' + esc(sw) + '" value="' + esc(vuln.name) + '"' + (cur === 'vuln' ? ' checked' : '') + '> vuln <span class="mono">' + esc(vuln.name) + '</span></label>' : '')
+        + '</div>';
+    }).join('');
+    drillHtml = html || '<div style="color:var(--fg2);font-size:12px">该镜像清单未声明演练服务</div>';
+  } else {
+    drillHtml = manifestMissing
+      ? '<div style="color:var(--fg2);font-size:12px">绑定镜像未编目——无法按清单提供演练服务（先编目 manifest）</div>'
+      : '<div style="color:var(--fg2);font-size:12px">netns 节点不使用演练服务（演练服务为容器靶标专属）</div>';
+  }
+  $('edDrillSvcs').innerHTML = drillHtml;
+
+  // system 基础服务（仅 netns 显示全量; docker 不显示——容器内有无由镜像决定, 声明走镜像清单）
+  var sysHtml;
+  if (rt === 'netns') {
+    sysHtml = AVAIL.system.map(function(n) {
+      return '<label class="opt"><input type="checkbox" class="sysopt" value="' + esc(n) + '"' + (sel[n] ? ' checked' : '') + '> ' + esc(n) + '</label>';
+    }).join('') || '<span style="color:var(--fg2);font-size:12px">系统服务列表不可用</span>';
+  } else {
+    // docker: 基础服务条目 = 清单里无 mode 的声明（system 类），有则显示；无则提示
+    var sysEntries = (d.manifest && d.manifest.services || []).filter(function(s) { return !s.mode; }).map(function(s) { return s.name; });
+    sysHtml = sysEntries.length
+      ? sysEntries.map(function(n) {
+          return '<label class="opt"><input type="checkbox" class="sysopt" value="' + esc(n) + '"' + (sel[n] ? ' checked' : '') + '> ' + esc(n) + '</label>';
+        }).join('')
+      : '<div style="color:var(--fg2);font-size:12px">镜像清单未声明基础服务</div>';
+  }
+  $('edSysSvcs').innerHTML = sysHtml;
+}
+
+async function openEditor(name) {
+  EDITING = name || null;
+  $('edTitle').textContent = name ? '编辑实例 · ' + name : '新建实例';
+  $('edName').value = name || '';
+  $('edName').disabled = !!name;
+  $('edExtra').value = '';
+  $('edLockMsg').style.display = 'none';
+  try {
+    if (!AVAIL.drill.length) AVAIL = await api('GET', '/instances/available-services');
+  } catch (e) { toast('可用服务加载失败: ' + e.message, false); }
+  try {
+    if (!IMAGES.length) {
+      var d = await api('GET', '/targets');
+      IMAGES = (d.images || []).map(function(i) { return i.ref; });
+    }
+  } catch (e) { toast('镜像列表加载失败: ' + e.message, false); }
+  $('edImage').innerHTML = IMAGES.map(function(r) { return '<option value="' + esc(r) + '">' + esc(r) + '</option>'; }).join('')
+    || '<option value="">（镜像列表为空）</option>';
+  $('edImage').onchange = function() { renderSvcPicker(selected); };  // ★ 换镜像 → 按新镜像清单重渲染服务区
+
+  var selected = [];
+  if (name) {
+    try {
+      var items = await api('GET', '/instances');
+      var inst = items.filter(function(i) { return i.name === name; })[0] || {};
+      $('edRuntime').value = inst.runtime_type || 'docker';
+      $('edModel').value = inst.model || '';
+      if (inst.image_tag) $('edImage').value = inst.image_tag;
+      selected = inst.services || [];
+      var extra = {};
+      ['ports', 'cve', 'flags', 'notes'].forEach(function(k) { if (inst[k] !== undefined) extra[k] = inst[k]; });
+      if (Object.keys(extra).length) $('edExtra').value = JSON.stringify(extra);
+      if (inst.locked) {
+        $('edLockMsg').textContent = '🔒 被活跃演练引用（' + (inst.referenced_by || []).join(', ') + '），修改/删除被拒。出路：① 删除对应会话（自动解除）② 复制实例再改。';
+        $('edLockMsg').style.display = 'block';
+      }
+    } catch (e) { toast('实例详情加载失败: ' + e.message, false); }
+  }
+  renderSvcPicker(selected);
+  $('edRuntime').onchange = function() {
+    $('edImageWrap').style.display = this.value === 'docker' ? 'block' : 'none';
+    $('edModelWrap').style.display = this.value === 'netns' ? 'block' : 'none';
+    if (this.value === 'netns') {
+      var defaults = {router:['zebra','OSPFv2','OSPFv3','IPForward'], host:['DefaultRoute','SSH'], PC:['DefaultRoute'], mdr:['zebra','OSPFv3MDR','IPForward']};
+      var preset = defaults[this.value] || [];
+      document.querySelectorAll('#edSysSvcs input[type=checkbox]').forEach(function(cb) {
+        cb.checked = preset.includes(cb.value);
+      });
+    }
+    renderSvcPicker(selected);  // ★ 重新渲染服务区（按新 runtime 分源: netns 仅 system / docker 仅 drill）
+  };
+  $('edModel').onchange = function() {
+    // netns 选型号: 按手册 §2.3.1 预勾 CORE 默认服务组（system 勾选, 可增删; CORE 在 services 空时也自动附带）
+    var defaults = {router:['zebra','OSPFv2','OSPFv3','IPForward'], host:['DefaultRoute','SSH'], PC:['DefaultRoute'], mdr:['zebra','OSPFv3MDR','IPForward']};
+    var preset = defaults[this.value] || [];
+    document.querySelectorAll('#edSysSvcs input[type=checkbox]').forEach(function(cb) {
+      cb.checked = preset.includes(cb.value);
+    });
+  };
+  $('edModel').onchange();
+  $('edRuntime').onchange();
+  showModal('edModal');
+}
+
+async function saveInstance() {
+  var name = $('edName').value.trim();
+  if (!name) return toast('请填实例名', false);
+  var rt = $('edRuntime').value;
+  var services = [];
+  document.querySelectorAll('#edDrillSvcs input[type=radio]:checked').forEach(function(r) {
+    if (r.value !== 'none') services.push({ name: r.value, mode: r.value.endsWith('-vuln') ? 'vuln' : 'normal' });
+  });
+  document.querySelectorAll('#edDrillSvcs input[type=checkbox]:checked').forEach(function(c) {
+    services.push({ name: c.value, mode: null });
+  });
+  document.querySelectorAll('#edSysSvcs input.sysopt:checked').forEach(function(c) {
+    services.push({ name: c.value, mode: null });
+  });
+  var body = { name: name, runtime_type: rt, services: services };
+  if (rt === 'netns') {
+    var mdl = $('edModel').value;
+    if (mdl) body.model = mdl;
+  }
+  if (rt === 'docker') {
+    body.image_tag = $('edImage').value;
+    if (!body.image_tag) return toast('docker 型必须选镜像', false);
+  }
+  var exRaw = $('edExtra').value.trim();
+  if (exRaw) {
+    try {
+      var ex = JSON.parse(exRaw);
+      Object.keys(ex).forEach(function(k) { body[k] = ex[k]; });
+    } catch (e) { return toast('备注不是合法 JSON: ' + e.message, false); }
+  }
+  try {
+    if (EDITING) {
+      await api('POST', '/instances/' + encodeURIComponent(EDITING), body);
+      toast('已保存 ✓（引用它的拓扑下次部署生效）', true);
+    } else {
+      await api('POST', '/instances', body);
+      toast('已创建 ✓', true);
+    }
+    hideModal('edModal'); loadInstances();
+  } catch (e) { toast(e.message, false); }
+}
+
+var instTab = 'docker';
+function switchInstTab(t) {
+  instTab = t;
+  document.getElementById('tabDocker').style.borderColor = t === 'docker' ? 'var(--accent)' : 'var(--bg3)';
+  document.getElementById('tabNetns').style.borderColor = t === 'netns' ? 'var(--accent)' : 'var(--bg3)';
+  loadInstances();
+}
+document.addEventListener('DOMContentLoaded', function() { switchInstTab('docker'); });
+</script>
+</body>
+</html>
