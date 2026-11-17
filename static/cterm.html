@@ -27,10 +27,13 @@ body { background:#0a0a0a; color:#0f0; font-family:monospace; height:100vh; disp
 ::-webkit-scrollbar-track { background:#111; }
 ::-webkit-scrollbar-thumb { background:#333; border-radius:3px; }
 </style>
+<link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
+<script defer src="/static/workbench.js?v=20261117"></script>
 </head>
-<body>
+<body class="terminal-page">
 <div class="header">
-  <span class="title">▶ Container Terminal</span>
+  <span class="title">独立容器终端</span>
   <span class="label" id="nodeLabel">node: --</span>
   <span class="label" id="sessionLabel">session: --</span>
 </div>
@@ -91,6 +94,7 @@ function _writeChar(c) {
     _curLine += c;
   }
   _pos++;
+  if (_curLine.length>20000) { _curLine="[行内容已截断]"+_curLine.slice(-16000); _pos=_curLine.length; }
 }
 
 // 把后端发来的裸字节流渲染成可读文本

@@ -38,30 +38,26 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 .tag.ot{background:#1e293b;color:#94a3b8;border:1px solid #334155}
 .empty{color:var(--fg2);text-align:center;padding:14px;font-size:12.5px}
 .streams{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.logbox{background:#0a0a0a;color:#0f0;font-family:Consolas,monospace;font-size:12px;padding:10px;border-radius:6px;height:180px;overflow:auto;white-space:pre-wrap}
+.logbox{background:var(--console);color:var(--console-fg);font-family:Consolas,monospace;font-size:12px;padding:10px;border-radius:6px;height:180px;overflow:auto;white-space:pre-wrap}
 .controls select,.controls button{padding:5px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:12.5px;cursor:pointer}
 .controls{display:flex;gap:8px;align-items:center}
 .controls button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 </style>
+<link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
+<script defer src="/static/workbench.js?v=20261117"></script>
 </head>
-<body>
+<body class="bridge-page">
 <div class="header">
   <div style="display:flex;align-items:baseline">
-    <h1>数据监测</h1><span class="sub">宿主载荷 + CORE 会话容器（深监测）+ 独立容器/其他（列表可见，设计 §7.1）</span>
+    <div class="eyebrow">RUNTIME OBSERVABILITY</div><h1>数据监测</h1><span class="sub">查看宿主资源、容器运行指标和演练事件。</span>
   </div>
   <div class="controls">
     <span style="color:var(--fg2);font-size:12px">刷新间隔 3s</span>
-    <button id="pauseBtn" onclick="togglePause()">⏸ 暂停</button>
+    <button id="pauseBtn" onclick="togglePause()">暂停刷新</button>
   </div>
 </div>
-<div class="nav">
-  <a href="/static/target-admin.html">镜像管理</a>
-  <a href="/static/containers.html">容器管理</a>
-  <a href="/static/instances.html">节点实例</a>
-  <a href="/">拓扑画布</a>
-  <a class="on" href="/static/monitor.html">数据监测</a>
-  <a href="/static/audit.html">审计</a>
-</div>
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a class="on" aria-current="page" href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
 
 <div class="wrap">
   <!-- 宿主载荷 -->
@@ -74,7 +70,7 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 
   <!-- CORE 实时流 -->
   <div class="section">
-    <h3>CORE 实时流（bridge SSE 透传）
+    <h3>演练实时数据
       <span class="controls">
         <select id="sessSel"><option value="">选择会话…</option></select>
         <button id="subBtn" onclick="toggleStreams()">▶ 订阅</button>
@@ -110,6 +106,7 @@ if (window.self !== window.top) { var _sn = document.querySelector('.nav'); if (
 var PAUSED = false;
 var lastTicks = null;
 var esCpu = null, esTp = null, esEv = null;
+var streamGeneration=0;
 
 function fmtBps(v) {
   // CORE throughput 单位 bit/s(收+发合计) → 可读单位
@@ -136,7 +133,7 @@ function barColor(p) { return p >= 90 ? 'err' : (p >= 70 ? 'warn' : ''); }
 
 function togglePause() {
   PAUSED = !PAUSED;
-  $('pauseBtn').textContent = PAUSED ? '▶ 继续' : '⏸ 暂停';
+  $('pauseBtn').textContent = PAUSED ? '▶ 继续' : '暂停刷新';
 }
 
 async function pollHost() {
@@ -256,6 +253,7 @@ async function loadSessions() {
   } catch (e) { console.error(e); }
 }
 function closeStreams() {
+  streamGeneration++;
   try { if (esCpu) esCpu.close(); } catch (e) {}
   try { if (esTp) esTp.close(); } catch (e) {}
   try { if (esEv) esEv.close(); } catch (e) {}
@@ -266,13 +264,15 @@ function closeStreams() {
 function logLine(el, msg, cap) {
   if (el.textContent === '未订阅') el.textContent = '';
   el.textContent += msg + '\n';
-  if (el.children === undefined && el.textContent.length > cap) el.textContent = el.textContent.slice(-cap);
+  if (el.textContent.length > cap) el.textContent = el.textContent.slice(-cap);
   el.scrollTop = el.scrollHeight;
 }
 function toggleStreams() {
   if (esCpu || esTp) { closeStreams(); return; }
   var sid = $('sessSel').value;
   if (!sid) { alert('先选择会话'); return; }
+  const generation=++streamGeneration;
+  ['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='');
   var proto = location.protocol === 'https:' ? 'https://' : 'http://';
   esCpu = new EventSource(proto + location.host + '/api/cpu-usage/stream?delay=1');
   esCpu.onmessage = function(e) {
@@ -291,31 +291,43 @@ function toggleStreams() {
     } catch (err) { logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + e.data.slice(0, 180), 4000); }
   };
   esTp.onerror = function() { logLine($('tpLog'), '[throughputs 流断开/无数据]', 4000); };
-  // 动作时间线（Events 持续流, 设计 §7）—— 先回填持久化历史, 再挂实时
-  fetch('/events?limit=200').then(function(r){ return r.json(); }).then(function(d) {
-    var mine = (d.data.entries || []).filter(function(e) { return e.core_sid == sid; }).slice(-20);
-    mine.forEach(function(e) {
-      try {
-        var d2 = Object.assign({type: e.type, action: e.action}, e.detail || {});
-        logLine($('evLog'), e.ts + '  [' + (e.type || '?') + '] ' + evDesc(d2), 8000);
-      } catch (err) {}
-    });
-    if (mine.length) logLine($('evLog'), '── 以上为历史（platform.db 回填），以下为实时 ──', 8000);
-    else logLine($('evLog'), '[无历史事件; 拓扑动作/告警发生时实时显示]', 8000);
-  }).catch(function(){});
-  esEv = new EventSource(proto + location.host + '/api/sessions/' + sid + '/events/stream');
-  esEv.onmessage = function(e) {
-    if (!e.data || e.data.indexOf('heartbeat') >= 0) return;
-    try {
-      var d = JSON.parse(e.data);
-      logLine($('evLog'), new Date().toLocaleTimeString() + '  [' + (d.type || '?') + '] ' + evDesc(d), 8000);
-    } catch (err) { logLine($('evLog'), new Date().toLocaleTimeString() + '  ' + e.data.slice(0, 160), 8000); }
+  // Subscribe first; ready carries a journal cursor delimiting history and live events.
+  var currentDrill=null,seen=new Map(),loading=true,liveReady=false;
+  function renderTimeline(){
+    if(loading || generation!==streamGeneration)return;
+    var rows=Array.from(seen.values()).sort((a,b)=>a.id-b.id).slice(-200);
+    seen=new Map(rows.map(row=>[row.id,row]));
+    $('evLog').textContent=rows.map(row=>row.ts+'  ['+(row.type||'?')+'] '+evDesc(row.detail)).join('\n');
+    logLine($('evLog'),(liveReady?'CORE 事件订阅已就绪 · ':'事件订阅待恢复 · ')+currentDrill,8000);
+  }
+  esEv=new EventSource(proto+location.host+'/api/sessions/'+sid+'/events/stream');
+  esEv.addEventListener('ready',async function(e){
+    if(generation!==streamGeneration)return;
+    const ready=JSON.parse(e.data);
+    if(currentDrill!==ready.drill_id){seen.clear();currentDrill=ready.drill_id;$('evLog').textContent='';}
+    loading=true;liveReady=true;
+    try{
+      const response=await fetch('/events?limit=200&drill_id='+encodeURIComponent(currentDrill)+'&before_id='+ready.cursor);
+      const payload=await response.json();
+      if(generation!==streamGeneration || currentDrill!==ready.drill_id)return;
+      for(const row of payload.data.entries||[])seen.set(row.id,{id:row.id,ts:row.ts,type:row.type,detail:{type:row.type,action:row.action,...row.detail}});
+    }catch(error){if(generation===streamGeneration)logLine($('evLog'),'历史回填失败: '+error.message,8000);}
+    finally{if(generation===streamGeneration){loading=false;renderTimeline();}}
+  });
+  esEv.onmessage=function(e){
+    if(generation!==streamGeneration)return;
+    try{const d=JSON.parse(e.data);if(currentDrill && d.drill_id!==currentDrill)return;
+      seen.set(d.event_id,{id:d.event_id,ts:d.ts,type:d.type,detail:d});renderTimeline();
+    }catch(error){logLine($('evLog'),'事件解析失败: '+error.message,8000);}
   };
-  esEv.onerror = function() { logLine($('evLog'), '[events 流断开]', 8000); };
+  ['identity-pending','identity-changed','upstream-error'].forEach(type=>esEv.addEventListener(type,e=>{if(generation===streamGeneration){liveReady=false;logLine($('evLog'),'订阅状态变化: '+e.data,8000);}}));
+  esEv.onerror=function(){if(generation===streamGeneration){liveReady=false;logLine($('evLog'),'[事件订阅中断，正在重连；归属未确认时不显示为已就绪]',8000);}};
   $('subBtn').textContent = '⏹ 退订';
   $('subBtn').classList.add('on');
 }
 
+$('sessSel').addEventListener('change',()=>{closeStreams();['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='未订阅');});
+window.addEventListener('pagehide',closeStreams);
 function tick() { pollHost(); pollContainers(); }
 loadSessions();
 loadDrillOptions();

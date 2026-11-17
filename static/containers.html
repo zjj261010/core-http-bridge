@@ -39,34 +39,31 @@ label{display:block;margin-bottom:4px;color:var(--fg2);font-size:12px;margin-top
 input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:13px}
 .execbar{position:fixed;left:0;right:0;bottom:0;background:var(--bg2);border-top:1px solid var(--bg3);padding:10px 24px;display:none;align-items:center;gap:10px;z-index:150}
 .execbar input{flex:1;font-family:Consolas,monospace}
-.execout{position:fixed;left:0;right:0;bottom:52px;max-height:40vh;overflow:auto;background:#0a0a0a;color:#0f0;font-family:Consolas,monospace;font-size:12.5px;padding:12px 24px;display:none;white-space:pre-wrap;z-index:150;border-top:1px solid var(--bg3)}
+.execout{position:fixed;left:0;right:0;bottom:52px;max-height:40vh;overflow:auto;background:var(--console);color:var(--console-fg);font-family:Consolas,monospace;font-size:12.5px;padding:12px 24px;display:none;white-space:pre-wrap;z-index:150;border-top:1px solid var(--bg3)}
 .empty{color:var(--fg2);text-align:center;padding:28px}
 .note{padding:0 24px 8px;color:var(--fg2);font-size:12px}
 </style>
+<link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
+<script defer src="/static/workbench.js?v=20261117"></script>
 </head>
-<body>
+<body class="bridge-page">
 <div class="header">
   <div style="display:flex;align-items:baseline">
-    <h1>容器管理</h1><span class="sub">仅 standalone-* 独立容器（CORE 拓扑容器随会话生命周期，此处物理不可见）</span>
+    <div class="eyebrow">CONTAINER RESOURCES</div><h1>容器管理</h1><span class="sub">管理独立容器的启动、停止、终端与命令操作。</span>
   </div>
   <div class="btns">
     <button class="btn primary" onclick="showModal('runModal')">新建容器</button>
   </div>
 </div>
-<div class="nav">
-  <a href="/static/target-admin.html">镜像管理</a>
-  <a class="on" href="/static/containers.html">容器管理</a>
-  <a href="/">拓扑画布（原 SPA）</a>
-  <a href="/static/monitor.html">数据监测</a>
-  <a href="/static/audit.html">审计</a>
-</div>
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a class="on" aria-current="page" href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
 <div class="table-wrap">
 <table>
 <thead><tr><th>容器名</th><th>镜像</th><th>状态</th><th>操作</th></tr></thead>
 <tbody id="ctList"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
 </table>
 </div>
-<div class="note">操作说明：终端 = 交互式 bash（WebSocket）；exec = 单条命令。所有启停/删除/exec 均留审计痕（设计 §4.4）。</div>
+<div class="note">此处管理独立容器。拓扑内的运行节点请在「运行拓扑」中管理；命令和终端操作可在审计日志中查询。</div>
 
 <div class="execout" id="execOut"></div>
 <div class="execbar" id="execBar">
@@ -137,8 +134,8 @@ async function loadContainers() {
         + '<td class="mono">' + esc(c.image) + '</td>'
         + '<td><span class="st ' + (up ? 'up' : 'down') + '">' + esc(c.status) + '</span></td>'
         + '<td class="actions">'
-        + '<a href="javascript:void(0)" onclick="openTerm(\'' + n + '\')">终端</a>'
-        + '<a href="javascript:void(0)" onclick="openExec(\'' + n + '\')">exec</a>'
+        + (up ? '<a href="javascript:void(0)" onclick="openTerm(\'' + n + '\')">终端</a>' : '')
+        + (up ? '<a href="javascript:void(0)" onclick="openExec(\'' + n + '\')">exec</a>' : '')
         + (up
           ? '<a href="javascript:void(0)" onclick="ctStop(\'' + n + '\')">停止</a>'
           : '<a href="javascript:void(0)" onclick="ctStart(\'' + n + '\')">启动</a>')

@@ -22,6 +22,7 @@ import re
 import signal
 import subprocess
 import threading
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from core.api.grpc import wrappers
 from core.api.grpc import client as grpc_client
 
 from bridge import CoreGrpcBridge
+from settings import settings, request_file
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -132,17 +134,20 @@ bridge: CoreGrpcBridge | None = None
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global bridge
-    bridge = CoreGrpcBridge()
+    bridge = CoreGrpcBridge(settings.core_address)
     bridge.connect()
     logger.info("bridge connected to core-daemon")
     try:
         import platform_db
         platform_db.init()
+        import jobs
+        jobs.recover()
         platform_db.start_sampler()   # reconciler + 事件落库 + 指标采样（5s）
         logger.info("platform db sampler started")
     except Exception:
         logger.exception("platform_db startup failed")
     yield
+    await asyncio.to_thread(__import__("jobs").shutdown)
     bridge.close()
     logger.info("bridge closed")
 
@@ -233,6 +238,7 @@ class NodeModel(BaseModel):
     image: str | None = None
     server: str | None = None
     geo: GeoModel | None = None
+    instance_version: int | None = None
     instance: str | None = None   # 来源实例名——部署即登记引用（实例锁定扳机, 设计 §5.2）
 
 class StartSessionRequest(BaseModel):
@@ -334,17 +340,27 @@ class TopologyNode(BaseModel):
     """拓扑中的节点定义。"""
     id: int
     name: str
-    model: str = "PC"
+    model: str | None = "PC"
     type: str = "default"  # default | switch | wlan | wireless | hub | docker | emane
     x: float = 200
     y: float = 200
     services: list[str] | None = None
     icon: str | None = None
+    image: str | None = None
+    image_ref: str | None = None
+    instance: str | None = None
+    instance_version: int | None = None
+    target_name: str | None = None
+    target_version: int | None = None
+    emane: str | None = None
 
 class TopologyLink(BaseModel):
     """拓扑中的链路定义。支持自定义接口IP。"""
     node1_id: int
     node2_id: int
+    iface1: InterfaceModel | None = None
+    iface2: InterfaceModel | None = None
+    options: LinkOptionsModel | None = None
     iface1_ip4: str | None = None
     iface1_ip4_mask: int | None = None
     iface2_ip4: str | None = None
@@ -369,6 +385,7 @@ class TopologyWlan(BaseModel):
 
 class TopologyInput(BaseModel):
     """完整拓扑描述（JSON/XML 均可）。"""
+    schema_version: int = 2
     name: str = "topology"
     options: dict[str, str] | None = None
     nodes: list[TopologyNode] = []
@@ -448,7 +465,7 @@ def _config_option_dict_to_dict(d: dict[str, wrappers.ConfigOption]) -> dict[str
     return {k: _config_option_to_dict(v) for k, v in d.items()}
 
 def _wrappers_node(m: NodeModel) -> wrappers.Node:
-    pos = wrappers.Position(x=m.position.x, y=m.position.y) if m.position else None
+    pos = wrappers.Position(x=m.position.x, y=m.position.y) if m.position else wrappers.Position(x=200,y=200)
     geo = wrappers.Geo(lat=m.geo.lat, lon=m.geo.lon, alt=m.geo.alt) if m.geo else None
     return wrappers.Node(
         id=m.id, name=m.name,
@@ -531,7 +548,9 @@ def index():
 def list_sessions():
     """获取所有会话摘要列表"""
     sessions = bridge.get_sessions()
-    return [_session_summary_to_dict(s) for s in sessions]
+    import repository
+    pending=repository.read('identity_diagnostics')
+    return [{**_session_summary_to_dict(s),'identity_status':pending.get(str(s.id),{}).get('status','unchecked')} for s in sessions]
 
 @app.post("/api/sessions", status_code=201)
 def create_session(body: dict | None = None):
@@ -543,7 +562,8 @@ def create_session(body: dict | None = None):
         import platform_db
         d["drill_id"] = platform_db.ensure_drill(s.id)
         platform_db.subscribe_events(s.id)  # 创建即订阅, 头几秒动作不漏录
-    except Exception:
+    except Exception as e:
+        d.update(drill_id=None,identity_status="pending",identity_message=str(e))
         logger.exception("issue drill failed")
     return d
 
@@ -551,7 +571,17 @@ def create_session(body: dict | None = None):
 def get_session(session_id: int):
     """获取指定会话详情"""
     s = bridge.get_session(session_id)
-    return _session_to_dict(s)
+    data = _session_to_dict(s)
+    import topologies
+    import platform_db
+    try:
+        data['drill_id']=platform_db.ensure_drill(session_id)
+        data['identity_status']='confirmed'
+        bound=topologies.bindings(session_id)
+        for node in data['nodes']: node.update(bound.get(str(node['id']),{}))
+    except platform_db.IdentityUnconfirmed as e:
+        data.update(drill_id=None,identity_status='pending',identity_message=str(e))
+    return data
 
 @app.delete("/api/sessions/{session_id}")
 def delete_session(session_id: int):
@@ -574,6 +604,10 @@ def delete_session(session_id: int):
     except Exception:
         pass  # 会话已不存在等情况 → 直接尝试删除
     result = bridge.delete_session(session_id)
+    if not result:
+        return {"result":False}
+    import topologies
+    topologies.state(session_id,"closed")
     try:
         import platform_db
         platform_db.unsubscribe_events(session_id)
@@ -592,7 +626,17 @@ def check_session(session_id: int):
 def start_session(session_id: int, body: StartSessionRequest):
     """启动会话 (definition=True 仅定义, False 实例化并启动服务)"""
     s = bridge.get_session(session_id)
+    if not body.definition:
+        import topologies
+        deployment=topologies.prepare_start(session_id)
+        for nid,node in s.nodes.items():
+            runtime=deployment.get('bindings',{}).get(str(nid),{}).get('runtime_name')
+            if runtime: node.name=runtime
     result, exceptions = bridge.start_session(s, definition=body.definition)
+    if result:
+        import topologies
+        topologies.for_session(session_id)
+        topologies.state(session_id,'defined' if body.definition else 'running')
     return {"result": result, "exceptions": exceptions}
 
 @app.post("/api/sessions/{session_id}/stop")
@@ -605,7 +649,10 @@ def stop_session(session_id: int):
         # 2. 停止（销毁运行时资源）
         bridge.stop_session(session_id)
         # 3. 从保存的定义中恢复拓扑（节点/链路仍保留）
-        bridge.start_session(session_data, definition=True)
+        result, exceptions = bridge.start_session(session_data, definition=True)
+        if not result: return {'result':False,'exceptions':exceptions}
+        import topologies
+        topologies.state(session_id,'stopped')
         return {"result": True}
     except Exception as e:
         grpc_err = _parse_grpc_error(e)
@@ -643,18 +690,46 @@ def session_alert(session_id: int, body: AlertBody):
 def add_node(session_id: int, body: NodeModel):
     """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)。
     body.instance 为来源实例名时自动登记部署引用（实例锁定扳机, 设计 §5.2）"""
-    node = _wrappers_node(body)
-    node_id = bridge.add_node(session_id, node)
-    if body.instance:
-        try:
+    import topologies, versions
+    from core_adapter import activate
+    with topologies.mutation_lock:
+        binding = {}
+        if body.instance:
+            try:
+                resolved, dirs = versions.resolve(body.instance,body.instance_version)
+                # Incoming resolved fields are compatibility hints, never a second authority.
+                template = __import__('repository').revision('template',body.instance,resolved['instance_version'])
+                if body.image and body.image not in (resolved.get('image'),resolved.get('image_ref'),template.get('image_tag')):
+                    raise ValueError('请求镜像与模板绑定不一致')
+                if body.services is not None and set(body.services) != {x['name'] for x in template.get('services',[])}:
+                    raise ValueError('请求服务与模板绑定不一致')
+                if body.type not in (None,0,15 if resolved['type']=='docker' else 0):
+                    raise ValueError('节点类型与模板绑定不一致')
+                dep = topologies.for_session(session_id)
+                if body.id is None:
+                    body.id = max(bridge.get_session(session_id).nodes.keys(),default=0)+1
+                display = body.name or body.instance
+                body = body.model_copy(update={**resolved,'type':15 if resolved['type']=='docker' else 0,'name':f'chb-{dep["deployment_id"][-12:]}-{body.id}' if resolved['type']=='docker' else display})
+                if dirs:
+                    result=activate(bridge,dirs,body.services or [])
+                    if result['missing']: raise ValueError('服务未在 daemon 注册: '+', '.join(result['missing']))
+                binding={k:resolved[k] for k in ('instance','instance_version','target_name','target_version','image_ref') if k in resolved}
+                binding.update(display_name=display,runtime_name=body.name)
+            except ValueError as e:
+                raise HTTPException(400,str(e))
+        node_id = bridge.add_node(session_id, _wrappers_node(body))
+        if body.instance:
             import platform_db
-            drill_id = platform_db.ensure_drill(session_id)
-            platform_db.register_deploy_ref(drill_id, session_id, node_id, body.instance)
-            platform_db.write_audit("deploy.ref", session_id=session_id, node_id=node_id,
-                                    instance=body.instance, ok=True)
-        except Exception:
-            logger.exception("register deploy ref failed")
-    return {"node_id": node_id}
+            import repository
+            drill=platform_db.ensure_drill(session_id)
+            try:
+                with repository.transaction():
+                    topologies.bind(session_id,node_id,binding)
+                    platform_db.register_deploy_ref(drill,session_id,node_id,body.instance,body.instance_version)
+            except Exception:
+                bridge.delete_node(session_id,node_id)
+                raise
+        return {"node_id": node_id}
 
 @app.get("/api/sessions/{session_id}/nodes/{node_id}")
 def get_node(session_id: int, node_id: int):
@@ -686,12 +761,12 @@ def delete_node(session_id: int, node_id: int):
                 logger.warning("cascade delete link %s-%s failed: %s", l.node1_id, l.node2_id, e)
     except Exception:
         pass  # 节点已不存在等情况 → 直接删
-    try:
-        import platform_db
-        platform_db.release_deploy_ref_node(session_id, node_id)  # 节点级引用解除（实例锁定粒度）
-    except Exception:
-        logger.exception("release node deploy ref failed")
-    return {"result": bridge.delete_node(session_id, node_id)}
+    result = bridge.delete_node(session_id,node_id)
+    if result:
+        import platform_db, topologies
+        platform_db.release_deploy_ref_node(session_id,node_id)
+        topologies.unbind(session_id,node_id)
+    return {'result':result}
 
 @app.post("/api/sessions/{session_id}/nodes/{node_id}/move")
 def move_node(session_id: int, node_id: int,
@@ -1024,18 +1099,14 @@ def emane_pathlosses(session_id: int, body: EmanePathlossesBody):
 @app.get("/api/sessions/{session_id}/xml")
 def save_xml(session_id: int):
     """导出会话为 EmulationScript XML"""
-    path = Path(f"/tmp/core_session_{session_id}.xml")
-    bridge.save_xml(session_id, str(path))
-    data = path.read_bytes()
-    return JSONResponse(content={"data": data.decode("utf-8"), "session_id": session_id})
+    import native_xml
+    return {'data':native_xml.export(bridge,session_id),'session_id':session_id}
 
-@app.post("/api/xml/open")
+@app.post('/api/xml/open')
 def open_xml(body: OpenXmlBody):
-    """从 XML 字符串导入会话"""
-    path = Path("/tmp/import_core.xml")
-    path.write_text(body.data)
-    result, session_id = bridge.open_xml(path, body.start)
-    return {"result": result, "session_id": session_id}
+    """Native XML with platform bindings, a new deployment identity and unique runtime names."""
+    import native_xml
+    return native_xml.load(bridge,body.data,body.start)
 
 
 # ===================================================================
@@ -1050,9 +1121,9 @@ def get_interfaces():
 @app.post("/api/execute")
 def execute_script(body: ExecuteScriptBody):
     """在 CoreEmu 上下文中执行 Python 脚本"""
-    path = "/tmp/exec_script.py"
-    Path(path).write_text(body.script)
-    session_id = bridge.execute_script(path, body.args)
+    with request_file(".py") as path:
+        path.write_text(body.script, encoding="utf-8")
+        session_id = bridge.execute_script(str(path), body.args)
     return {"session_id": session_id}
 
 
@@ -1084,40 +1155,53 @@ def _event_to_dict(event: wrappers.Event) -> dict:
     return platform_db.event_to_dict(event)
 
 
-@app.get("/api/sessions/{session_id}/events/stream")
-async def events_stream(session_id: int):
-    """SSE 会话事件流（持续版）：会话全生命周期内持续推送拓扑层动作
-    （node/link 增删改、alert 告警、session 状态事件），5s 心跳保活。
-    行为变更（2026-11-14）：原实现收到首个事件即断开且只有类型名，无详情。"""
+@app.get('/api/sessions/{session_id}/events/stream')
+def events_stream(session_id:int,request:Request):
+    """Stream persisted event IDs; history and live data share one journal and cursor."""
+    import platform_db,time
+    try: drill_id=platform_db.ensure_drill(session_id)
+    except platform_db.IdentityUnconfirmed as e: raise HTTPException(503,str(e))
+    if not platform_db.subscribe_events(session_id):
+        raise HTTPException(503,'CORE 事件订阅暂未就绪，正在退避重连')
+    cursor=platform_db.event_cursor(drill_id)
+    header=request.headers.get('last-event-id')
+    if header and header.isdigit(): cursor=min(int(header),cursor)
     def generate():
-        q: list[str] = []
-        lock = threading.Lock()
-        def handler(event: wrappers.Event):
-            with lock:
+        nonlocal cursor
+        yield 'retry: 1000\n\n'
+        yield 'event: ready\ndata: '+json.dumps({'ready':True,'drill_id':drill_id,'cursor':cursor})+'\n\n'
+        check_at=0;heartbeat_at=0
+        while True:
+            if time.monotonic()>=check_at:
+                check_at=time.monotonic()+1
                 try:
-                    q.append(json.dumps(_event_to_dict(event), default=str))
-                except Exception:
-                    q.append(json.dumps({"session_id": event.session_id, "type": "unknown"}))
-        stream = bridge.events(session_id, handler=handler)
-        try:
-            beat = 0
-            while True:
-                with lock:
-                    while q:
-                        yield f"data: {q.pop(0)}\n\n"
-                beat += 1
-                if beat % 50 == 0:  # 5s 心跳兜底: 无事件时前端也知道流是活的
-                    yield ": heartbeat\n\n"
-                import time; time.sleep(0.1)
-        finally:
-            stream.cancel()
-    return StreamingResponse(generate(), media_type="text/event-stream")
+                    current=platform_db.ensure_drill(session_id)
+                    stream=platform_db._event_subs.get(session_id)
+                    if current!=drill_id:
+                        yield 'event: identity-changed\ndata: '+json.dumps({'drill_id':current})+'\n\n'
+                        return
+                    if stream is None or not stream.is_active():
+                        yield 'event: upstream-error\ndata: {"message":"CORE 事件订阅中断，正在重连"}\n\n'
+                        return
+                except Exception as e:
+                    yield 'event: identity-pending\ndata: '+json.dumps({'message':str(e)},ensure_ascii=False)+'\n\n'
+                    return
+            rows=platform_db.query_events(drill_id=drill_id,after_id=cursor,limit=250)
+            for row in rows:
+                event={**row['detail'],'event_id':row['id'],'drill_id':row['drill_id'],'ts':row['ts']}
+                cursor=row['id']
+                yield f'id: {cursor}\ndata: '+json.dumps(event,ensure_ascii=False)+'\n\n'
+            if time.monotonic()>=heartbeat_at:
+                heartbeat_at=time.monotonic()+5
+                yield ': heartbeat\n\n'
+            time.sleep(.1)
+    return StreamingResponse(generate(),media_type='text/event-stream')
 
 @app.get("/api/sessions/{session_id}/throughputs/stream")
 async def throughputs_stream(session_id: int):
     """SSE 吞吐量流（每 3 秒）。注意 handler 必须传给 bridge（CORE 客户端后台线程驱动）"""
     def generate():
-        tps: list[str] = []
+        tps = deque(maxlen=32)
         lock = threading.Lock()
         def handler(event: wrappers.ThroughputsEvent):
             with lock:
@@ -1125,15 +1209,20 @@ async def throughputs_stream(session_id: int):
                     "session_id": event.session_id,
                     "ifaces": [{"node_id": f.node_id, "iface_id": f.iface_id,
                                 "throughput": f.throughput} for f in event.iface_throughputs],
-                    "bridges": [{"node1_id": b.node1_id, "node2_id": b.node2_id,
+                    "bridges": [{"node_id": getattr(b,"node_id",None), "node1_id": getattr(b,"node1_id",None), "node2_id": getattr(b,"node2_id",None),
                                  "throughput": b.throughput} for b in event.bridge_throughputs],
                 }))
         stream = bridge.throughputs(session_id, handler)
         try:
             while True:
+                if hasattr(stream,'is_active') and not stream.is_active():
+                    yield 'event: upstream-error\ndata: {"message":"CORE 订阅中断，正在重连"}\n\n'
+                    return
                 with lock:
-                    while tps:
-                        yield f"data: {tps.pop(0)}\n\n"
+                    batch=list(tps)
+                    tps.clear()
+                for item in batch:
+                    yield f"data: {item}\n\n"
                 yield ": heartbeat\n\n"
                 import time; time.sleep(1)
         finally:
@@ -1144,7 +1233,7 @@ async def throughputs_stream(session_id: int):
 async def cpu_usage_stream(delay: int = 1):
     """SSE CPU 使用率流。含 1s 心跳兜底（daemon 不发事件时前端也知道流是活的）"""
     def generate():
-        cpus: list[str] = []
+        cpus = deque(maxlen=32)
         lock = threading.Lock()
         def handler(event: wrappers.CpuUsageEvent):
             with lock:
@@ -1152,9 +1241,14 @@ async def cpu_usage_stream(delay: int = 1):
         stream = bridge.cpu_usage(delay, handler)
         try:
             while True:
+                if hasattr(stream,'is_active') and not stream.is_active():
+                    yield 'event: upstream-error\ndata: {"message":"CORE 订阅中断，正在重连"}\n\n'
+                    return
                 with lock:
-                    while cpus:
-                        yield f"data: {cpus.pop(0)}\n\n"
+                    batch=list(cpus)
+                    cpus.clear()
+                for item in batch:
+                    yield f"data: {item}\n\n"
                 yield ": heartbeat\n\n"
                 import time; time.sleep(1)
         finally:
@@ -1273,6 +1367,10 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
         iface_id_counter[node_id] += 1
         return nid
 
+    if topo.options:
+        session=bridge.get_session(session_id)
+        session.set_options(topo.options)
+        bridge.start_session(session,definition=True)
     # 1. Create nodes
     for node in topo.nodes:
         ntype = _NODE_TYPE_MAP.get(node.type.lower(), 0)
@@ -1282,9 +1380,12 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
             type=wrappers.NodeType(ntype),
             position=wrappers.Position(x=node.x, y=node.y),
             services=set(node.services) if node.services else None,
-            icon=node.icon or None,
+            icon=node.icon or None, image=node.image, emane=node.emane,
         )
         bridge.add_node(session_id, node_obj)
+        if node.instance:
+            import platform_db
+            platform_db.register_deploy_ref(platform_db.ensure_drill(session_id),session_id,node.id,node.instance,node.instance_version)
 
     # 2. Create WLAN nodes (separate because they have config)
     for wlan in topo.wlans:
@@ -1312,6 +1413,10 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
                 jitter=link.jitter or 0,
                 dup=link.dup or 0,
             )
+        if link.options: opts = _wrappers_link_opts(link.options)
+        for nid,iface in ((link.node1_id,link.iface1),(link.node2_id,link.iface2)):
+            if iface and iface.id is not None:
+                iface_id_counter[nid]=max(iface_id_counter.get(nid,0),iface.id+1)
         # Use custom IPs if provided, else auto-assign
         if link.iface1_ip4:
             iface1 = wrappers.Interface(
@@ -1331,7 +1436,7 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
             iface2 = helper.create_iface(link.node2_id, next_iface_id(link.node2_id))
         bridge.add_link(session_id, wrappers.Link(
             node1_id=link.node1_id, node2_id=link.node2_id,
-            iface1=iface1, iface2=iface2, options=opts,
+            iface1=_wrappers_iface(link.iface1) if link.iface1 else iface1, iface2=_wrappers_iface(link.iface2) if link.iface2 else iface2, options=opts,
         ))
 
 
@@ -1339,6 +1444,8 @@ def _parse_xml_topology(xml_str: str) -> "TopologyInput":
     """解析 XML 格式的拓扑描述。"""
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml_str)
+    if root.tag != "topology":
+        raise ValueError("自定义 XML 根节点须为 topology；原生 XML 使用原生导入")
     name = root.get("name", "topology")
     nodes: list = []
     links: list = []
@@ -1410,7 +1517,14 @@ async def import_topology(request: Request):
     if "xml" in content_type or content_type.endswith("+xml"):
         body = await request.body()
         try:
-            topo = _parse_xml_topology(body.decode("utf-8"))
+            import xml.etree.ElementTree as ET
+            text = body.decode('utf-8')
+            if ET.fromstring(text).tag != 'topology':
+                response = await asyncio.to_thread(open_xml,OpenXmlBody(data=text,start=False))
+                if not response['result']: return _error_response(400,'原生 XML 导入失败')
+                session=await asyncio.to_thread(bridge.get_session,response['session_id'])
+                return {**response,'name':session.file,'nodes':len(session.nodes),'links':len(session.links or [])}
+            topo = _parse_xml_topology(text)
         except Exception as e:
             return _error_response(400, "invalid XML", detail=str(e),
                                    hint="请检查 XML 格式是否正确")
@@ -1427,21 +1541,11 @@ async def import_topology(request: Request):
                                hint="supported: application/json, application/xml")
 
     try:
-        session = await asyncio.to_thread(bridge.create_session)
-        # Build topology directly via gRPC — no start_session needed
-        # (start_session calls session.clear() internally which would wipe everything)
-        await asyncio.to_thread(_build_topology, session.id, topo)
-        return {
-            "session_id": session.id,
-            "name": topo.name,
-            "nodes": len(topo.nodes) + len(topo.wlans),
-            "links": len(topo.links),
-        }
+        import topologies
+        deployment = await asyncio.to_thread(topologies.deploy_definition,topo.model_dump(exclude_none=True))
+        return {'session_id':deployment['core_sid'],'deployment_id':deployment['deployment_id'],'name':topo.name,'nodes':len(topo.nodes)+len(topo.wlans),'links':len(topo.links)}
     except Exception as e:
-        try:
-            bridge.delete_session(session.id)
-        except Exception:
-            pass
+        if isinstance(e,ValueError): return _error_response(400,str(e))
         grpc = _parse_grpc_error(e)
         if grpc:
             return _error_response(grpc["http"], grpc["detail"],
@@ -1468,7 +1572,7 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
     process: subprocess.Popen | None = None
     try:
         # 获取 vcmd 终端命令
-        terminal = bridge.get_node_terminal(session_id, node_id)
+        terminal = await asyncio.to_thread(bridge.get_node_terminal,session_id,node_id)
         if not terminal:
             await websocket.send_json({"error": "terminal not available (session not instantiated?)"})
             await websocket.close(code=1011)
@@ -1507,7 +1611,8 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
         os.set_blocking(master_fd, False)
 
         loop = asyncio.get_running_loop()
-        read_queue: asyncio.Queue = asyncio.Queue()
+        from buffers import PtyQueue
+        read_queue = PtyQueue(loop,master_fd)
 
         def _on_master_readable():
             """PTY master 可读回调: 读数据入队, EOF/IO 错 → None 终止"""
@@ -1523,6 +1628,7 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             else:
                 read_queue.put_nowait(data)
 
+        read_queue.callback = _on_master_readable
         loop.add_reader(master_fd, _on_master_readable)
 
         async def pipe_stdout_to_ws():
@@ -1583,7 +1689,10 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
             for ln in _ansi_re.sub('', chunk.replace('\r', '')).split('\n'):
                 ln = ln.strip()
                 if ln:
-                    pending["output"].append(ln)
+                    if sum(map(len,pending['output'])) < 4000:
+                        pending['output'].append(ln[:2000])
+                    elif not pending['output'][-1].endswith('[输出已截断]'):
+                        pending['output'].append('[输出已截断]')
 
         input_buf: list[str] = []
 
@@ -1607,7 +1716,8 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
                             _on_line("".join(input_buf))
                             input_buf.clear()
                         elif ch >= " ":
-                            input_buf.append(ch)
+                            if len(input_buf)<8192: input_buf.append(ch)
+                            elif input_buf[-1]!='[输入已截断]': input_buf.append('[输入已截断]')
         except WebSocketDisconnect:
             pass
         finally:
@@ -1654,7 +1764,13 @@ async def terminal_ws(websocket: WebSocket, session_id: int, node_id: int):
 # ── 靶标包管理路由（Tab1 镜像管理 + Tab2 独立容器管理）──
 from target_admin import router as target_admin_router
 app.include_router(target_admin_router, tags=["靶标管理"])
+from topologies import router as topology_router
+app.include_router(topology_router, tags=["拓扑草稿与部署"])
+from publications import router as publications_router
+app.include_router(publications_router,tags=["版本草稿与发布"])
+from jobs import router as jobs_router
+app.include_router(jobs_router, tags=["导入任务"])
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("app:app", host=settings.host, port=settings.port)

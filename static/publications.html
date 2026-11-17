@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>版本草稿与发布 · CORE Bridge</title>
+<link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
+<script defer src="/static/workbench.js?v=20261117"></script>
+</head>
+<body class="bridge-page editor-page">
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a class="on" aria-current="page" href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
+<header class="page-header"><div><div class="eyebrow">VERSION PUBLICATIONS</div><h1>版本草稿与发布</h1><p class="page-description">保存、比较并发布靶标与节点模板版本，让每次变更都有明确的依据。</p></div><div class="editor-actions"><button id="reload">刷新列表</button><button id="new" class="button-primary">＋ 新建草稿</button></div></header>
+<p id="message" role="status" aria-live="polite"></p>
+<main class="page-content">
+  <div class="workflow-strip"><span><b>01</b> 保存草稿</span><span>→</span><span><b>02</b> 查看发布差异</span><span>→</span><span><b>03</b> 发布新版本</span></div>
+  <div class="draft-layout">
+    <aside class="surface-card"><h2>已保存的版本草稿</h2><p>保存后可随时回来继续编辑。</p><div id="drafts" class="draft-list"></div></aside>
+    <section class="surface-card">
+      <h2 id="state">新草稿</h2><p>保存草稿不会改变当前发布内容；已有部署继续使用原版本。</p>
+      <div class="form-grid"><label>版本类型<select id="kind"><option value="target">靶标</option><option value="template">节点模板</option></select></label><label>名称<input id="name" placeholder="输入靶标或模板名称" autocomplete="off"></label></div>
+      <button id="history">查看发布历史</button><div id="versions"></div>
+      <label class="code-label" for="body">版本内容<small>JSON</small></label>
+      <textarea id="body" spellcheck="false" aria-label="版本内容 JSON"></textarea>
+      <div class="editor-actions"><button id="save" class="button-primary">保存草稿</button><button id="diff">查看发布差异</button><button id="publish" class="button-accent">发布新版本</button><button id="copy">以当前内容新建草稿</button><button id="delete" class="button-danger">删除未发布草稿</button></div>
+      <pre id="details" aria-live="polite"></pre>
+    </section>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);let draft=null,baseVersion=0;
+async function api(method,path,body){const r=await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const value=await r.json();if(!r.ok||value.ok===false)throw Error(value.detail||value.error?.message||r.statusText);return value.data??value}
+function notice(text){$('message').textContent=text}
+function show(value){draft=value;$('kind').value=value.kind;$('name').value=value.name;$('kind').disabled=$('name').disabled=true;baseVersion=value.base_version;$('body').value=JSON.stringify(value.body,null,2);$('body').readOnly=value.status==='published';$('state').textContent=value.status+' · '+value.draft_id+' · r'+value.revision;$('details').textContent=JSON.stringify({issues:value.issues||[],base_version:value.base_version,published_version:value.published_version},null,2)}
+async function load(){const values=await api('GET','/publications/drafts');$('drafts').replaceChildren();for(const value of values.slice().reverse()){const b=document.createElement('button');b.textContent=(value.kind==='target'?'靶标':'模板')+' '+value.name+' · '+value.status;b.onclick=()=>show(value);$('drafts').appendChild(b)}}
+$('new').onclick=()=>{draft=null;baseVersion=0;$('kind').disabled=$('name').disabled=false;$('name').value='';$('body').readOnly=false;$('body').value=JSON.stringify($('kind').value==='target'?{manifest:{name:'请填写名称',image:{name:'镜像仓库/名称',tag:'v1',ports:[]},services:[]}}:{runtime_type:'netns',model:'PC',services:[{name:'DefaultRoute'}]},null,2);$('state').textContent='新草稿';$('details').textContent=''};
+$('save').onclick=async()=>{try{const payload=JSON.parse($('body').value);const value=await api(draft?'PUT':'POST',draft?'/publications/drafts/'+draft.draft_id:'/publications/drafts',draft?{body:payload,revision:draft.revision}:{kind:$('kind').value,name:$('name').value.trim(),body:payload,base_version:baseVersion||undefined});show(value);await load();notice('草稿已持久保存；当前发布版本未改变')}catch(e){notice(e.message)}};
+$('history').onclick=async()=>{try{const kind=$('kind').value,name=$('name').value.trim(),values=await api('GET','/versions/'+kind+'/'+encodeURIComponent(name));baseVersion=values[0]?.version||0;$('versions').replaceChildren();for(const value of values){const b=document.createElement('button');b.textContent='v'+value.version+' · '+value.publication_state;b.onclick=()=>{draft=null;$('kind').disabled=$('name').disabled=false;$('body').readOnly=false;const copy={...value};delete copy.version;delete copy.entity_id;delete copy.publication_state;$('body').value=JSON.stringify(copy,null,2);$('state').textContent='以 v'+value.version+' 为基础的新草稿，保存后才持久化'};$('versions').appendChild(b)}}catch(e){notice(e.message)}};
+$('diff').onclick=async()=>{try{const current=await api('GET','/versions/'+$('kind').value+'/'+encodeURIComponent($('name').value));$('details').textContent=JSON.stringify({current:current[0]||null,draft:JSON.parse($('body').value)},null,2)}catch(e){notice(e.message)}};
+$('publish').onclick=async()=>{try{if(!draft||draft.status!=='draft')throw Error('请先保存未发布草稿');if(JSON.stringify(JSON.parse($('body').value))!==JSON.stringify(draft.body))throw Error('有未保存修改，请先保存');await $('diff').onclick();if(!confirm('已展示当前发布内容与草稿。确认发布新版本？已有部署不会自动升级。'))return;const result=await api('POST','/publications/drafts/'+draft.draft_id+'/publish',{revision:draft.revision});show(result.draft);await load();notice('已发布 v'+result.published.version+'；需要在拓扑草稿中确认升级后生效')}catch(e){notice(e.message)}};
+$('copy').onclick=()=>{draft=null;baseVersion=0;$('body').readOnly=false;$('kind').disabled=$('name').disabled=false;$('state').textContent='已复制为待保存草稿'};
+$('delete').onclick=async()=>{try{if(!draft||draft.status!=='draft')throw Error('只能删除未发布草稿');await api('DELETE','/publications/drafts/'+draft.draft_id+'?revision='+draft.revision);$('new').click();await load();notice('未发布草稿已删除')}catch(e){notice(e.message)}};
+$('reload').onclick=()=>load().catch(e=>notice(e.message));
+(async()=>{try{await load();const id=new URLSearchParams(location.search).get('draft_id');if(id)show(await api('GET','/publications/drafts/'+encodeURIComponent(id)));else $('new').click()}catch(e){notice(e.message)}})();
+</script>
+</body></html>

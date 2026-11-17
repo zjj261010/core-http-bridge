@@ -79,7 +79,7 @@ class TestSerialization:
     def test_session_to_dict(self):
         s = MagicMock()
         s.id = 1; type(s.state).value = 3
-        s.nodes = []; s.links = []; s.dir = "/tmp/pycore.1"
+        s.nodes = {}; s.links = []; s.dir = "/tmp/pycore.1"
         s.user = "root"; s.file = None
         d = _session_to_dict(s)
         assert d["id"] == 1 and d["state"] == 3

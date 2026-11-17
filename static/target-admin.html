@@ -68,31 +68,27 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
 .progress-wrap{height:8px;background:var(--bg);border:1px solid var(--bg3);border-radius:4px;overflow:hidden;margin-top:8px}
 .progress-bar{height:100%;width:0;background:var(--accent);transition:width .3s}
 </style>
+<link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
+<script defer src="/static/workbench.js?v=20261117"></script>
 </head>
-<body>
+<body class="bridge-page">
 <div class="header">
   <div style="display:flex;align-items:baseline">
-    <h1>镜像管理</h1><span class="sub">靶标包 = 基座镜像（必须）+ 服务定义对（可缺）+ 配方清单（可缺，缺件进详情补录）</span>
+    <div class="eyebrow">TARGET RESOURCES</div><h1>镜像管理</h1><span class="sub">将镜像、服务定义和能力清单组织为可部署的靶标版本。</span>
   </div>
   <div class="btns">
-    <button class="btn primary" onclick="openImportModal()">导入</button>
+    <button class="btn primary" onclick="openImportModal()">＋ 导入靶标包</button>
   </div>
 </div>
-<div class="nav">
-  <a class="on" href="/static/target-admin.html">镜像管理</a>
-  <a href="/static/containers.html">容器管理</a>
-  <a href="/static/instances.html">节点实例</a>
-  <a href="/">拓扑画布（原 SPA）</a>
-  <a href="/static/monitor.html">数据监测</a>
-  <a href="/static/audit.html">审计</a>
-</div>
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a class="on" aria-current="page" href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
 <div class="table-wrap">
 <table>
 <thead><tr><th>镜像名</th><th>大小</th><th>导入时间</th><th>操作</th></tr></thead>
 <tbody id="imgList"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
 </table>
 </div>
-<div class="note">列表只显示已导入镜像；点行进详情——服务定义/清单缺件在详情里补录，镜像未导入则条目不存在（镜像必须先导入）。</div>
+<div class="note">点击镜像查看关联靶标、发布版本与服务生效状态。缺少的服务定义或清单可在详情中补录。</div>
 
 <!-- 导入靶标包（单一入口: 来源（路径/上传）× 粒度（整体/分开）） -->
 <div class="modal-bg" id="bundleModal">
@@ -135,8 +131,8 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
 <div id="impPieces" style="display:none;margin-top:10px">
   <label>① 基座镜像 tar（<b style="color:var(--warn)">必填</b>）</label>
   <div style="display:flex;gap:10px;margin:4px 0;font-size:12px">
-    <label class="mode-label" style="margin:0"><input type="radio" name="pcSrc" value="path" checked onchange="pcSrcSwitch()"> 服务器路径</label>
-    <label class="mode-label" style="margin:0"><input type="radio" name="pcSrc" value="upload" onchange="pcSrcSwitch()"> 本机上传（选定即传）</label>
+    <label class="mode-label" style="margin:0"><input type="radio" name="pcSrc" value="path" checked onchange="$('impSrc').value=this.value;pcSrcSwitch()"> 服务器路径</label>
+    <label class="mode-label" style="margin:0"><input type="radio" name="pcSrc" value="upload" onchange="$('impSrc').value=this.value;pcSrcSwitch()"> 本机上传（选定即传）</label>
   </div>
   <input type="text" id="pcImgPath" placeholder="/opt/artifacts/.../xxx.tar">
   <input type="file" id="pcImgFile" style="display:none" onchange="pcTarChosen(this)">
@@ -150,7 +146,7 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
 </div>
 
 <div style="margin-top:14px;text-align:right">
-  <button class="btn" onclick="hideModal('bundleModal')">取消</button>
+  <button class="btn" onclick="cancelImport()">取消</button>
   <button class="btn primary" onclick="doImport()">导入（镜像落位 → 详情确认）</button>
 </div>
 <div id="bundleResult" style="margin-top:14px"></div>
@@ -161,6 +157,8 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
 <div class="drawer" id="drawer">
   <h2 id="d-ref">—</h2>
   <div class="dn" id="d-sub">—</div>
+  <div id="d-target-select" class="sec" style="display:none"><label>关联靶标 <select id="d-target-name" onchange="openDrawer(CUR,this.value)"></select></label>
+    <label>发布版本 <select id="d-target-version" onchange="openDrawer(CUR,$('d-target-name').value,Number(this.value))"></select></label></div>
 
   <div class="sec"><h4>三件完整性（镜像必须导入；服务定义/清单可缺、缺件在此补录）</h4>
     <div class="kv">
@@ -205,14 +203,14 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
         <div style="margin-top:8px;text-align:right">
           <button class="btn primary" onclick="genAndImportServices()">生成并落位（.py+脚本 自动登记到上方清单）</button>
         </div>
-        <div class="hint-line">生成 = 实现层（.py+脚本落位 custom_services，需重启 core-daemon 生效）+ 编目层（上方清单行）一次完成。</div>
+        <div class="hint-line">生成 = 实现层（.py+脚本落位 custom_services，部署时注册固定版本 生效）+ 编目层（上方清单行）一次完成。</div>
       </div>
       <label>notes</label>
       <input id="mf_notes" placeholder="备注">
     </div>
     <textarea id="d-man-t" spellcheck="false" style="display:none"></textarea>
     <div style="margin-top:10px;text-align:right">
-      <button class="btn primary" onclick="saveManifest()">保存清单</button>
+      <button class="btn" onclick="saveManifest('draft')">保存为版本草稿</button><button class="btn primary" onclick="saveManifest()">发布清单新版本</button>
     </div>
   </div>
 
@@ -220,9 +218,9 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
     <div class="kv">
       <span class="k">容器名</span><span class="mono" id="d-ct-name">—</span>
       <span class="k">操作</span><span>
-        <button class="btn" onclick="runStandalone()">启动</button>
-        <button class="btn" onclick="stopStandalone()">停止</button>
-        <button class="btn danger" onclick="deleteStandalone()">删除</button>
+        <button class="btn" id="d-ct-create" onclick="runStandalone()">创建并启动</button><button class="btn" id="d-ct-start" onclick="startStandalone()">启动已有容器</button><button class="btn" id="d-ct-term" onclick="openStandaloneTerminal()">进入终端</button>
+        <button class="btn" id="d-ct-stop" onclick="stopStandalone()">停止</button>
+        <button class="btn danger" id="d-ct-delete" onclick="deleteStandalone()">删除</button>
       </span>
     </div>
     <div id="d-ct-status" style="margin-top:8px;color:var(--fg2);font-size:12px">—</div>
@@ -231,7 +229,7 @@ textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--
   <!-- 草稿确认区（草稿模式显示） -->
   <div class="sec" id="d-confirmSec" style="display:none">
     <h4>草稿确认（注册 = 镜像导入 + 服务定义落位 + 清单编目，一次完成）</h4>
-    <div class="hint-line">确认后：服务定义写入 custom_services/&lt;包名&gt;/（需重启 core-daemon 生效）、清单编目。取消则草稿丢弃、零残留（镜像也回滚——未 load 不落盘）。</div>
+    <div class="hint-line">确认后：服务定义写入 custom_services/&lt;包名&gt;/（部署时注册固定版本 生效）、清单编目。取消则草稿丢弃、零残留（镜像也回滚——未 load 不落盘）。</div>
     <div style="margin-top:8px;text-align:right"><button class="btn primary" onclick="confirmRegistration()">✓ 确定注册</button></div>
   </div>
 
@@ -307,6 +305,8 @@ async function deleteImage(ref) {
   } catch (e) { toast(e.message || '删除失败', false); }
 }
 
+var importUploads=[];
+async function cancelImport(){ try{await api('POST','/targets/import/discard',{paths:importUploads});importUploads=[];hideModal('bundleModal')}catch(e){toast(e.message,false)} }
 // ═══ 导入（来源: 路径/上传 × 粒度: 整体/分开）═══
 function openImportModal() {
   $('bundleResult').innerHTML = '';
@@ -321,7 +321,8 @@ function impModeSwitch() {
   pcSrcSwitch();
 }
 function pcSrcSwitch() {
-  var src = document.querySelector('input[name=pcSrc]:checked').value;
+  var src = $('impSrc').value;
+  var radio=document.querySelector('input[name=pcSrc][value="'+src+'"]'); if(radio) radio.checked=true;
   $('pcImgPath').style.display = src === 'path' ? 'block' : 'none';
   $('pcImgFile').style.display = src === 'upload' ? 'inline-block' : 'none';
   $('pcProgWrap').style.display = src === 'upload' ? 'block' : 'none';
@@ -333,13 +334,14 @@ function pcTarChosen(inp) {
   document.getElementById('pcProgWrap').style.display = 'block';
   uploadRaw(f, 'uploads/' + f.name, document.getElementById('pcProgBar')).then(function(d) {
     document.getElementById('pcImgUpPath').value = d.path;
+    importUploads.push(d.path);
     toast('镜像已上传 ✓', true);
   }).catch(function(e) { toast('上传失败: ' + e.message, false); });
 }
-function uploadRaw(file, relPath, barEl, textEl) {
+function uploadRaw(file, relPath, barEl, textEl, endpoint) {
   return new Promise(function(resolve, reject) {
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/targets/import/upload?rel_path=' + encodeURIComponent(relPath));
+    xhr.open('POST', endpoint || '/targets/import/upload?rel_path=' + encodeURIComponent(relPath));
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = function(ev) {
       if (ev.lengthComputable && barEl) {
@@ -349,7 +351,7 @@ function uploadRaw(file, relPath, barEl, textEl) {
       }
     };
     xhr.onload = function() {
-      try { var d = JSON.parse(xhr.responseText); if (d.ok) resolve(d.data); else reject(new Error(d.error || '上传失败')); }
+      try { var d = JSON.parse(xhr.responseText); if (d.ok) resolve(d.data); else reject(new Error((d.error || {}).message || '上传失败')); }
       catch (e) { reject(new Error('上传响应异常')); }
     };
     xhr.onerror = function() { reject(new Error('网络错误')); };
@@ -357,8 +359,8 @@ function uploadRaw(file, relPath, barEl, textEl) {
   });
 }
 async function doImport() {
-  var src = document.querySelector('input[name=impSrc]:checked').value;
-  var grain = document.querySelector('input[name=impGrain]:checked').value;
+  var src = $('impSrc').value;
+  var grain = $('impGrain').value;
   $('bundleResult').innerHTML = '<div style="color:var(--fg2)">导入中（大镜像需数十秒到数分钟）…</div>';
   try {
     if (grain === 'bundle') {
@@ -373,14 +375,14 @@ async function doImport() {
         if (!pkg) return $('bundleResult').innerHTML = '<div style="color:#ef4444">✗ 请填包名</div>';
         if (!arch) return $('bundleResult').innerHTML = '<div style="color:#ef4444">✗ 请选择整包压缩包（.tar.gz）</div>';
         $('buProgWrap').style.display = 'block';
-        await uploadRaw(arch, 'tmp/' + pkg + '.tar.gz', $('buProgBar'), $('buProgText'));
-        dir = '/opt/artifacts/core-drill/image-imports/' + pkg;
+        var uploaded = await uploadRaw(arch, '', $('buProgBar'), $('buProgText'), '/targets/import/bundle/upload?name='+encodeURIComponent(pkg));
+        dir = uploaded.dir; importUploads.push(dir);
       }
       // 草稿读取（路径模式）或上传即有内容（上传模式）
       var draft = await api('GET', '/targets/import/bundle/draft?dir=' + encodeURIComponent(dir));
       $('bundleResult').innerHTML = '';
       hideModal('bundleModal');
-      openDrawerDraft(dir, draft);
+      openDrawerDraft(Object.assign({mode:'bundle', dir:dir, package:draft.package}, draft.draft));
       return;
     }
     // 分开导入: 全部进草稿（镜像 load/服务落位/清单编目 延迟到「确定注册」一次完成）
@@ -409,6 +411,29 @@ async function doImport() {
     $('bundleResult').innerHTML = '<div style="color:#ef4444">✗ ' + esc(e.message) + '</div>';
   }
 }
+function openPublication(id){if(parent!==window)parent.postMessage({type:'open-publication',draftId:id},location.origin);else window.open('/static/publications.html?draft_id='+encodeURIComponent(id),'_blank');}
+async function followJob(id) {
+  try {
+    var job=await api('GET','/jobs/'+id);
+    showModal('bundleModal');
+    if (job.result && job.result.pieces) { renderImportResult(job.result);var stage=document.createElement('div');stage.textContent=job.status+' · 当前件: '+(job.stage||'等待');$('bundleResult').prepend(stage); }
+    else $('bundleResult').textContent=job.status+' · '+(job.message || '等待处理');
+    if (job.status === 'queued' || job.status === 'running') setTimeout(()=>followJob(id),1500);
+    else {
+      localStorage.removeItem('deliveryJob');
+      var result=document.createElement('div');result.textContent='任务 '+job.job_id+'：'+job.status;$('bundleResult').prepend(result);
+      if (['partial','failed','interrupted'].includes(job.status)) {
+        var edit=document.createElement('textarea');edit.style.width='100%';edit.rows=10;edit.value=JSON.stringify(job.editable||{},null,2);
+        var label=document.createElement('p');label.textContent='可修改缺件内容后续办。内容和实际结果未变化的已完成件会跳过；镜像声明变化时重新校验归档。';
+        var button=document.createElement('button');button.className='btn';button.textContent='续办失败或缺失的件';
+        button.onclick=async()=>{try{var changes=JSON.parse(edit.value);var j=await api('POST','/jobs/'+id+'/resume',changes);localStorage.setItem('deliveryJob',j.job_id);followJob(j.job_id)}catch(e){toast(e.message,false)}};
+        $('bundleResult').append(label,edit,button);
+      }
+      loadImages();
+    }
+  } catch(e) { toast('任务查询失败: '+e.message,false); }
+}
+if (localStorage.getItem('deliveryJob')) followJob(localStorage.getItem('deliveryJob'));
 function renderImportResult(d) {
   var mark = function(ok) {
     if (ok === true) return '<span style="color:#4ade80">✓ 就位</span>';
@@ -435,8 +460,11 @@ function dot(b, label) { return '<span class="dot ' + (b ? 'on' : 'off') + '">�
 
 // 草稿模式抽屉渲染（整体上传后 / 分开导入后 / 路径模式草稿读取后）
 function openDrawerDraft(draft) {
+  drawerGeneration++;
+  $('d-target-select').style.display='none';
   draftState = draft;
   var man = draft.manifest || {};
+  var allPy=Object.values(draft.python_files || {}).join('\n')+'\n'+(draft.py||'');
   var img = man.image || {};
   var ref = (img.name || draft.package || 'draft') + ':' + (img.tag || 'v1');
   CUR = ref;
@@ -444,10 +472,10 @@ function openDrawerDraft(draft) {
   $('d-sub').textContent = '草稿 · 待注册（来源: ' + (draft.mode === 'bundle' ? '整包' : '分开') + '导入）';
   // 三件: 草稿视角全部视为将就位
   $('d-p-img').innerHTML = dot(true, '镜像（注册时导入）');
-  $('d-p-svc').innerHTML = dot(!!draft.py, '服务定义' + (draft.py ? '（草稿含 ' + (_extractSvcNames(draft.py).length) + ' 个服务）' : '——未提供，可粘贴或暂缺'));
+  $('d-p-svc').innerHTML = dot(!!allPy.trim(), '服务定义' + (allPy.trim() ? '（草稿含 ' + (_extractSvcNames(allPy).length) + ' 个服务）' : '——未提供，可粘贴或暂缺'));
   $('d-p-man').innerHTML = dot(!!man, '配方清单' + (man ? '（草稿）' : '——未提供，可在下方表单填写'));
   $('d-inspect').innerHTML = '<span class="k">状态</span><span>草稿——确定注册后镜像导入并显示 inspect</span>';
-  var svcs = man.services || _extractSvcNames(draft.py).map(function(n) { return { name: n, mode: n.endsWith('-vuln') ? 'vuln' : 'normal' }; });
+  var svcs = man.services || _extractSvcNames(allPy).map(function(n) { return { name: n, mode: n.endsWith('-vuln') ? 'vuln' : 'normal' }; });
   $('d-svcpair').innerHTML = svcs.length
     ? svcs.map(function(s) { return '<span class="mode-tag ' + (s.mode === 'vuln' ? 'v' : 'n') + '">' + esc(s.mode || 'svc') + '</span>' + esc(s.name); }).join('<br>')
     : '<span style="color:var(--fg2)">未声明</span>';
@@ -461,33 +489,49 @@ function openDrawerDraft(draft) {
   $('ov').classList.add('show');
 }
 function _extractSvcNames(py) {
-  var re = /name:\s*str\s*=\s*"([^"]+)"/g, out = [], m;
+  var re = /name\s*(?::\s*str)?\s*=\s*["']([^"']+)["']/g, out = [], m;
   while ((m = re.exec(py || ''))) out.push(m[1]);
   return out;
 }
 async function confirmRegistration() {
   if (!draftState) return;
-  var man = manJsonMode ? JSON.parse($('d-man-t').value) : formToManifest();
-  if (!man.name) return toast('manifest.name 必填', false);
   try {
-    var d;
-    if (draftState.mode === 'bundle') {
-      d = await api('POST', '/targets/import/bundle/confirm', { dir: draftState.dir, manifest: man });
-    } else {
-      d = await api('POST', '/targets/import/pieces', {
-        image_path: draftState.image_path, package: man.name,
-        py: draftState.py, templates: draftState.templates || {}, manifest: man });
-    }
-    draftState.registered = true;
+    var man = manJsonMode ? JSON.parse($('d-man-t').value) : formToManifest();
+    if (!man.name) return toast('manifest.name 必填', false);
+    var body = {manifest:man,py:draftState.py,templates:draftState.templates || {},python_files:draftState.python_files,package:man.name};
+    if (draftState.mode === 'bundle') body.dir=draftState.dir;
+    else body.image_path=draftState.image_path;
+    var impact=await api('POST','/targets/import/impact',body);
+    if(impact.updated_services.length||impact.updated_templates.length){var preview=document.createElement('pre');preview.textContent=JSON.stringify(impact,null,2);$('d-svcpair').appendChild(preview);if(!confirm(impact.message+'\n涉及 '+impact.updated_services.length+' 项同名服务、'+impact.updated_templates.length+' 个模板文件。确认创建新交付版本？'))return;}
+    var job=await api('POST','/jobs/import',body);
+    localStorage.setItem('deliveryJob',job.job_id);
+    followJob(job.job_id);
+    draftState.registered = true; importUploads=[];
     draftState = null;
-    toast('已注册 ✓（重启 core-daemon 后服务生效）', true);
+    toast('已提交后台任务 '+job.job_id, true);
     closeDrawer(); loadImages();
   } catch (e) { toast('注册失败: ' + (e.message || '未知错误'), false); }
 }
 
-function openDrawer(ref) {
+var drawerGeneration=0;
+function openDrawer(ref,targetName,targetVersion) {
+  var generation=++drawerGeneration;
+  draftState=null;
+  $('d-confirmSec').style.display='none';
   CUR = ref;
-  api('POST', '/targets/image/detail', { ref: ref }).then(function(d) {
+  Promise.all([api('POST', '/targets/image/detail', { ref: ref,target_name:targetName,target_version:targetVersion }),api('GET','/targets/registry')]).then(async function(values) {
+    if(generation!==drawerGeneration)return;
+    var d=values[0], targets=values[1].filter(function(t){return t.image_ref===ref&&t.version});
+    var selected=d.selected_target;
+    $('d-target-select').style.display=targets.length?'block':'none';
+    $('d-target-name').innerHTML=targets.map(function(t){return '<option value="'+esc(t.name)+'">'+esc(t.name)+'</option>'}).join('');
+    if(selected){
+      $('d-target-name').value=selected.name;
+      var history=await api('GET','/versions/target/'+encodeURIComponent(selected.name));
+      if(generation!==drawerGeneration)return;
+      $('d-target-version').innerHTML=history.filter(function(t){return t.image_ref===ref}).map(function(t){return '<option value="'+t.version+'">v'+t.version+'</option>'}).join('');
+      $('d-target-version').value=String(selected.version);
+    }
     $('d-ref').textContent = ref;
     var ins = d.inspect || {};
     $('d-sub').textContent = ins.id ? ('ID ' + ins.id + ' · ' + (ins.os_arch || '—')) : '';
@@ -520,26 +564,41 @@ function openDrawer(ref) {
         + '</tbody></table>'
       : '<span style="color:var(--fg2)">未声明——用下方生成器补录，或在清单里声明</span>';
     // 清单 → 表单
-    var seg = ref.split('/').pop().split(':');
+    var colon = ref.lastIndexOf(':');
+    var seg = colon > ref.lastIndexOf('/') ? [ref.slice(0,colon), ref.slice(colon+1)] : [ref,'latest'];
     curManifest = d.manifest || { name: seg[0], software: seg[0], version: '', cve: [],
       image: { name: seg[0], tag: seg[1] || 'latest', ports: [] }, services: [], flags: [], notes: '手动补录' };
     manifestToForm(curManifest);
+    if(selected)showActivation(selected.name,selected.version,generation);
     fetch('/instances/available-services').then(function(r){ return r.json(); }).then(function(av) {
       $('svcRegList').innerHTML = (av.data.drill || []).map(function(x) { return '<option value="' + esc(x.name) + '">'; }).join('');
     }).catch(function(){});
-    var cn = 'standalone-' + seg[0];
+    var cn = 'standalone-' + seg[0].split('/').pop();
     $('d-ct-name').textContent = cn;
     $('d-ct-status').textContent = '查询中…';
     refreshStandalone(cn);
     $('drawer').classList.add('open');
     $('ov').classList.add('show');
-  }).catch(function(e) { toast(e.message || '详情加载失败', false); });
+  }).catch(function(e) { if(generation===drawerGeneration)toast(e.message || '详情加载失败', false); });
 }
-function closeDrawer() {
+async function showActivation(name,version,generation){
+  var forRef=CUR;
+  if(!version){try{const all=await api('GET','/versions/target/'+encodeURIComponent(name));version=all[0]?.version}catch(e){return}}
+  if(!version)return;
+  try{const value=await api('GET','/versions/target/'+encodeURIComponent(name)+'/'+version+'/activation');
+    if(CUR!==forRef||(generation!==undefined&&generation!==drawerGeneration))return;
+    const label={registered:'daemon 已注册', 'pending-daemon':'已落盘，待部署注册',unknown:'daemon 状态待确认'};
+    $('d-p-svc').textContent=(value.on_disk?'服务文件已落盘':'服务文件缺失')+' · '+label[value.state];
+    const details=document.createElement('pre');details.textContent=JSON.stringify({靶标版本:version,服务状态:value.state,缺少注册:value.missing,诊断:value.diagnostic,引用:value.references,关联部署:value.deployments},null,2);$('d-svcpair').appendChild(details);
+  }catch(e){if(CUR===forRef&&(generation===undefined||generation===drawerGeneration))$('d-p-svc').textContent='生效状态查询失败: '+e.message}
+}
+async function closeDrawer() {
   if (draftState && !draftState.registered) {
     if (!confirm('存在未注册的草稿（服务定义/清单），关闭将丢弃。确定关闭？')) return;
+    try { await api('POST','/targets/import/discard',{paths:importUploads}); importUploads=[]; } catch(e) { return toast(e.message,false); }
   }
   draftState = null;
+  drawerGeneration++;
   $('d-confirmSec').style.display = 'none';
   $('drawer').classList.remove('open');
   $('ov').classList.remove('show');
@@ -547,6 +606,7 @@ function closeDrawer() {
 
 // ═══ 配方清单: 表单 ↔ JSON ═══
 function manifestToForm(man) {
+  $('d-man-t').value = JSON.stringify(man, null, 2);
   $('mf_name').value = man.name || '';
   $('mf_sw').value = man.software || '';
   $('mf_ver').value = man.version || '';
@@ -554,7 +614,7 @@ function manifestToForm(man) {
   $('mf_ports').value = ((man.image || {}).ports || man.ports || []).join(', ');
   $('mf_notes').value = man.notes || '';
   var box = $('mfSvcRows'); box.innerHTML = '';
-  (man.services || []).forEach(function(s) { addSvcRow(s.name, s.mode || 'normal'); });
+  (man.services || []).forEach(function(s) { addSvcRow(s.name, s.mode || ''); });
   if (!(man.services || []).length) addSvcRow('', 'normal');
 }
 function toggleGenForm() {
@@ -567,7 +627,7 @@ function addSvcRow(name, mode) {
   var div = document.createElement('div');
   div.className = 'svc-row';
   div.innerHTML = '<input list="svcRegList" placeholder="svc-xxx-normal（生成器自动填入/手选已注册）" value="' + esc(name || '') + '">'
-    + '<select><option value="normal">normal</option><option value="vuln"' + (mode === 'vuln' ? ' selected' : '') + '>vuln</option></select>'
+    + '<select><option value=""' + (!mode ? ' selected' : '') + '>单模式 / 基础服务</option><option value="normal"' + (mode === 'normal' ? ' selected' : '') + '>normal</option><option value="vuln"' + (mode === 'vuln' ? ' selected' : '') + '>vuln</option></select>'
     + '<button class="btn mini" onclick="this.parentNode.remove()">✕</button>';
   $('mfSvcRows').appendChild(div);
 }
@@ -580,11 +640,12 @@ function formToManifest() {
   var ports = $('mf_ports').value.split(',').map(function(x) { return parseInt(x.trim(), 10); }).filter(function(x) { return !isNaN(x); });
   man.image = man.image || {};
   man.image.ports = ports;
+  var oldServices = man.services || [];
   man.services = [];
   document.querySelectorAll('#mfSvcRows .svc-row').forEach(function(row) {
     var name = row.querySelector('input').value.trim();
     var mode = row.querySelector('select').value;
-    if (name) man.services.push({ name: name, mode: mode });
+    if (name) { var entry = Object.assign({}, oldServices.find(s => s.name === name) || {}, {name:name}); if (mode) entry.mode=mode; else delete entry.mode; man.services.push(entry); }
   });
   man.notes = $('mf_notes').value.trim();
   man.flags = man.flags || [];
@@ -607,7 +668,7 @@ function toggleManMode() {
     $('d-man-t').style.display = 'none';
   }
 }
-async function saveManifest() {
+async function saveManifest(mode) {
   var man;
   if (manJsonMode) {
     try { man = JSON.parse($('d-man-t').value); }
@@ -617,6 +678,7 @@ async function saveManifest() {
   }
   if (!man.name) return toast('manifest.name 必填', false);
   try {
+    if(mode==='draft'){var draft=await api('POST','/publications/drafts',{kind:'target',name:man.name,body:{manifest:man},base_version:curManifest?.target_revision});openPublication(draft.draft_id);return;}
     await api('POST', '/targets/manifest/' + encodeURIComponent(man.name), { manifest: man });
     toast('清单已保存 ✓', true); loadImages(); openDrawer(CUR);
   } catch (e) { toast(e.message || '保存失败', false); }
@@ -628,12 +690,14 @@ function pyClass(prefix) {
     .map(function(x) { return x.charAt(0).toUpperCase() + x.slice(1); }).join('') || 'Gen';
 }
 function genAndImportServices() {
+  if(manJsonMode){try{curManifest=JSON.parse($('d-man-t').value);manifestToForm(curManifest)}catch(e){return toast('请先修正清单 JSON: '+e.message,false)}}
   var prefix = $('gen_prefix').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
   var proc = $('gen_proc').value.trim();
   var cmdN = $('gen_cmdn').value.trim();
   var cmdV = $('gen_cmdv').value.trim();
   if (!prefix || !proc || !cmdN || !cmdV) return toast('前缀 / 进程名 / 两条启动命令都要填', false);
   var pkg = (curManifest && curManifest.name) || CUR.split('/').pop().split(':')[0];
+  if (!prefix.startsWith(pkg+'-')) prefix=pkg+'-'+prefix;
   var py = 'from core.services.base import CoreService\n\n\n'
     + 'class Svc' + pyClass(prefix) + 'Normal(CoreService):\n'
     + '    name: str = "svc-' + prefix + '-normal"\n'
@@ -664,10 +728,12 @@ function genAndImportServices() {
     [['svc-' + prefix + '-normal', 'normal'], ['svc-' + prefix + '-vuln', 'vuln']].forEach(function(pair) {
       if (!have[pair[0]]) addSvcRow(pair[0], pair[1]);
     });
+    if(manJsonMode) $('d-man-t').value=JSON.stringify(formToManifest(),null,2);
     toast('已并入草稿 ✓（svc-' + prefix + '-normal/-vuln，确定注册时统一落位）', true);
     return;
   }
-  api('POST', '/targets/import/services', { package: pkg, py: py, templates: templates }).then(function() {
+  api('POST', '/targets/import/services', { package: pkg, py: py, templates: templates }).then(function(result) {
+    if (!result.pieces.services.ok) throw Error(result.pieces.services.detail);
     var have = {};
     document.querySelectorAll('#mfSvcRows .svc-row').forEach(function(row) {
       have[row.querySelector('input').value.trim()] = true;
@@ -675,7 +741,8 @@ function genAndImportServices() {
     [['svc-' + prefix + '-normal', 'normal'], ['svc-' + prefix + '-vuln', 'vuln']].forEach(function(pair) {
       if (!have[pair[0]]) addSvcRow(pair[0], pair[1]);
     });
-    toast('服务对已生成落位 ✓（svc-' + prefix + '-normal/-vuln，需重启 core-daemon 生效）', true);
+    var manifest=formToManifest();if(manJsonMode) $('d-man-t').value=JSON.stringify(manifest,null,2);
+    return api('POST','/targets/manifest/'+encodeURIComponent(pkg),{manifest:manifest}).then(function(){toast('服务定义和清单已保存；部署时注册固定版本',true);loadImages()});
   }).catch(function(e) { toast(e.message || '生成导入失败', false); });
 }
 
@@ -685,8 +752,13 @@ async function refreshStandalone(name) {
     var list = await api('GET', '/containers/standalone');
     var it = (list || []).filter(function(x) { return x.name === name; })[0];
     $('d-ct-status').textContent = it ? (it.image + ' · ' + it.status) : '未创建';
+    var up=it && it.status.startsWith('Up');
+    $('d-ct-create').style.display=it?'none':''; $('d-ct-start').style.display=it&&!up?'':'none';
+    $('d-ct-term').style.display=up?'':'none'; $('d-ct-stop').style.display=up?'':'none'; $('d-ct-delete').style.display=it?'':'none';
   } catch (e) { $('d-ct-status').textContent = '查询失败: ' + e.message; }
 }
+function openStandaloneTerminal(){window.open('/static/cterm.html?name='+encodeURIComponent($('d-ct-name').textContent),'_blank');}
+async function startStandalone(){var name=$('d-ct-name').textContent;try{await api('POST','/containers/standalone/'+encodeURIComponent(name)+'/start');refreshStandalone(name)}catch(e){toast(e.message,false)}}
 function runStandalone() {
   if (!CUR) return;
   var name = $('d-ct-name').textContent;

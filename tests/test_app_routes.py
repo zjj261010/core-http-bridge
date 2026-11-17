@@ -21,7 +21,7 @@ def _mock_session(id: int = 1, state: int = 1):
     s = MagicMock()
     s.id = id
     type(s).state = PropertyMock(return_value=MagicMock(value=state))
-    s.nodes = []
+    s.nodes = {}
     s.links = []
     s.dir = f"/tmp/pycore.{id}"
     s.user = "root"
@@ -161,6 +161,8 @@ class TestSessionRoutes:
 
     def test_stop(self, client: TestClient, mock_bridge: MagicMock):
         mock_bridge.stop_session.return_value = True
+        mock_bridge.start_session.return_value = (True, [])
+        mock_bridge.get_session.return_value = _mock_session()
         resp = client.post("/api/sessions/1/stop")
         assert resp.json() == {"result": True}
 
@@ -270,9 +272,9 @@ class TestLinkRoutes:
     def test_delete(self, client: TestClient, mock_bridge: MagicMock):
         mock_bridge.delete_link.return_value = True
         import json as _json
-        resp = client.delete(
+        resp = client.request("DELETE",
             "/api/sessions/1/links",
-            data=_json.dumps({"node1_id": 1, "node2_id": 2,
+            content=_json.dumps({"node1_id": 1, "node2_id": 2,
                     "iface1": {"id": 0}, "iface2": {"id": 0}}),
             headers={"Content-Type": "application/json"},
         )
@@ -409,14 +411,15 @@ class TestEmaneRoutes:
 
 class TestXmlRoutes:
     def test_save(self, client: TestClient, mock_bridge: MagicMock):
-        mock_bridge.save_xml.return_value = None
+        from pathlib import Path
+        mock_bridge.save_xml.side_effect = lambda sid, path: Path(path).write_text("<scenario/>")
         resp = client.get("/api/sessions/1/xml")
         assert resp.status_code == 200
 
     def test_open(self, client: TestClient, mock_bridge: MagicMock):
         mock_bridge.open_xml.return_value = (True, 5)
         resp = client.post("/api/xml/open",
-                          json={"data": "<xml/>", "start": False})
+                          json={"data": "<scenario/>", "start": False})
         assert resp.json()["result"] is True
         assert resp.json()["session_id"] == 5
 

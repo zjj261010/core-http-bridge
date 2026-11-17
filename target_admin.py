@@ -10,26 +10,36 @@ import json
 import logging
 import os
 import pty
+from pathlib import Path
 import signal
 import subprocess
+import tarfile
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from settings import settings
+import storage
+import delivery
+import threading
+import functools
+import repository
+import versions
+_store_lock = threading.RLock()
+_dirty_packages=set()
 
 logger = logging.getLogger("core.target_admin")
 
 router = APIRouter()
 
 # ── 路径常量 ──
-MANIFEST_STORE = "/opt/artifacts/core-drill/manifests.json"
-CUSTOM_SERVICES_DIR = "/opt/core/etc/custom_services"
-IMAGE_IMPORT_DIR = "/opt/artifacts/core-drill/image-imports"
-INSTANCE_STORE = "/opt/artifacts/core-drill/instances.json"
-TOPOLOGY_STORE = "/opt/artifacts/core-drill/topologies.json"
-AUDIT_LOG = "/opt/artifacts/core-drill/audit.jsonl"
+MANIFEST_STORE = str(settings.data_dir / "manifests.json")
+CUSTOM_SERVICES_DIR = str(settings.services_dir)
+IMAGE_IMPORT_DIR = str(settings.import_dir)
+INSTANCE_STORE = str(settings.data_dir / "instances.json")
+TOPOLOGY_STORE = str(settings.data_dir / "topologies.json")
+AUDIT_LOG = str(settings.data_dir / "audit.jsonl")
 STANDALONE_PREFIX = "standalone-"
 
-os.makedirs(IMAGE_IMPORT_DIR, exist_ok=True)
 
 
 # ═══════════════════════════════════════════════
@@ -37,55 +47,115 @@ os.makedirs(IMAGE_IMPORT_DIR, exist_ok=True)
 # ═══════════════════════════════════════════════
 
 def _load_manifests() -> dict:
-    if os.path.exists(MANIFEST_STORE):
-        try:
-            with open(MANIFEST_STORE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("manifest store corrupt: %s", e)
-    return {}
+    return _load_store(MANIFEST_STORE)
 
 
 def _save_manifests(data: dict):
-    os.makedirs(os.path.dirname(MANIFEST_STORE), exist_ok=True)
-    with open(MANIFEST_STORE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _save_store(MANIFEST_STORE, data)
+
+
+def _collection(path):
+    return {MANIFEST_STORE:'manifests',INSTANCE_STORE:'instances',TOPOLOGY_STORE:'legacy_topologies'}.get(path)
 
 
 def _load_store(path: str) -> dict:
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("store corrupt %s: %s", path, e)
-    return {}
+    collection=_collection(path)
+    if not collection: return storage.read_json(path)
+    repository.migrate(collection,path)
+    return repository.read(collection)
 
 
 def _save_store(path: str, data: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    collection=_collection(path)
+    if not collection: return storage.write_json(path,data)
+    repository.migrate(collection,path)
+    with _store_lock, repository.transaction():
+        if collection == 'manifests':
+            existing=repository.read(collection)
+            for name,body in data.items():
+                if body==existing.get(name) and name not in _dirty_packages and repository.revision('target',name): continue
+                try:
+                    validated=delivery.manifest(body)
+                except ValueError:
+                    continue  # Retain legacy records for correction, never silently delete them.
+                import publications
+                payload=versions.target_body(name,validated)
+                problems=publications.target_issues(payload)
+                if problems:
+                    draft=publications.pending_target(name,payload)
+                    body.update(publication_state='draft',pending_draft_id=draft['draft_id'])
+                    body.pop('target_revision',None);body.pop('target_id',None)
+                else:
+                    published=repository.publish('target',name,payload)
+                    versions.materialize(name,published)
+                    body.update(target_revision=published['version'],target_id=published['entity_id'],publication_state='published')
+                    previous_draft=body.pop('pending_draft_id',None)
+                    if previous_draft:
+                        old=repository.read('publication_drafts',previous_draft)
+                        if old and old['status']=='draft' and __import__('delivery_state').clean_manifest(old['body']['manifest'])==__import__('delivery_state').clean_manifest(validated):
+                            old.update(status='published',body=payload,published_version=published['version'],published_at=repository.now(),revision=old['revision']+1)
+                            repository.put('publication_drafts',previous_draft,old)
+                _dirty_packages.discard(name)
+        elif collection == 'instances':
+            for name,body in data.items():
+                if not isinstance(body,dict) or body.get('runtime_type') not in ('docker','netns'): continue
+                published=versions.template(name,body)
+                body.update(published)
+        repository.replace_collection(collection,data)
+
+
+def _serialized(fn):
+    @functools.wraps(fn)
+    def call(*args,**kwargs):
+        with _store_lock, repository.transaction(): return fn(*args,**kwargs)
+    return call
+
+
+_docker_guard=threading.Lock()
+_docker_processes=set()
+_docker_stopping=False
+
+
+def shutdown_docker():
+    global _docker_stopping
+    with _docker_guard:
+        _docker_stopping=True
+        processes=list(_docker_processes)
+    for process in processes:
+        try: os.killpg(process.pid,signal.SIGTERM)
+        except ProcessLookupError: pass
 
 
 def _docker(cmd: str, timeout: int = 120) -> tuple[str, int]:
-    r = subprocess.run(f"docker {cmd}", shell=True, capture_output=True, text=True, timeout=timeout)
-    out = r.stdout.strip()
-    if r.returncode != 0 and r.stderr.strip():
-        out = out or r.stderr.strip()
-    return out, r.returncode
+    with _docker_guard:
+        if _docker_stopping: return 'Bridge 正在停止，操作中断',130
+        process=subprocess.Popen(f'docker {cmd}',shell=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+        _docker_processes.add(process)
+    try:
+        stdout,stderr=process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid,signal.SIGKILL)
+        process.communicate()
+        raise
+    finally:
+        with _docker_guard: _docker_processes.discard(process)
+    out=stdout.strip()
+    if process.returncode and stderr.strip(): out=out or stderr.strip()
+    return out,process.returncode
 
 
 def _container_net_bytes(name: str) -> tuple[int, int] | None:
     """容器内 eth* 接口累计 rx/tx 字节。
     docker stats 的 NetIO 对 --net=none 容器（CORE 方式）恒为 0B——它只统计 docker 自建网络,
     后注入的 veth 接口须直接读容器 netns 的 /sys/class/net 计数器"""
-    rx_out, _ = _docker(f"exec {name} bash -c 'cat /sys/class/net/eth[0-9]/statistics/rx_bytes 2>/dev/null'")
-    tx_out, _ = _docker(f"exec {name} bash -c 'cat /sys/class/net/eth[0-9]/statistics/tx_bytes 2>/dev/null'")
+    import shlex
+    script='for f in /sys/class/net/eth[0-9]*/statistics; do [ -d "$f" ] || continue; cat "$f/rx_bytes" "$f/tx_bytes" || exit 1; done'
+    out,code=_docker('exec '+shlex.quote(name)+' sh -c '+shlex.quote(script),10)
+    if code: return None
     try:
-        rx = sum(int(x) for x in rx_out.split() if x.strip().isdigit())
-        tx = sum(int(x) for x in tx_out.split() if x.strip().isdigit())
-        return rx, tx
+        values=[int(x) for x in out.split()]
+        if not values or len(values)%2: return None
+        return sum(values[::2]),sum(values[1::2])
     except ValueError:
         return None
 
@@ -127,9 +197,21 @@ def _manifest_index() -> dict:
     """镜像 ref -> manifest（按 manifest.image.name/tag 索引）"""
     idx = {}
     for m in _load_manifests().values():
+        if isinstance(m,dict) and m.get('publication_state')=='draft':
+            published=repository.revision('target',m.get('name',''))
+            if not published: continue
+            m=published['manifest']
         if not isinstance(m, dict):
             continue
+        try:
+            m=delivery.manifest(m)
+        except ValueError as e:
+            logger.warning("legacy manifest requires correction: %s",e)
+            continue
         img = m.get("image") or {}
+        if not isinstance(img, dict):
+            logger.warning("invalid legacy manifest image: %s", m.get("name"))
+            continue
         nm, tg = img.get("name"), img.get("tag")
         if nm:
             idx[f"{nm}:{tg or 'latest'}"] = m
@@ -144,6 +226,11 @@ def _service_registry() -> dict:
     if _svc_cache["loaded"]:
         return _svc_cache["registry"]
     names, registry = set(), {}
+    import sys, importlib
+    importlib.invalidate_caches()
+    prefixes={p.name for p in Path(CUSTOM_SERVICES_DIR).glob('*') if p.is_dir()}
+    for module in list(sys.modules):
+        if module.split('.')[0] in prefixes: sys.modules.pop(module,None)
     try:
         from core.services.manager import ServiceManager
         mgr = ServiceManager()
@@ -237,7 +324,7 @@ def _enrich_pairs(pairs: list) -> list:
 # ═══════════════════════════════════════════════
 
 @router.get("/targets")
-async def targets_list():
+def targets_list():
     """靶标镜像列表（按 image ID 去重别名，含三件完整性 + 编目状态）"""
     manifests = _load_manifests()
     mindex = _manifest_index()
@@ -256,14 +343,13 @@ async def targets_list():
             continue
         ref = f"{repo}:{tag}"
         iid = o.get("ID") or ref
-        if iid in by_id:
-            by_id[iid]["aliases"].append(ref)
-            continue
+        iid = ref  # Every tag remains selectable, including aliases of one image ID.
         pc = _pieces(ref, mindex)
         by_id[iid] = {
             "ref": ref,
             "size": o.get("Size", ""),
-            "import_time": " ".join(str(o.get("CreatedAt", "")).split()[:2]) or None,
+            "import_time": (pc.get("manifest_data") or {}).get("imported_at"),
+            "created_at": o.get("CreatedAt"),
             "aliases": [],
             "pieces": {k: pc[k] for k in ("image", "services", "manifest", "complete")},
             "has_manifest": pc["manifest"],
@@ -275,7 +361,7 @@ async def targets_list():
 
 
 @router.post("/targets/import/image")
-async def targets_import_image(body: dict):
+def targets_import_image(body: dict):
     """导入镜像 tar（docker load）。body: {path} 服务器路径"""
     path = (body.get("path") or "").strip()
     if not path or not os.path.exists(path):
@@ -287,183 +373,129 @@ async def targets_import_image(body: dict):
     return JSONResponse({"ok": True, "data": {"output": out}})
 
 
-@router.post("/targets/import/bundle")
-async def targets_import_bundle(body: dict):
-    """整包导入（设计 §8.3 导入向导的落地）: 一次目录, 三件独立落位, 归属一目了然。
-    目录约定（包名=目录名）:
-      <dir>/image.tar        ① 基座镜像（可缺——外源镜像另行导入）
-      <dir>/services/        ② 服务定义（*.py + templates/, 整树拷贝到 custom_services/<包名>/）
-      <dir>/manifest.json    ③ 配方清单（可缺——详情抽屉补录）"""
-    import shutil
-    dir_path = (body.get("dir") or "").strip().rstrip("/")
-    if not dir_path or not os.path.isdir(dir_path):
-        return _err("DIR_NOT_FOUND", f"目录不存在: {dir_path}")
-    package = os.path.basename(dir_path)
-    result = {"package": package, "pieces": {}, "warnings": [], "hint": None}
-
-    # ① 基座镜像
-    tar = os.path.join(dir_path, "image.tar")
-    if os.path.exists(tar):
-        out, code = _docker(f"load -i '{tar}'", 600)
-        result["pieces"]["image"] = {"ok": code == 0, "detail": (out or "已导入")[:300]}
-    else:
-        # 镜像必须导入（用户定稿）: 缺 image.tar 的包不完整 → 判失败
-        result["pieces"]["image"] = {"ok": False, "detail": "缺 image.tar——镜像必须导入，补齐后重新整包导入"}
-
-    # ② 服务定义（整树拷贝, CORE ServiceManager 本就扫描目录内全部 .py）
-    svc_src = os.path.join(dir_path, "services")
-    py_files = [f for f in (os.listdir(svc_src) if os.path.isdir(svc_src) else []) if f.endswith(".py")]
-    if py_files:
-        dst = os.path.join(CUSTOM_SERVICES_DIR, package)
-        shutil.copytree(svc_src, dst, dirs_exist_ok=True)
-        open(os.path.join(dst, "__init__.py"), "w").close()
-        result["pieces"]["services"] = {"ok": True, "detail": f"落位 custom_services/{package}/（{len(py_files)} 个 .py, 重启 core-daemon 生效）"}
-        result["hint"] = "需重启 core-daemon 使服务注册生效（维护窗口）"
-    else:
-        result["pieces"]["services"] = {"ok": None, "detail": "缺 services/*.py——服务无法声明启动, 可后续单独导入"}
-
-    # ③ 配方清单
-    man_path = os.path.join(dir_path, "manifest.json")
-    if os.path.exists(man_path):
-        try:
-            with open(man_path) as f:
-                man = json.load(f)
-            name = (man.get("name") or package).strip()
-            man["name"] = name
-            store = _load_manifests()
-            store[name] = man
-            _save_manifests(store)
-            result["pieces"]["manifest"] = {"ok": True, "detail": f"已编目: {name}"}
-            if name != package:
-                result["warnings"].append(f"manifest.name({name}) 与包名({package})不一致——建议统一归属")
-            if not (man.get("image") or {}).get("name"):
-                result["warnings"].append("manifest 缺 image.name/tag 绑定——三件完整性无法关联到镜像")
-        except json.JSONDecodeError as e:
-            result["pieces"]["manifest"] = {"ok": False, "detail": f"manifest.json 解析失败: {e}"}
-    else:
-        result["pieces"]["manifest"] = {"ok": None, "detail": "缺 manifest.json——可在镜像详情抽屉补录"}
-
-    _audit("bundle.import", package=package, dir=dir_path,
-           image=result["pieces"]["image"]["ok"], services=result["pieces"]["services"]["ok"],
-           manifest=result["pieces"]["manifest"]["ok"])
-    return JSONResponse({"ok": True, "data": result})
-
-
-@router.post("/targets/import/pieces")
-async def targets_import_pieces(body: dict):
-    """分开导入三件（导入对话框的"分开导入"模式）。
-    body: {image_path?, package?, py?, templates?, manifest?} 至少提供一项; 未提供的件标记缺件"""
-    result = {"pieces": {}, "warnings": [], "hint": None}
-    provided = 0
-
-    # 规则（用户定稿）: 镜像必须导入; 服务定义/清单可缺
-    image_path = (body.get("image_path") or "").strip()
-    if not image_path:
-        return _err("IMAGE_REQUIRED", "镜像必须导入——分开导入也必须提供镜像 tar 路径")
-    provided += 1
-    if not os.path.exists(image_path):
-        result["pieces"]["image"] = {"ok": False, "detail": f"文件不存在: {image_path}"}
-    else:
-        out, code = _docker(f"load -i '{image_path}'", 600)
-        result["pieces"]["image"] = {"ok": code == 0, "detail": (out or "已导入")[:300]}
-
-    package = (body.get("package") or "").strip().replace("/", "_").replace("..", "_")
-    py = body.get("py") or ""
-    manifest = body.get("manifest")
-    manifest_name = ""
-    if isinstance(manifest, dict) and manifest:
-        manifest_name = (manifest.get("name") or package).strip() or package
-    if package and py:
-        provided += 1
-        if manifest_name and manifest_name != package:
-            return _err("NAME_MISMATCH", f"package({package}) 与 manifest.name({manifest_name}) 必须一致（归属锚点唯一）")
-        # 前缀重写（B1）→ 服务名冲突拦截（B2）→ 落位
-        py_rw = _rewrite_py_names(py, manifest_name or package)
-        names = _extract_service_names(py_rw)
-        conflicts = _svc_name_conflicts(package, names)
-        if conflicts:
-            det = ", ".join(f"{x['service']}(已在包 {x['owner_package']})" for x in conflicts)
-            return _err("SERVICE_DUPLICATE", f"跨包同名服务冲突: {det}", status=409, conflicts=conflicts)
-        if isinstance(manifest, dict):
-            _rewrite_manifest_names(manifest, manifest_name or package)
-        svc_dir = os.path.join(CUSTOM_SERVICES_DIR, package)
-        os.makedirs(os.path.join(svc_dir, "templates"), exist_ok=True)
-        with open(os.path.join(svc_dir, "service.py"), "w") as f:
-            f.write(py_rw)
-        for fn, fc in (body.get("templates") or {}).items():
-            with open(os.path.join(svc_dir, "templates", os.path.basename(fn)), "w") as f:
-                f.write(fc)
-        open(os.path.join(svc_dir, "__init__.py"), "w").close()
-        n_t = len(body.get("templates") or {})
-        result["pieces"]["services"] = {"ok": True,
-                                        "detail": f"落位 custom_services/{package}/（service.py + {n_t} 个模板, 重启 core-daemon 生效, 服务名已按清单前缀重写）"}
-        result["hint"] = "需重启 core-daemon 使服务注册生效（维护窗口）"
-    elif package or py:
-        result["pieces"]["services"] = {"ok": False, "detail": "包名与 .py 内容必须同时提供"}
-    else:
-        result["pieces"]["services"] = {"ok": None, "detail": "未提供——可在详情抽屉补录"}
-
-    manifest = body.get("manifest")
-    if isinstance(manifest, dict) and manifest:
-        provided += 1
-        name = (manifest.get("name") or "").strip()
-        if not name:
-            result["pieces"]["manifest"] = {"ok": False, "detail": "manifest.name 必填"}
+def _import_delivery(body:dict,checkpoint=None,reuse=None,input_keys=None):
+    import copy,time,shlex
+    import delivery_state as ds
+    try:
+        body,mapping=ds.prepare(body)
+        keys=input_keys or ds.identities(body)[0]
+    except (ValueError,SyntaxError,TypeError) as e:
+        return _err('DELIVERY_INVALID',str(e))
+    package=body['package'];m=body.get('manifest');sources=body['python_files']
+    result={'package':package,'pieces':{},'warnings':[],'hint':None}
+    reuse=reuse or {}
+    def progress(kind,value):
+        result['pieces'][kind]={**value,'input_key':keys[kind]}
+        if checkpoint: checkpoint(kind,copy.deepcopy(result))
+    def cached(kind):
+        previous=reuse.get(kind)
+        if ds.reusable(kind,previous,keys[kind]):
+            progress(kind,{**previous,'reused':True,'detail':'沿用内容和实际结果均未改变的已完成件'})
+            return True
+        return False
+    if not cached('image'):
+        progress('image',{'ok':None,'state':'running','detail':'正在加载镜像，完成后保存镜像 ID'})
+        path=body.get('image_path')
+        if body.get('services_only') or body.get('manifest_only'):
+            progress('image',{'ok':None,'state':'not-requested','detail':'本次未处理镜像'})
+        elif not path or not os.path.isfile(path):
+            progress('image',{'ok':False,'state':'failed','detail':'有效镜像归档缺失，请补齐后续办'})
+            return JSONResponse({'ok':True,'data':result})
         else:
-            store = _load_manifests()
-            store[name] = manifest
-            _save_manifests(store)
-            result["pieces"]["manifest"] = {"ok": True, "detail": f"已编目: {name}"}
-            if not (manifest.get("image") or {}).get("name"):
-                result["warnings"].append("manifest 缺 image.name/tag 绑定——无法关联到镜像")
-    else:
-        result["pieces"]["manifest"] = {"ok": None, "detail": "未提供——可在详情抽屉补录"}
+            try:
+                refs=ds.archive_refs(path)
+                declared=(m['image']['name']+':'+m['image'].get('tag','latest')) if m else None
+                if declared and refs and declared not in refs: raise ValueError('清单声明镜像不在本次归档内: '+declared)
+                out,code=_docker('load -i '+shlex.quote(path),600)
+                if code: raise ValueError(out or 'docker load 失败')
+                if declared: refs=[declared]
+                if not refs:
+                    refs=[line.split(': ',1)[1] for line in out.splitlines() if line.startswith(('Loaded image: ','Loaded image ID: '))]
+                receipt=ds.image_receipt(refs)
+                progress('image',{'ok':True,'state':'done','detail':out[:1000],'receipt':receipt})
+            except (ValueError,OSError,subprocess.TimeoutExpired,tarfile.TarError) as e:
+                progress('image',{'ok':False,'state':'failed','detail':str(e)})
+                return JSONResponse({'ok':True,'data':result})
+    if not cached('services'):
+        if sources:
+            progress('services',{'ok':None,'state':'running','detail':'正在保存服务定义和模板'})
+            try:
+                with _store_lock,repository.transaction():
+                    installed,dst=delivery.install(CUSTOM_SERVICES_DIR,package,sources,body.get('templates') or {},_prefixed_service_name)
+                    _svc_cache['loaded']=False
+                    _dirty_packages.add(package)
+                    if not m:
+                        current=_load_manifests()
+                        if package in current: _save_manifests(current)
+                    receipt=ds.service_receipt(package,installed.values(),body.get('templates') or {})
+                    progress('services',{'ok':True,'state':'done','detail':str(dst),'activation':'saved','receipt':receipt})
+            except (ValueError,SyntaxError,OSError) as e:
+                progress('services',{'ok':False,'state':'failed','detail':str(e)})
+        else:
+            from core.services.manager import ServiceManager
+            builtins=ServiceManager();builtins.load_locals()
+            required=[svc['name'] for svc in (m or {}).get('services',[]) if svc['name'] not in builtins.services]
+            available={name for path in (Path(CUSTOM_SERVICES_DIR)/package).glob('*.py') for name in delivery.names(path.read_text())}
+            if m and set(required)<=available:
+                receipt=ds.service_receipt(package,required,{})
+                progress('services',{'ok':True,'state':'done','detail':'声明服务已保存或仅使用 CORE 内置服务','receipt':receipt})
+            else: progress('services',{'ok':None,'state':'missing','detail':'缺少声明服务定义，可补录后续办'})
+    if not cached('manifest'):
+        if m:
+            progress('manifest',{'ok':None,'state':'running','detail':'正在编目并固定交付版本'})
+            try:
+                with _store_lock,repository.transaction():
+                    # A concurrent tag change must not silently bind another image to this delivery.
+                    image_piece=result['pieces']['image']
+                    if image_piece.get('ok') and not ds.reusable('image',image_piece,keys['image']):
+                        raise ValueError('镜像引用已变化，请恢复原镜像后续办')
+                    m['imported_at']=time.strftime('%Y-%m-%d %H:%M:%S')
+                    store=_load_manifests();store[m['name']]=m;_save_manifests(store)
+                    receipt={'name':m['name'],'version':store[m['name']].get('target_revision'),'manifest_key':ds.digest(ds.clean_manifest(m)),'draft_id':store[m['name']].get('pending_draft_id')}
+                    progress('manifest',{'ok':True,'state':'done','detail':'已保存版本草稿，缺件补齐后发布' if receipt.get('draft_id') else '人工能力清单已发布并固定版本','receipt':receipt})
+            except (ValueError,OSError) as e:
+                progress('manifest',{'ok':False,'state':'failed','detail':str(e)})
+        else: progress('manifest',{'ok':None,'state':'missing','detail':'未提供清单，可补录后续办'})
+    result['hint']='件完成表示已保存；daemon 注册状态可在靶标版本详情查询'
+    _audit('delivery.import',package=package,pieces=result['pieces'])
+    return JSONResponse({'ok':True,'data':result})
 
-    if not provided:
-        return _err("EMPTY_IMPORT", "至少提供服务定义或 manifest 之一（镜像 tar 为必填）")
-    _audit("pieces.import", **{k: v["ok"] for k, v in result["pieces"].items()})
-    return JSONResponse({"ok": True, "data": result})
+
+def _bundle_body(body):
+    directory = Path(body.get('dir') or '')
+    if not body.get('dir') or not directory.is_dir():
+        raise ValueError('包目录不存在')
+    draft = _read_bundle(directory)
+    return {**draft, **body, 'package': body.get('package') or (body.get('manifest') or {}).get('name') or draft['package'], 'image_path': str(directory/'image.tar')}
 
 
-@router.post("/targets/import/services")
-async def targets_import_services(body: dict):
-    """导入服务定义（.py + templates/）。body: {py, templates: {文件名: 内容}, package}"""
-    py_content = body.get("py", "")
-    templates = body.get("templates", {})  # {filename: content}
-    if not py_content:
-        return _err("EMPTY_PY", "缺少 .py 内容")
-    pkg = (body.get("package") or "imported").strip().replace("/", "_").replace("..", "_")
-    svc_dir = os.path.join(CUSTOM_SERVICES_DIR, pkg)
-    os.makedirs(os.path.join(svc_dir, "templates"), exist_ok=True)
-    with open(os.path.join(svc_dir, "service.py"), "w") as f:
-        f.write(py_content)
-    for fn, fc in templates.items():
-        safe = os.path.basename(fn)
-        with open(os.path.join(svc_dir, "templates", safe), "w") as f:
-            f.write(fc)
-    with open(os.path.join(svc_dir, "__init__.py"), "w") as f:
-        f.write("")
-    _audit("services.import", package=pkg, files=len(templates) + 1)
-    return JSONResponse({"ok": True, "data": {"dir": svc_dir, "files": len(templates) + 1},
-                         "hint": "需重启 core-daemon 使服务注册生效（维护窗口）"})
+@router.post('/targets/import/bundle')
+def targets_import_bundle(body: dict):
+    try:
+        return _import_delivery(_bundle_body(body))
+    except ValueError as e:
+        return _err('DELIVERY_INVALID', str(e))
 
 
-@router.post("/targets/import/manifest")
-async def targets_import_manifest(body: dict):
-    """导入/覆盖配方清单。body: {manifest: {...}}，manifest.name 必填"""
-    manifest = body.get("manifest") or {}
-    name = (manifest.get("name") or "").strip()
-    if not name:
-        return _err("NO_NAME", "manifest 缺少 name")
-    store = _load_manifests()
-    store[name] = manifest
-    _save_manifests(store)
-    _audit("manifest.save", name=name)
-    return JSONResponse({"ok": True, "data": {"name": name}})
+@router.post('/targets/import/pieces')
+def targets_import_pieces(body: dict):
+    return _import_delivery(body)
+
+
+@router.post('/targets/import/services')
+def targets_import_services(body: dict):
+    if not body.get('py'):
+        return _err('EMPTY_PY', '缺少 .py 内容')
+    return _import_delivery({**body, 'services_only': True})
+
+
+@router.post('/targets/import/manifest')
+def targets_import_manifest(body: dict):
+    return _import_delivery({**body, 'manifest_only': True})
 
 
 @router.get("/targets/manifest/{name}")
-async def targets_get_manifest(name: str):
+def targets_get_manifest(name: str):
     store = _load_manifests()
     if name not in store:
         return _err("NOT_FOUND", f"未编目: {name}", status=404)
@@ -471,11 +503,16 @@ async def targets_get_manifest(name: str):
 
 
 @router.post("/targets/manifest/{name}")
-async def targets_edit_manifest(name: str, body: dict):
+@_serialized
+def targets_edit_manifest(name: str, body: dict):
     """手动补录/编辑清单（详情抽屉 JSON 表单保存入口）"""
-    manifest = body.get("manifest") if isinstance(body.get("manifest"), dict) else body
-    manifest = dict(manifest)
-    manifest.setdefault("name", name)
+    manifest = body.get('manifest') if 'manifest' in body else body
+    try:
+        manifest = delivery.manifest(manifest)
+        if manifest['name'] != name:
+            raise ValueError('清单名称与登记名称不一致')
+    except ValueError as e:
+        return _err('MANIFEST_INVALID', str(e))
     store = _load_manifests()
     store[name] = manifest
     _save_manifests(store)
@@ -484,13 +521,25 @@ async def targets_edit_manifest(name: str, body: dict):
 
 
 @router.post("/targets/image/detail")
-async def targets_image_detail(body: dict):
+def targets_image_detail(body: dict):
     """靶标详情（设计 §8.2）：三件完整性 + manifest + docker inspect 摘要。body: {ref}"""
     ref = (body.get("ref") or "").strip()
     if not ref:
         return _err("NO_REF", "缺少 ref")
     mindex = _manifest_index()
     pc = _pieces(ref, mindex)
+    selected = None
+    if body.get('target_name') or body.get('target_version'):
+        name=body.get('target_name') or (pc.get('manifest_data') or {}).get('name')
+        t=repository.revision('target',name,body.get('target_version'))
+        if not t or t['image_ref']!=ref: return _err('TARGET_INVALID','靶标版本与镜像不一致')
+        pc['manifest_data']=t['manifest'];pc['manifest']=True
+        pc['service_pairs']=t['manifest']['services']
+        selected={'name':name,'version':t['version']}
+    elif pc.get('manifest_data'):
+        name=pc['manifest_data'].get('name')
+        latest=repository.revision('target',name)
+        if latest: selected={'name':name,'version':latest['version']}
     out, code = _docker("inspect --format '{{json .}}' " + ref, 30)
     if code != 0:
         # 镜像必须导入（用户定稿）: 镜像不存在则条目不存在, 无"缺镜像可补"状态
@@ -514,15 +563,24 @@ async def targets_image_detail(body: dict):
     except (json.JSONDecodeError, IndexError):
         return _err("INSPECT_FAILED", "docker inspect 输出解析失败", status=500)
     return JSONResponse({"ok": True, "data": {"ref": ref, "pieces": pc, "manifest": pc["manifest_data"],
-                                              "service_pairs": _enrich_pairs(pc["service_pairs"]), "inspect": info}})
+                                              "service_pairs": _enrich_pairs(pc["service_pairs"]), "inspect": info,
+                                              "selected_target": selected}})
 
 
 @router.post("/targets/image/delete")
-async def targets_image_delete(body: dict):
+def targets_image_delete(body: dict):
     """删除镜像（先占用检查，设计 §3.1 IMAGE_CONFLICT）。body: {ref}"""
     ref = (body.get("ref") or "").strip()
     if not ref:
         return _err("NO_REF", "缺少 ref")
+    affected=[]
+    for name,manifest in _load_manifests().items():
+        for version in repository.history('target',name):
+            if version.get('image_ref')==ref:
+                refs=repository.references('target',name,version['version'])
+                consumers=[r for r in refs['documents'] if r['collection']!='manifests']
+                if consumers or refs['revisions']: affected.append({'name':name,'version':version['version'],'documents':consumers,'templates':refs['revisions']})
+    if affected: return _err('IMAGE_VERSION_REFERENCED','镜像仍被模板版本、草稿或历史部署引用，未删除',status=409,references=affected)
     out, _c = _docker("ps -a --filter ancestor='" + ref + "' --format '{{.Names}}'", 30)
     used = [x for x in out.splitlines() if x.strip()]
     if used:
@@ -549,7 +607,7 @@ def _ensure_standalone(name: str):
 
 
 @router.get("/containers/standalone")
-async def standalone_containers_list():
+def standalone_containers_list():
     """独立容器列表（standalone- 前缀，普通隔离，验证用；CORE 拓扑容器不在此列）"""
     out, _code = _docker("ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' --filter name=standalone-", 30)
     items = []
@@ -561,7 +619,7 @@ async def standalone_containers_list():
 
 
 @router.post("/containers/standalone/run")
-async def standalone_container_run(body: dict):
+def standalone_container_run(body: dict):
     """独立启动容器（普通隔离，验证用；不接 CORE 网络）。
     body: {image, name?, ports?: ["8080:80"], command?}
     command: 可选保活/初始命令——路线 B 镜像无 CMD, 独立验证需带 `tail -f /dev/null` 否则立即退出"""
@@ -599,7 +657,7 @@ async def standalone_container_run(body: dict):
 
 
 @router.post("/containers/standalone/{name}/stop")
-async def standalone_container_stop(name: str):
+def standalone_container_stop(name: str):
     denied = _ensure_standalone(name)
     if denied:
         return denied
@@ -609,7 +667,7 @@ async def standalone_container_stop(name: str):
 
 
 @router.post("/containers/standalone/{name}/start")
-async def standalone_container_start(name: str):
+def standalone_container_start(name: str):
     denied = _ensure_standalone(name)
     if denied:
         return denied
@@ -619,7 +677,7 @@ async def standalone_container_start(name: str):
 
 
 @router.delete("/containers/standalone/{name}")
-async def standalone_container_delete(name: str):
+def standalone_container_delete(name: str):
     denied = _ensure_standalone(name)
     if denied:
         return denied
@@ -629,7 +687,7 @@ async def standalone_container_delete(name: str):
 
 
 @router.post("/containers/standalone/{name}/exec")
-async def standalone_container_exec(name: str, body: dict):
+def standalone_container_exec(name: str, body: dict):
     """容器内执行命令（审计留痕）。body: {cmd}"""
     denied = _ensure_standalone(name)
     if denied:
@@ -652,30 +710,22 @@ def _available_services() -> dict:
     """可声明服务总表（清单驱动声明 §⑤ 前提）：
     drill = 自定义演练服务（custom_services 注册，成对 normal/vuln）
     system = CORE 内置基础服务（SSH/DefaultRoute/NAT…，netns 型常用）"""
-    system = []
-    try:
-        from core.services.manager import ServiceManager
-        mgr = ServiceManager()
-        mgr.load_locals()
-        if os.path.isdir(CUSTOM_SERVICES_DIR):
-            mgr.load(os.path.abspath(CUSTOM_SERVICES_DIR))
-        system = [{"name": n, "source": "drill" if n.startswith("svc-") else "system"}
-                  for n in sorted(mgr.services.keys())]
-    except Exception as e:
-        logger.warning("service manager unavailable: %s", e)
+    registry=_service_registry()
+    system=[{'name':n,'source':'drill' if n.startswith('svc-') else 'system'} for n in sorted(registry)]
     # 软件归属：优先 manifest（software 权威），其次 svc-<软件>-<CVE>-<mode> 命名解析
     manifest_of = {}
     for m in _load_manifests().values():
+        try: m=delivery.manifest(m)
+        except ValueError: continue
         if isinstance(m, dict):
             for s in m.get("services") or []:
-                manifest_of[s.get("name")] = m.get("software", "")
+                manifest_of[s.get("name")] = (s.get("software") or m.get("software", ""), s.get("mode") or None)
     out_drill = []
     for s in system:
         if s["source"] != "drill":
             continue
         name = s["name"]
-        mode = name.rsplit("-", 1)[-1] if name.rsplit("-", 1)[-1] in ("normal", "vuln") else None
-        software = manifest_of.get(name) or (name.split("-")[1] if name.startswith("svc-") and len(name.split("-")) > 2 else name)
+        software, mode = manifest_of.get(name, (name, None))
         out_drill.append({"name": name, "mode": mode, "software": software})
     out_system = [s["name"] for s in system if s["source"] == "system"]
     return {"drill": out_drill, "system": out_system}
@@ -689,7 +739,8 @@ def _mutex_conflict(services: list, available: dict) -> dict | None:
         sw = next((d["software"] for d in available["drill"] if d["name"] == s.get("name")), None)
         if sw is None:
             continue
-        by_sw.setdefault(sw, []).append(s.get("mode"))
+        mode = next((d.get("mode") for d in available["drill"] if d["name"] == s.get("name")), None)
+        by_sw.setdefault(sw, []).append(mode)
     for sw, modes in by_sw.items():
         if "normal" in modes and "vuln" in modes:
             return {"software": sw,
@@ -706,6 +757,8 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
     name = (inst.get("name") or "").strip()
     if not name:
         return _err("NO_NAME", "实例缺少 name")
+    if "/" in name or "\\" in name or name in (".",".."):
+        return _err("NAME_INVALID","模板名不能包含路径分隔符")
     rt = inst.get("runtime_type")
     if rt not in ("docker", "netns"):
         return _err("RUNTIME_INVALID", "runtime_type 仅允许 docker | netns")
@@ -714,17 +767,34 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
         return _err("IMAGE_REQUIRED", "docker 型实例必须绑定 image_tag")
     if rt == "netns" and img:
         return _err("NETNS_NO_IMAGE", "netns 型共享宿主 rootfs，不绑定镜像")
-    drill_names = {d["name"] for d in available["drill"]}
-    system_names = set(available["system"])
-    # docker 实例的清单白名单 = 该镜像 manifest.services 声明的服务
-    manifest_ok = None
-    if rt == "docker" and img:
-        mindex = _manifest_index()
-        man = mindex.get(img) or mindex.get(img.rsplit(":", 1)[0])
-        if man:
-            manifest_ok = {s.get("name") for s in man.get("services") or []}
+    if rt == 'netns' and not inst.get('services') and inst.get('model','PC') in ('PC','host','router','mdr'):
+        return _err('CORE_DEFAULT_SERVICES', 'CORE 会为该型号回填默认服务；请至少明确选择一项服务，或选无默认服务的型号')
+    available={k:list(v) for k,v in available.items()}
+    manifest_ok=None
+    if rt=='docker':
+        man=_manifest_index().get(img)
+        if inst.get('target_version'):
+            target=repository.revision('target',inst.get('target_name') or (man or {}).get('name',''),inst['target_version'])
+            if not target or target['image_ref']!=img:
+                return _err('TARGET_INVALID','靶标版本不存在或与镜像不一致')
+            man=target['manifest']
+        if not man: return _err('MANIFEST_REQUIRED','docker 模板须绑定已编目的靶标版本')
+        manifest_ok={s['name'] for s in man['services']}
+        available['drill']=[{'name':s['name'],'mode':s.get('mode') or None,'software':s.get('software') or man.get('software') or man['name']} for s in man['services'] if s['name'] not in available['system']]
+    drill_names={d['name'] for d in available['drill']}
+    system_names=set(available['system'])
+    seen_services = set()
     for s in inst.get("services") or []:
+        if not isinstance(s, dict):
+            return _err('SERVICE_INVALID', 'services 条目必须是对象')
         sn = s.get("name", "")
+        if sn in seen_services:
+            return _err('SERVICE_DUPLICATE', '重复声明服务: '+sn)
+        seen_services.add(sn)
+        declared_mode = next((d.get('mode') for d in available['drill'] if d['name'] == sn), None)
+        if s.get('mode') and s['mode'] != declared_mode:
+            return _err('MODE_INVALID', '服务模式与清单不一致: '+sn)
+        s['mode'] = declared_mode
         if sn not in drill_names and sn not in system_names:
             return _err("SERVICE_UNKNOWN", f"服务未注册: {sn}（清单驱动声明，请从可用服务中选择）",
                         service=sn)
@@ -734,7 +804,7 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
             return _err("NETNS_DRILL_DENIED",
                         f"netns 节点不可声明演练服务 {sn}（演练服务为容器靶标专属；netns 仅基础服务）",
                         service=sn)
-        if rt == "docker" and sn in drill_names and manifest_ok is not None and sn not in manifest_ok:
+        if rt == "docker" and sn not in manifest_ok:
             return _err("SERVICE_NOT_IN_MANIFEST",
                         f"服务 {sn} 不在该镜像的清单声明中（清单如实声明原则 ⑤⁺——先编目再声明）",
                         service=sn)
@@ -751,29 +821,41 @@ def _instance_refs(name: str, topologies: dict) -> list:
     # topologies.json 值必须为 dict; 跳过注释/损坏条目
     refs += [t for t, td in topologies.items()
              if isinstance(td, dict) and name in (td.get("instances") or [])]
+    refs += [d['topology_id'] for d in repository.read('topologies').values() if any(n.get('instance')==name for n in d.get('definition',{}).get('nodes',[]))]
+    history=repository.references('template',name)
+    refs += [f"{r['collection']}/{r['name']}（v{r['version']}）" for r in history['documents'] if r['collection'] not in ('instances','manifests')]
     return sorted(set(refs))
 
 
 @router.get("/instances")
-async def instances_list():
+def instances_list():
     """节点实例列表（含引用/锁定状态，设计 §5.2）"""
     instances = _load_store(INSTANCE_STORE)
     topologies = _load_store(TOPOLOGY_STORE)
     out = []
     for name, inst in instances.items():
+        if not isinstance(inst,dict):
+            out.append({'name':name,'runtime_type':'unknown','services':[],'migration_error':'旧记录不是对象，请修正原始记录'})
+            continue
         refs = _instance_refs(name, topologies)
-        out.append({**inst, "name": name, "locked": bool(refs), "referenced_by": refs})
+        if not repository.revision('template',name):
+            try:
+                inst=versions.template(name,inst)
+            except ValueError as e:
+                inst={**inst,'migration_error':str(e)}
+        out.append({**inst, "name": name, "locked": False, "delete_locked":bool(refs), "referenced_by": refs})
     return JSONResponse({"ok": True, "data": out})
 
 
 @router.get("/instances/available-services")
-async def instances_available_services():
+def instances_available_services():
     """可声明服务总表（drill 成对 + system 基础），实例编辑器的服务选择来源"""
     return JSONResponse({"ok": True, "data": _available_services()})
 
 
 @router.post("/instances")
-async def instances_create(body: dict):
+@_serialized
+def instances_create(body: dict):
     """创建节点实例。body: {name, runtime_type, image_tag?, services?, ports?, cve?, flags?}"""
     inst = dict(body)
     name = (inst.get("name") or "").strip()
@@ -791,17 +873,16 @@ async def instances_create(body: dict):
 
 
 @router.post("/instances/{name}")
-async def instances_update(name: str, body: dict):
+@_serialized
+def instances_update(name: str, body: dict):
     """更新实例（模板式：引用它的拓扑下次部署生效）。被引用锁定 → 409（设计 §5.2）"""
     instances = _load_store(INSTANCE_STORE)
     if name not in instances:
         return _err("NOT_FOUND", f"实例不存在: {name}", status=404)
-    topologies = _load_store(TOPOLOGY_STORE)
-    refs = _instance_refs(name, topologies)
-    if refs:
-        return _err("INSTANCE_LOCKED", f"被拓扑引用，禁止修改: {', '.join(refs)}（先解除引用，或复制实例）",
-                    status=409, referenced_by=refs)
+    if body.get('base_version') is not None and body['base_version']!=(repository.revision('template',name) or {}).get('version'):
+        return _err('VERSION_CONFLICT','模板已有更新版本，请重新打开并合并修改',status=409)
     inst = dict(body)
+    inst.pop('base_version',None)
     inst["name"] = name  # 实例名不可改（引用锚点）
     err = _validate_instance(inst, _available_services())
     if err:
@@ -813,7 +894,8 @@ async def instances_update(name: str, body: dict):
 
 
 @router.post("/instances/{name}/clone")
-async def instances_clone(name: str, body: dict):
+@_serialized
+def instances_clone(name: str, body: dict):
     """复制实例（被引用锁定的出路之二，设计 §5.2）。body: {name?: 新名}"""
     instances = _load_store(INSTANCE_STORE)
     if name not in instances:
@@ -828,14 +910,15 @@ async def instances_clone(name: str, body: dict):
             new = f"{base}{i}"
     if new in instances:
         return _err("INSTANCE_DUPLICATE", f"实例已存在: {new}", status=409)
-    instances[new] = dict(instances[name])
+    instances[new] = {k:v for k,v in instances[name].items() if k not in ('version','entity_id')}
     _save_store(INSTANCE_STORE, instances)
     _audit("instance.clone", name=name, new=new)
     return JSONResponse({"ok": True, "data": {"name": new}})
 
 
 @router.delete("/instances/{name}")
-async def instances_delete(name: str):
+@_serialized
+def instances_delete(name: str):
     """删除实例（被引用锁定 → 409）"""
     instances = _load_store(INSTANCE_STORE)
     if name not in instances:
@@ -883,7 +966,8 @@ async def standalone_terminal_ws(websocket: WebSocket, name: str):
         os.close(slave_fd)
         os.set_blocking(master_fd, False)
 
-        read_queue: asyncio.Queue = asyncio.Queue()
+        from buffers import PtyQueue
+        read_queue = PtyQueue(loop,master_fd)
 
         def _on_readable():
             try:
@@ -895,6 +979,7 @@ async def standalone_terminal_ws(websocket: WebSocket, name: str):
                 return
             read_queue.put_nowait(data if data else None)
 
+        read_queue.callback = _on_readable
         loop.add_reader(master_fd, _on_readable)
 
         async def pipe_to_ws():
@@ -963,7 +1048,7 @@ async def standalone_terminal_ws(websocket: WebSocket, name: str):
 # ═══════════════════════════════════════════════
 
 @router.get("/monitor/host")
-async def monitor_host():
+def monitor_host():
     """宿主载荷：CPU ticks(前端两次采样算 %) + loadavg + 内存 + 磁盘"""
     def _disk(path: str) -> dict | None:
         try:
@@ -1007,7 +1092,7 @@ async def monitor_host():
 
 
 @router.get("/monitor/containers")
-async def monitor_containers():
+def monitor_containers():
     """容器三分组视图（设计 §7.2）。CORE 会话容器按会话节点名匹配（DockerNode 容器名=节点名）"""
     # 全量容器列表
     out, _c = _docker("ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}'", 30)
@@ -1069,12 +1154,12 @@ async def monitor_containers():
 
 
 @router.get("/audit")
-async def audit_list(action: str | None = None, session_id: int | None = None,
-                     node_id: int | None = None, limit: int = 100):
+def audit_list(action: str | None = None, session_id: int | None = None,
+                     node_id: int | None = None, limit: int = 100, drill_id: str | None = None):
     """审计查询（platform.db audit 表）：动作/会话/节点任意组合过滤"""
     import platform_db
     entries = platform_db.query_audit(action=action, session_id=session_id,
-                                      node_id=node_id, limit=limit)
+                                      node_id=node_id, limit=max(1,min(limit,1000)),drill_id=drill_id)
     # 兼容旧前端字段: ok/fail 从 detail 提取
     for e in entries:
         if isinstance(e.get("detail"), dict) and "ok" in e["detail"]:
@@ -1083,21 +1168,21 @@ async def audit_list(action: str | None = None, session_id: int | None = None,
 
 
 @router.get("/drills")
-async def drills_list(limit: int = 200):
+def drills_list(limit: int = 200):
     """演练身份列表（drill_id 为数据主键; CORE 会话号可回收, 仅作展示）"""
     import platform_db
     return JSONResponse({"ok": True, "data": platform_db.query_drills(limit=limit)})
 
 
 @router.delete("/drills/{drill_id}/data")
-async def drills_purge_data(drill_id: str):
+def drills_purge_data(drill_id: str):
     """手动清除某演练的 metrics/events（drills 行与 audit 保留; 自动保留策略见 platform_db 配置）"""
     import platform_db
     return JSONResponse({"ok": True, "data": platform_db.purge_drill_data(drill_id)})
 
 
 @router.get("/metrics")
-async def metrics_query(drill_id: str | None = None, node_id: int | None = None, limit: int = 500):
+def metrics_query(drill_id: str | None = None, node_id: int | None = None, limit: int = 500):
     """历史监测指标查询（采样线程仅 RUNTIME 会话期间 5s 一拍落库）"""
     import platform_db
     rows = platform_db.query_metrics(drill_id=drill_id, node_id=node_id, limit=limit)
@@ -1105,10 +1190,10 @@ async def metrics_query(drill_id: str | None = None, node_id: int | None = None,
 
 
 @router.get("/events")
-async def events_query(drill_id: str | None = None, limit: int = 200):
+def events_query(drill_id: str | None = None, limit: int = 200, session_id: int | None = None, before_id: int | None = None):
     """持久化会话事件查询（动作时间线复盘; 实时视图走 SSE /events/stream）"""
     import platform_db
-    rows = platform_db.query_events(drill_id=drill_id, limit=limit)
+    rows = platform_db.query_events(drill_id=drill_id, limit=max(1,min(limit,1000)),core_sid=session_id,before_id=before_id)
     return JSONResponse({"ok": True, "data": {"total": len(rows), "entries": rows}})
 
 
@@ -1135,6 +1220,7 @@ def _manifest_ports_map() -> dict:
         if not isinstance(m, dict):
             continue
         img = m.get("image") or {}
+        if not isinstance(img,dict): continue
         nm = img.get("name")
         if nm:
             ports = [str(p) for p in (img.get("ports") or m.get("ports") or [])]
@@ -1143,7 +1229,7 @@ def _manifest_ports_map() -> dict:
 
 
 @router.post("/precheck")
-async def precheck(session_id: int, wait: int = 8):
+def precheck(session_id: int, wait: int = 8):
     """环境与声明一致性预检（RUNTIME 后、红方开打前）。
     L1 容器存活 / L2 声明服务的 validate 命令 / L3 编目端口探测。
     wait: 失败项宽限重试窗口（秒）——刚实例化时服务进程可能尚未完成端口绑定（慢机器实测踩过）。
@@ -1238,7 +1324,18 @@ async def precheck(session_id: int, wait: int = 8):
 
         # L3: 编目端口探测（镜像有 manifest 才有；宽限重试）
         img = getattr(n, "image", None) or ""
-        ports = ports_map.get(img) or ports_map.get(img.rsplit(":", 1)[0]) or []
+        import topologies, repository
+        binding=topologies.bindings(session_id).get(str(n.id),{})
+        target=repository.revision('target',binding.get('target_name',''),binding.get('target_version')) if binding.get('target_name') else None
+        manifest=(target or {}).get('manifest') or _manifest_index().get(img) or {}
+        enabled=set(n.services or [])
+        if target:
+            import versions
+            mapping,_=versions.materialize(binding['target_name'],target)
+            enabled={original for original,runtime in mapping.items() if runtime in enabled} | enabled
+        ports=sorted({str(port) for svc in manifest.get('services',[]) if svc['name'] in enabled for port in svc.get('ports',[])})
+        entry['declaration']={'result':'consistent' if manifest or nt != 15 else 'unknown','enabled':sorted(enabled)}
+        entry['network']={'result':'not-tested','detail':'服务预检不代表拓扑联通，请主动执行联通检查'}
         if not ports and (getattr(n, "image", None) or ""):
             entry["notes"].append("镜像未编目（无端口声明）: 仅完成存活/服务检查")
         for port in ports:
@@ -1297,7 +1394,9 @@ async def targets_import_upload(request: Request, rel_path: str = ""):
         rel = _sanitize_rel(rel_path)
     except ValueError as e:
         return _err("BAD_PATH", str(e))
-    target = os.path.join(os.path.realpath(IMAGE_IMPORT_DIR), rel)
+    upload_id=repository.identifier('upload')
+    upload_root=os.path.join(os.path.realpath(IMAGE_IMPORT_DIR),upload_id)
+    target = os.path.join(upload_root, rel)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     size = 0
     limit = 20 * 1024**3
@@ -1309,118 +1408,42 @@ async def targets_import_upload(request: Request, rel_path: str = ""):
                     f.close()
                     os.remove(target)
                     return _err("TOO_LARGE", f"上传超过 {limit // 2**30}GB 上限，已中止", status=413)
-                f.write(chunk)
+                await asyncio.to_thread(f.write,chunk)
     except Exception as e:
         try:
             os.remove(target)
         except OSError:
             pass
         return _err("UPLOAD_FAILED", str(e)[:200], status=500)
+    repository.put('uploads',upload_id,{'path':target,'root':upload_root,'created_at':repository.now()})
     _audit("upload", rel_path=rel, size=size, ok=True)
     return JSONResponse({"ok": True, "data": {"path": target, "rel_path": rel, "size": size}})
 
 
-@router.get("/targets/import/bundle/draft")
-async def bundle_draft(dir: str = ""):
-    """路径模式草稿读取：包目录已在服务器上时，读出 services/*.py 内容 + manifest.json
-    供详情弹窗载入编辑（确认后走 bundle 导入落位）"""
-    dir_path = (dir or "").strip().rstrip("/")
-    if not dir_path or not os.path.isdir(dir_path):
-        return _err("DIR_NOT_FOUND", f"目录不存在: {dir_path}")
-    package = os.path.basename(dir_path)
-    svc_dir = os.path.join(dir_path, "services")
-    py_files = sorted(f for f in (os.listdir(svc_dir) if os.path.isdir(svc_dir) else []) if f.endswith(".py"))
-    tpl_dir = os.path.join(svc_dir, "templates")
-    tpl_files = sorted(f for f in (os.listdir(tpl_dir) if os.path.isdir(tpl_dir) else []) if not f.startswith("."))
-    py_content = ""
-    if py_files:
-        try:
-            with open(os.path.join(svc_dir, py_files[0]), encoding="utf-8", errors="ignore") as f:
-                py_content = f.read()
-        except OSError:
-            pass
-    manifest = None
-    man_path = os.path.join(dir_path, "manifest.json")
-    if os.path.exists(man_path):
-        try:
-            with open(man_path, encoding="utf-8") as f:
-                manifest = json.load(f)
-        except json.JSONDecodeError:
-            manifest = None
-    return JSONResponse({"ok": True, "data": {
-        "package": package, "dir": dir_path,
-        "draft": {"py": py_content, "manifest": manifest},
-        "inventory": {"py": py_files, "templates": tpl_files,
-                      "has_image_tar": os.path.exists(os.path.join(dir_path, "image.tar"))}}})
+def _read_bundle(directory):
+    sources = {p.name:p.read_text() for p in sorted((directory/'services').glob('*.py')) if p.name != '__init__.py'}
+    templates = {p.name:p.read_text() for p in sorted((directory/'services'/'templates').glob('*')) if p.is_file()}
+    man_path = directory/'manifest.json'
+    return {'package':directory.name, 'python_files':sources, 'py':'', 'templates':templates,
+            'manifest':json.loads(man_path.read_text()) if man_path.exists() else None}
 
 
-@router.post("/targets/import/bundle/confirm")
-async def bundle_confirm(body: dict):
-    """确认注册（草稿 → 落位）：dir 包目录必须已在服务器上（上传或路径模式均先落盘）。
-    与 /targets/import/bundle 的差异 = 不读盘判断，直接执行落位（前端草稿已确认过内容）。"""
-    dir_path = (body.get("dir") or "").strip().rstrip("/")
-    if not dir_path or not os.path.isdir(dir_path):
-        return _err("DIR_NOT_FOUND", f"目录不存在: {dir_path}")
-    package = os.path.basename(dir_path)
-    result = {"package": package, "pieces": {}, "warnings": [], "hint": None}
+@router.get('/targets/import/bundle/draft')
+def bundle_draft(dir: str = ''):
+    try:
+        directory = Path(dir)
+        if not dir or not directory.is_dir():
+            raise ValueError('包目录不存在')
+        draft = _read_bundle(directory)
+        return JSONResponse({'ok':True, 'data':{'package':directory.name, 'dir':str(directory), 'draft':draft,
+          'inventory':{'py':list(draft['python_files']), 'templates':list(draft['templates']), 'has_image_tar':(directory/'image.tar').exists()}}})
+    except (ValueError, OSError) as e:
+        return _err('DRAFT_INVALID', str(e))
 
-    # ① 镜像（必须件）
-    tar = os.path.join(dir_path, "image.tar")
-    if os.path.exists(tar):
-        out, code = _docker(f"load -i '{tar}'", 600)
-        result["pieces"]["image"] = {"ok": code == 0, "detail": (out or "已导入")[:300]}
-    else:
-        result["pieces"]["image"] = {"ok": False, "detail": "缺 image.tar——镜像必须导入"}
 
-    # ② 服务定义（整树拷贝）+ 重写注入 + 跨包重名拦截
-    svc_src = os.path.join(dir_path, "services")
-    py_files = [f for f in (os.listdir(svc_src) if os.path.isdir(svc_src) else []) if f.endswith(".py")]
-    manifest = body.get("manifest") or None
-    manifest_name = ""
-    if isinstance(manifest, dict) and manifest:
-        manifest_name = (manifest.get("name") or package).strip()
-
-    if py_files:
-        # 前缀重写（B1）→ 跨包重名拦截（B2）→ 全部通过才落位
-        rewritten = {}
-        for fn in py_files:
-            with open(os.path.join(svc_src, fn), encoding="utf-8", errors="ignore") as f:
-                rewritten[fn] = _rewrite_py_names(f.read(), manifest_name or package)
-        all_names = sum((_extract_service_names(t) for t in rewritten.values()), [])
-        conflicts = _svc_name_conflicts(package, all_names)
-        if conflicts:
-            det = ", ".join(f"{c['service']}(已在包 {c['owner_package']})" for c in conflicts)
-            return _err("SERVICE_DUPLICATE", f"跨包同名服务冲突（CORE 重名时先扫描者静默胜出，禁止跨包重名）: {det}",
-                        status=409, conflicts=conflicts)
-        import shutil
-        dst = os.path.join(CUSTOM_SERVICES_DIR, package)
-        os.makedirs(dst, exist_ok=True)
-        shutil.copytree(svc_src, dst, dirs_exist_ok=True)
-        for fn, txt in rewritten.items():
-            with open(os.path.join(dst, fn), "w") as f:
-                f.write(txt)
-        open(os.path.join(dst, "__init__.py"), "w").close()
-        result["pieces"]["services"] = {"ok": True, "detail": f"落位 custom_services/{package}/（{len(py_files)} 个 .py，服务名已按清单前缀重写）"}
-        result["hint"] = "需重启 core-daemon 使服务注册生效（维护窗口）"
-    else:
-        result["pieces"]["services"] = {"ok": None, "detail": "缺 services/*.py——可在详情补录"}
-
-    # ③ manifest（services 名与 .py 重写同步）
-    if isinstance(manifest, dict) and manifest:
-        name = (manifest.get("name") or package).strip()
-        manifest["name"] = name
-        _rewrite_manifest_names(manifest, name)
-        store = _load_manifests()
-        store[name] = manifest
-        _save_manifests(store)
-        result["pieces"]["manifest"] = {"ok": True, "detail": f"已编目: {name}"}
-    else:
-        result["pieces"]["manifest"] = {"ok": None, "detail": "缺 manifest——可在详情补录"}
-
-    _audit("bundle.confirm", package=package, dir=dir_path,
-           image=result["pieces"]["image"]["ok"], services=result["pieces"]["services"]["ok"],
-           manifest=result["pieces"]["manifest"]["ok"])
-    return JSONResponse({"ok": True, "data": result})
+@router.post('/targets/import/bundle/confirm')
+def bundle_confirm(body: dict):
+    return targets_import_bundle(body)
 
 
 # ═══ 服务名前缀重写 + 跨包重名拦截（B1+B2 定稿）═══
@@ -1441,20 +1464,14 @@ def _prefixed_service_name(name: str, manifest_name: str) -> str:
 
 
 def _rewrite_py_names(py_text: str, manifest_name: str) -> str:
-    """重写 .py 内全部服务注册名（name: str = "xxx" → 加清单前缀）"""
-    import re as _re
-    mn = _sanitize_manifest_prefix(manifest_name)
-    if not mn:
-        return py_text
-
-    def _sub(m):
-        return f'name: str = "{_prefixed_service_name(m.group(1), mn)}"'
-    return _re.sub(r'name:\s*str\s*=\s*"([^"]+)"', _sub, py_text)
+    return delivery.rewrite(py_text, {n:_prefixed_service_name(n,manifest_name) for n in delivery.names(py_text)})
 
 
 def _rewrite_manifest_names(manifest: dict, manifest_name: str) -> dict:
-    for s in manifest.get("services") or []:
-        s["name"] = _prefixed_service_name(s.get("name", ""), manifest_name)
+    # CORE builtins retain their registered names. Custom names alone receive a prefix.
+    for svc in manifest.get('services') or []:
+        if svc.get('mode') or svc.get('name','').startswith('svc-'):
+            svc['name'] = _prefixed_service_name(svc['name'], manifest_name)
     return manifest
 
 
@@ -1474,28 +1491,16 @@ def _svc_name_conflicts(package: str, names: list) -> list:
 
 
 def _extract_service_names(py_text: str) -> list:
-    import re as _re
-    return _re.findall(r'name:\s*str\s*=\s*"([^"]+)"', py_text or "")
+    return delivery.names(py_text)
 
 
 def _service_name_owner(name: str) -> str | None:
-    """服务名当前定义在哪个包目录（custom_services/<包>/*.py）"""
-    if not os.path.isdir(CUSTOM_SERVICES_DIR):
-        return None
-    needle = f'name: str = "{name}"'
-    for pkg in sorted(os.listdir(CUSTOM_SERVICES_DIR)):
-        pkg_dir = os.path.join(CUSTOM_SERVICES_DIR, pkg)
-        if not os.path.isdir(pkg_dir):
+    for path in Path(CUSTOM_SERVICES_DIR).glob('**/*.py'):
+        try:
+            if name in delivery.names(path.read_text()):
+                return path.relative_to(CUSTOM_SERVICES_DIR).parts[0]
+        except (SyntaxError, OSError):
             continue
-        for root, _dirs, files in os.walk(pkg_dir):
-            for fn in sorted(files):
-                if fn.endswith(".py"):
-                    try:
-                        with open(os.path.join(root, fn), encoding="utf-8", errors="ignore") as f:
-                            if needle in f.read():
-                                return pkg
-                    except OSError:
-                        continue
     return None
 
 
@@ -1507,7 +1512,7 @@ async def bundle_upload(request: Request, name: str = ""):
     pkg = _re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or "").strip()).strip("-")
     if not pkg:
         return _err("BAD_NAME", "包名非法（仅允许字母数字-_）")
-    target_dir = os.path.join(os.path.realpath(IMAGE_IMPORT_DIR), pkg)
+    target_dir = os.path.join(os.path.realpath(IMAGE_IMPORT_DIR), pkg+'-'+__import__('uuid').uuid4().hex[:12])
     os.makedirs(target_dir, exist_ok=True)
     archive = os.path.join(target_dir, "bundle.tar.gz")
     size = 0
@@ -1520,12 +1525,12 @@ async def bundle_upload(request: Request, name: str = ""):
                     f.close()
                     os.remove(archive)
                     return _err("TOO_LARGE", f"超过 {limit // 2**30}GB 上限", status=413)
-                f.write(chunk)
+                await asyncio.to_thread(f.write,chunk)
     except Exception as e:
         return _err("UPLOAD_FAILED", str(e)[:200], status=500)
     # 解包（--no-same-owner; GNU tar 拒绝绝对路径成员; 解包后校验无逃逸）
-    rc = subprocess.run(f"tar -xzf '{archive}' -C '{target_dir}' --no-same-owner 2>&1",
-                        shell=True, capture_output=True, text=True)
+    rc = await asyncio.to_thread(subprocess.run, f"tar -xzf '{archive}' -C '{target_dir}' --no-same-owner 2>&1",
+                        shell=True, capture_output=True, text=True, timeout=120)
     if rc.returncode != 0:
         os.remove(archive)
         return _err("EXTRACT_FAILED", (rc.stdout + rc.stderr)[:300], status=400)
@@ -1549,5 +1554,63 @@ async def bundle_upload(request: Request, name: str = ""):
                      if f.endswith(".py")) if os.path.isdir(os.path.join(target_dir, "services")) else [],
         "has_manifest": os.path.exists(os.path.join(target_dir, "manifest.json")),
     }
+    repository.put('uploads',repository.identifier('upload'),{'path':target_dir,'root':target_dir,'created_at':repository.now()})
     _audit("bundle.upload", package=pkg, size=size, ok=True)
     return JSONResponse({"ok": True, "data": {"package": pkg, "dir": target_dir, "inventory": inv}})
+
+
+@router.get('/versions/{kind}/{name}')
+def version_history(kind:str,name:str):
+    if kind not in ('target','template'): return _err('KIND_INVALID','仅支持 target/template')
+    if kind=='template' and not repository.revision(kind,name):
+        raw=_load_store(INSTANCE_STORE).get(name)
+        if raw:
+            try: versions.template(name,raw)
+            except ValueError as e: return _err('TEMPLATE_INVALID',str(e))
+    if kind=='target' and not repository.revision(kind,name):
+        raw=_load_manifests().get(name)
+        if raw:
+            try: versions.target(name,delivery.manifest(raw))
+            except ValueError as e: return _err('MANIFEST_INVALID',str(e))
+    return {'ok':True,'data':repository.history(kind,name)}
+
+
+@router.get('/storage/migrations')
+def migration_status():
+    for path in (MANIFEST_STORE,INSTANCE_STORE,TOPOLOGY_STORE): _load_store(path)
+    with repository.connection() as c:
+        rows=[dict(r) for r in c.execute('SELECT * FROM migrations')]
+        for row in rows:
+            report=c.execute('SELECT report FROM migration_reports WHERE collection=?',(row['source'],)).fetchone()
+            row['validation']=json.loads(report[0]) if report else {'note':'旧迁移标记，原始记录仍保留'}
+    return {'ok':True,'data':rows}
+
+
+@router.get('/targets/registry')
+def target_registry():
+    out=[]
+    for name,m in _load_manifests().items():
+        try:
+            published=repository.revision('target',name) or versions.target(name,delivery.manifest(m))
+            out.append({'name':name,'version':published['version'],'entity_id':published['entity_id'],'image_ref':published['image_ref'],'image_digest':published.get('image_digest')})
+        except ValueError as e:
+            image=m.get('image') or {}
+            ref=(image.get('name','')+':'+image.get('tag','latest')) if isinstance(image,dict) else image
+            out.append({'name':name,'image_ref':ref,'publication_state':'draft','migration_error':str(e)})
+    return {'ok':True,'data':out}
+
+
+@router.post('/targets/import/discard')
+def discard_uploads(body:dict):
+    import shutil
+    removed=[]
+    for requested in body.get('paths',[]):
+        record=next(((key,value) for key,value in repository.read('uploads').items() if value['path']==requested),None)
+        if record is None: continue  # User-provided server directories are never deleted.
+        for job in repository.read('jobs').values():
+            if job['status'] in ('queued','running') and requested in (job['input'].get('dir'),job['input'].get('image_path')):
+                return _err('UPLOAD_IN_USE','上传文件正在被后台任务使用',status=409)
+        key,value=record
+        shutil.rmtree(value['root'],ignore_errors=False)
+        repository.remove('uploads',key);removed.append(requested)
+    return {'ok':True,'data':{'removed':removed}}

@@ -20,8 +20,10 @@ import sqlite3
 import subprocess
 import threading
 import time
+from settings import settings
+import database
 
-DB_PATH = "/opt/artifacts/core-drill/platform.db"
+DB_PATH = str(settings.db_path)
 logger = logging.getLogger("core.platform_db")
 
 # 保留策略（天）：audit 永久（量小, 追溯凭证）; metrics/events 按演练价值设限。
@@ -89,11 +91,7 @@ _initialized = False
 
 
 def _conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    c = sqlite3.connect(DB_PATH, timeout=10)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+    return database.connect(DB_PATH)
 
 
 def init() -> None:
@@ -103,10 +101,36 @@ def init() -> None:
             return
         c = _conn()
         c.executescript(_SCHEMA)
+        if 'identity' not in {r[1] for r in c.execute('PRAGMA table_info(drills)')}:
+            c.execute('ALTER TABLE drills ADD COLUMN identity TEXT')
+        if 'drill_id' not in {r[1] for r in c.execute('PRAGMA table_info(audit)')}:
+            c.execute('ALTER TABLE audit ADD COLUMN drill_id TEXT')
+        _migrate_constraints(c)
         c.commit()
         c.close()
         _initialized = True
         logger.info("platform db ready: %s", DB_PATH)
+
+
+def _migrate_constraints(c):
+    c.execute('CREATE TABLE IF NOT EXISTS platform_migration_issues(id INTEGER PRIMARY KEY,entity TEXT,detail TEXT)')
+    for r in c.execute("SELECT * FROM drills WHERE status='active' AND rowid NOT IN (SELECT MAX(rowid) FROM drills WHERE status='active' GROUP BY core_sid)").fetchall():
+        c.execute('INSERT INTO platform_migration_issues(entity,detail) VALUES(?,?)',('duplicate-active-drill',json.dumps(dict(r))))
+        c.execute("UPDATE drills SET status='interrupted',closed_at=? WHERE drill_id=?",(time.strftime('%Y-%m-%d %H:%M:%S'),r['drill_id']))
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_drill_per_sid ON drills(core_sid) WHERE status='active'")
+    columns={r[1] for r in c.execute('PRAGMA table_info(deploy_refs)')}
+    if 'instance_version' not in columns: c.execute('ALTER TABLE deploy_refs ADD COLUMN instance_version INTEGER')
+    # Preserve ambiguous legacy rows in diagnostics before removing duplicate live references.
+    bad=c.execute("SELECT * FROM deploy_refs WHERE id NOT IN (SELECT MAX(id) FROM deploy_refs GROUP BY core_sid,node_id) OR drill_id NOT IN (SELECT drill_id FROM drills WHERE status='active')").fetchall()
+    for r in bad:
+        c.execute('INSERT INTO platform_migration_issues(entity,detail) VALUES(?,?)',('legacy-deploy-ref',json.dumps(dict(r))))
+        c.execute('DELETE FROM deploy_refs WHERE id=?',(r['id'],))
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS one_ref_per_live_node ON deploy_refs(core_sid,node_id)')
+    c.execute('CREATE TABLE IF NOT EXISTS revisions(kind TEXT,name TEXT,version INTEGER,body TEXT NOT NULL,created_at TEXT,PRIMARY KEY(kind,name,version))')
+    checks="""SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM drills WHERE drill_id=NEW.drill_id AND core_sid=NEW.core_sid AND status='active') THEN RAISE(ABORT,'reference requires active drill') END;
+SELECT CASE WHEN NEW.instance_version IS NULL OR NOT EXISTS(SELECT 1 FROM revisions WHERE kind='template' AND name=NEW.instance_name AND version=NEW.instance_version) THEN RAISE(ABORT,'reference requires published template version') END;"""
+    for operation in ('INSERT','UPDATE'):
+        c.execute(f"CREATE TRIGGER IF NOT EXISTS deploy_ref_{operation.lower()}_valid BEFORE {operation} ON deploy_refs BEGIN {checks} END")
 
 
 def _now() -> str:
@@ -114,53 +138,63 @@ def _now() -> str:
 
 
 def _new_drill_id() -> str:
-    return f"d-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+    return f"d-{time.strftime('%Y%m%d-%H%M%S')}-{os.urandom(8).hex()}"
 
 
 # ═══════════════════════════════════════════════
 # 演练身份（drills）
 # ═══════════════════════════════════════════════
 
-def issue_drill(core_sid: int, name: str | None = None) -> str:
+def issue_drill(core_sid: int, name: str | None = None, identity: str | None = None) -> str:
     """签发演练身份。会话创建时调用; 旁路创建/同号新会话由 ensure_drill 惰性调用"""
-    init()
-    drill_id = _new_drill_id()
-    c = _conn()
-    c.execute("INSERT INTO drills(drill_id, core_sid, name, created_at, status) VALUES (?,?,?,?, 'active')",
-              (drill_id, core_sid, name, _now()))
-    c.commit()
-    c.close()
-    logger.info("drill issued: %s (core_sid=%s)", drill_id, core_sid)
+    import repository as repo
+    with repo.transaction() as c:
+        drill_id=_new_drill_id()
+        c.execute("INSERT INTO drills(drill_id,core_sid,name,created_at,identity,status) VALUES(?,?,?,?,?,'active')",(drill_id,core_sid,name,_now(),identity))
     return drill_id
 
 
-def get_active_drill(core_sid: int) -> str | None:
+def get_active_drill(core_sid:int) -> str | None:
     init()
-    c = _conn()
-    row = c.execute(
-        "SELECT drill_id FROM drills WHERE core_sid=? AND status='active' ORDER BY created_at DESC LIMIT 1",
-        (core_sid,)).fetchone()
-    c.close()
-    return row["drill_id"] if row else None
+    with database.connection(DB_PATH) as c:
+        row=c.execute("SELECT drill_id FROM drills WHERE core_sid=? AND status='active'",(core_sid,)).fetchone()
+    return row['drill_id'] if row else None
 
 
-def ensure_drill(core_sid: int) -> str:
-    """惰性登记: 有 active 用 active（stop→restart 不换身份）; 没有则签发新身份
-    （覆盖: 旁路创建的会话 / daemon 重启后同号新会话——旧行已 interrupted, 新行新身份）"""
-    d = get_active_drill(core_sid)
-    if d:
-        return d
-    return issue_drill(core_sid)
+_identity_lock = threading.RLock()
 
 
-def close_drill(core_sid: int, status: str = "closed") -> None:
-    """关闭演练身份。delete → closed; reconciler 发现会话消失 → interrupted"""
+class IdentityUnconfirmed(RuntimeError):
+    def __init__(self, sid, message):
+        self.sid=sid
+        super().__init__('会话归属待确认: '+str(message))
+
+
+def ensure_drill(core_sid:int, identity:str | None=None) -> str:
+    import app,core_adapter,repository as repo
+    try:
+        if identity is None: identity=core_adapter.identities(app.bridge).get(str(core_sid))
+        if not identity: raise ValueError('无法取得 CORE 会话实体标识')
+    except Exception as e:
+        repo.put('identity_diagnostics',str(core_sid),{'status':'pending','message':str(e),'updated_at':_now()})
+        raise IdentityUnconfirmed(core_sid,str(e)) from e
+    with repo.transaction() as c:
+        row=c.execute("SELECT drill_id,identity FROM drills WHERE core_sid=? AND status='active'",(core_sid,)).fetchone()
+        repo.remove('identity_diagnostics',str(core_sid))
+        if row and row['identity']==identity: return row['drill_id']
+        if row:
+            unsubscribe_events(core_sid)
+            import topologies
+            topologies.state(core_sid,'interrupted')
+            close_drill(core_sid,'interrupted')
+            release_deploy_refs(core_sid=core_sid)
+        return issue_drill(core_sid,identity=identity)
+
+
+def close_drill(core_sid:int,status:str='closed') -> None:
     init()
-    c = _conn()
-    c.execute("UPDATE drills SET status=?, closed_at=? WHERE core_sid=? AND status='active'",
-              (status, _now(), core_sid))
-    c.commit()
-    c.close()
+    with database.connection(DB_PATH) as c:
+        c.execute("UPDATE drills SET status=?,closed_at=? WHERE core_sid=? AND status='active'",(status,_now(),core_sid))
 
 
 # ═══════════════════════════════════════════════
@@ -177,20 +211,19 @@ def write_audit(action: str, **kw) -> None:
         if kw.get(k) is not None:
             target = kw.pop(k)
             break
-    c = _conn()
-    c.execute("INSERT INTO audit(ts, action, session_id, node_id, target, detail) VALUES (?,?,?,?,?,?)",
-              (_now(), action, session_id, node_id,
-               str(target) if target is not None else None,
-               json.dumps(kw, ensure_ascii=False, default=str)))
-    c.commit()
-    c.close()
+    drill_id=kw.pop('drill_id',None) or (get_active_drill(session_id) if session_id is not None else None)
+    with database.connection(DB_PATH) as c:
+        c.execute('INSERT INTO audit(ts,action,session_id,node_id,target,detail,drill_id) VALUES(?,?,?,?,?,?,?)',(_now(),action,session_id,node_id,str(target) if target is not None else None,json.dumps(kw,ensure_ascii=False,default=str),drill_id))
 
 
 def query_audit(action: str | None = None, session_id: int | None = None,
-                node_id: int | None = None, limit: int = 100) -> list[dict]:
+                node_id: int | None = None, limit: int = 100, drill_id: str | None = None) -> list[dict]:
     init()
-    sql = "SELECT ts, action, session_id, node_id, target, detail FROM audit WHERE 1=1"
+    sql = "SELECT ts, action, session_id, node_id, target, detail, drill_id FROM audit WHERE 1=1"
     args: list = []
+    if drill_id:
+        sql += " AND drill_id=?"
+        args.append(drill_id)
     if action:
         sql += " AND action=?"
         args.append(action)
@@ -252,9 +285,9 @@ def event_to_dict(event) -> dict:
     return d
 
 
-def record_event(core_sid: int, detail: dict) -> None:
+def record_event(core_sid: int, detail: dict, drill_id: str | None = None) -> None:
     init()
-    drill_id = ensure_drill(core_sid)
+    drill_id = drill_id or ensure_drill(core_sid)
     c = _conn()
     c.execute("INSERT INTO events(ts, drill_id, core_sid, type, action, detail) VALUES (?,?,?,?,?,?)",
               (_now(), drill_id, core_sid, detail.get("type"), detail.get("action"),
@@ -263,24 +296,25 @@ def record_event(core_sid: int, detail: dict) -> None:
     c.close()
 
 
-def query_events(drill_id: str | None = None, limit: int = 200) -> list[dict]:
+def query_events(drill_id=None,limit=200,core_sid=None,before_id=None,after_id=None):
     init()
-    sql = "SELECT ts, drill_id, core_sid, type, action, detail FROM events WHERE 1=1"
-    args: list = []
-    if drill_id:
-        sql += " AND drill_id=?"
-        args.append(drill_id)
-    sql += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
-    c = _conn()
-    rows = [dict(r) for r in c.execute(sql, args).fetchall()]
-    c.close()
-    for r in rows:
-        try:
-            r["detail"] = json.loads(r["detail"]) if r["detail"] else {}
-        except json.JSONDecodeError:
-            pass
+    if core_sid is not None: drill_id=ensure_drill(core_sid)
+    sql='SELECT id,ts,drill_id,core_sid,type,action,detail FROM events WHERE 1=1';args=[]
+    if drill_id: sql+=' AND drill_id=?';args.append(drill_id)
+    if before_id is not None: sql+=' AND id<=?';args.append(before_id)
+    if after_id is not None: sql+=' AND id>?';args.append(after_id)
+    sql+=' ORDER BY id '+('ASC' if after_id is not None else 'DESC')+' LIMIT ?';args.append(max(1,min(int(limit),2000)))
+    with database.connection(DB_PATH) as c: rows=[dict(r) for r in c.execute(sql,args)]
+    for row in rows:
+        try: row['detail']=json.loads(row['detail']) if row['detail'] else {}
+        except ValueError: row['detail']={}
     return rows
+
+
+def event_cursor(drill_id):
+    init()
+    with database.connection(DB_PATH) as c:
+        return c.execute('SELECT COALESCE(MAX(id),0) FROM events WHERE drill_id=?',(drill_id,)).fetchone()[0]
 
 
 # ═══════════════════════════════════════════════
@@ -288,38 +322,29 @@ def query_events(drill_id: str | None = None, limit: int = 200) -> list[dict]:
 # 部署(带 instance 建节点) → 自动登记; 会话删除/异常消失 → 自动解除
 # ═══════════════════════════════════════════════
 
-def register_deploy_ref(drill_id: str, core_sid: int, node_id: int, instance_name: str) -> None:
+def register_deploy_ref(drill_id,core_sid,node_id,instance_name,instance_version=None):
+    import repository as repo
+    if instance_version is None:
+        import topologies
+        instance_version=topologies.bindings(core_sid).get(str(node_id),{}).get('instance_version')
+    if instance_version is None:
+        raise ValueError('部署引用必须明确模板版本')
+    with repo.transaction() as c:
+        c.execute("INSERT INTO deploy_refs(drill_id,core_sid,node_id,instance_name,created_at,instance_version) VALUES(?,?,?,?,?,?) ON CONFLICT(core_sid,node_id) DO UPDATE SET drill_id=excluded.drill_id,instance_name=excluded.instance_name,instance_version=excluded.instance_version,created_at=excluded.created_at",(drill_id,core_sid,node_id,instance_name,_now(),instance_version))
+
+
+def release_deploy_refs(core_sid=None,drill_id=None):
     init()
-    c = _conn()
-    c.execute("INSERT INTO deploy_refs(drill_id, core_sid, node_id, instance_name, created_at) VALUES (?,?,?,?,?)",
-              (drill_id, core_sid, node_id, instance_name, _now()))
-    c.commit()
-    c.close()
+    with database.connection(DB_PATH) as c:
+        if core_sid is not None: cursor=c.execute('DELETE FROM deploy_refs WHERE core_sid=?',(core_sid,))
+        else: cursor=c.execute('DELETE FROM deploy_refs WHERE drill_id=?',(drill_id,))
+        return cursor.rowcount
 
 
-def release_deploy_refs(core_sid: int | None = None, drill_id: str | None = None) -> int:
-    """解除引用（会话删除时按 core_sid; daemon 异常时按 drill_id）"""
+def release_deploy_ref_node(core_sid,node_id):
     init()
-    c = _conn()
-    if core_sid is not None:
-        cur = c.execute("DELETE FROM deploy_refs WHERE core_sid=?", (core_sid,))
-    else:
-        cur = c.execute("DELETE FROM deploy_refs WHERE drill_id=?", (drill_id,))
-    n = cur.rowcount
-    c.commit()
-    c.close()
-    return n
-
-
-def release_deploy_ref_node(core_sid: int, node_id: int) -> int:
-    """节点级解除：会话内删除单个节点时释放它的引用（同实例还有其它节点则继续锁定）"""
-    init()
-    c = _conn()
-    cur = c.execute("DELETE FROM deploy_refs WHERE core_sid=? AND node_id=?", (core_sid, node_id))
-    n = cur.rowcount
-    c.commit()
-    c.close()
-    return n
+    with database.connection(DB_PATH) as c:
+        return c.execute('DELETE FROM deploy_refs WHERE core_sid=? AND node_id=?',(core_sid,node_id)).rowcount
 
 
 def query_deploy_refs(instance_name: str) -> list[dict]:
@@ -418,6 +443,8 @@ def purge_drill_data(drill_id: str) -> dict:
 # ═══════════════════════════════════════════════
 
 _sampler_started = False
+_subscription_lock=threading.RLock()
+_subscription_retry={}
 _event_subs: dict = {}  # core_sid -> gRPC events stream
 _last_cleanup: float = 0.0
 
@@ -434,29 +461,51 @@ def _maybe_cleanup() -> None:
         logger.exception("retention cleanup failed")
 
 
-def subscribe_events(core_sid: int) -> None:
+def _subscribe_events(core_sid: int) -> None:
     """会话事件订阅（幂等）。创建会话时同步调用——避免等 5s tick 导致头几秒动作漏录"""
-    if core_sid in _event_subs:
-        return
+    old = _event_subs.get(core_sid)
+    if old is not None:
+        if not hasattr(old,'is_active') or old.is_active(): return
+        unsubscribe_events(core_sid)
     try:
         import app as _app
         b = getattr(_app, "bridge", None)
         if b is None:
             return
 
-        def handler(event, _sid=core_sid):
+        drill_id = ensure_drill(core_sid)
+        def handler(event, _sid=core_sid, _drill=drill_id):
             try:
-                record_event(_sid, event_to_dict(event))
+                record_event(_sid, event_to_dict(event),_drill)
             except Exception:
                 pass
 
-        _event_subs[core_sid] = b.events(core_sid, handler=handler)
+        import core_adapter
+        _event_subs[core_sid] = core_adapter.events(b,core_sid,handler)
         logger.info("events subscribed: core_sid=%s", core_sid)
     except Exception as e:
         logger.warning("events subscribe failed sid=%s: %s", core_sid, e)
+        raise
+
+
+def subscribe_events(core_sid):
+    with _subscription_lock:
+        previous=_event_subs.get(core_sid)
+        if previous is not None and previous.is_active(): return True
+        retry=_subscription_retry.get(core_sid,{'at':0,'delay':.25})
+        if time.monotonic()<retry['at']: return False
+        try:
+            _subscribe_events(core_sid)
+            if core_sid not in _event_subs: return False
+            _subscription_retry.pop(core_sid,None)
+            return True
+        except Exception:
+            _subscription_retry[core_sid]={'at':time.monotonic()+retry['delay'],'delay':min(5,retry['delay']*2)}
+            return False
 
 
 def unsubscribe_events(core_sid: int) -> None:
+    _subscription_retry.pop(core_sid,None)
     stream = _event_subs.pop(core_sid, None)
     if stream is not None:
         try:
@@ -495,19 +544,22 @@ def _tick() -> None:
         logger.warning("get_sessions failed: %s", e)
         return
 
+    import core_adapter
+    tokens=core_adapter.identities(b)
     # 1) reconciler: 会话消失的 active drill → interrupted（daemon 重启/被杀）
     c = _conn()
     actives = c.execute("SELECT drill_id, core_sid FROM drills WHERE status='active'").fetchall()
     c.close()
     for r in actives:
         if r["core_sid"] not in sessions:
+            import topologies
+            topologies.state(r["core_sid"],"interrupted")
             close_drill(r["core_sid"], status="interrupted")
             release_deploy_refs(core_sid=r["core_sid"])  # 会话消失 → 部署引用解除(实例解锁)
 
     # 2) 旁路创建的会话补登记
     for sid in sessions:
-        if get_active_drill(sid) is None:
-            issue_drill(sid)
+        ensure_drill(sid,tokens.get(str(sid)))
 
     # 3) 事件订阅兜底（创建时已同步订阅; 这里只补漏, 数据只从这里落库）
     for sid in sessions:
@@ -537,6 +589,9 @@ def _tick() -> None:
             stx = stats.get(n.name)
             if not stx:
                 continue
+            from target_admin import _container_net_bytes, _fmt_bytes
+            nb=_container_net_bytes(n.name)
+            stx['net_io']=f'RX {_fmt_bytes(nb[0])} / TX {_fmt_bytes(nb[1])}' if nb is not None else None
             rows.append({"node_id": n.id, "name": n.name, **stx})
         if rows:
             insert_metrics(ensure_drill(sid), sid, rows)
