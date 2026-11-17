@@ -1,0 +1,25 @@
+{
+  "sessions": [
+    {
+      "id": 1,
+      "result": true
+    }
+  ],
+  "containers": [],
+  "images": [
+    {
+      "tag": "chbtest001520f962c8-python:v1",
+      "code": 0,
+      "output": "Untagged: chbtest001520f962c8-python:v1\nUntagged: moby-dangling@sha256:6ff506466f8b1e981719b468cc0023b8ef000b983cdec0eafe119d01f379e31d\n"
+    },
+    {
+      "tag": "chbtest001520f962c8-httpd:v1",
+      "code": 0,
+      "output": "Untagged: chbtest001520f962c8-httpd:v1\n"
+    }
+  ],
+  "remaining_sessions": [],
+  "shutdown": {
+    "stopped": true
+  }
+}

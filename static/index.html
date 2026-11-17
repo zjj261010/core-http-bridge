@@ -1095,10 +1095,15 @@ const TAB_SRC = {
   monitor:   '/static/monitor.html',
   audit:     '/static/audit.html',
 };
-function switchTab(name) {
+function switchTab(name, approved=false) {
+  if(name==='topo')name='topologies';
   if(name==='drafts')name='topologies';
   if(name==='publications')name='images';
   if(name!=='topo'&&!TAB_SRC[name])return;
+  const currentFrame=document.getElementById('tabFrame');
+  if(!approved&&document.body.dataset.activeTab==='topologies'&&name!=='topologies'&&currentFrame.getAttribute('data-src')){
+    currentFrame.contentWindow.postMessage({type:'topology-navigation-request',target:name},location.origin);return;
+  }
   const labels={images:'镜像管理',containers:'容器管理',instances:'节点模板',topologies:'拓扑管理',topo:'拓扑管理 · 运行画布',monitor:'数据监测',audit:'审计日志'};
   const category=['images','containers','instances'].includes(name)?'资源管理':['monitor','audit'].includes(name)?'运行与复盘':'环境构建';
   document.body.dataset.activeTab=name;
@@ -1118,10 +1123,11 @@ function switchTab(name) {
     if (location.hash && location.hash !== '#topo') history.pushState(null, '', '#topo');
     return;
   }
-  const src = TAB_SRC[name];
+  const requestedSession=new URLSearchParams(location.search).get('session');
+  const src = TAB_SRC[name]+(name==='topologies'&&requestedSession?'?session='+encodeURIComponent(requestedSession):'');
   if (!src) return;
   if (frame.getAttribute('data-src') !== src) {
-    frame.contentWindow.location.replace(src + '?embedded=1');
+    frame.contentWindow.location.replace(src + (src.includes('?')?'&':'?')+'embedded=1');
     frame.setAttribute('data-src', src);
   }
   frame.style.display = 'block';
@@ -1145,9 +1151,13 @@ async function saveSessionDraft() {
 }
 window.addEventListener('message', async e => {
   if(e.origin!==location.origin)return;
+  if(e.source!==document.getElementById('tabFrame').contentWindow)return;
+  if(e.data?.type==='topology-navigation-approved'){switchTab(e.data.target,true);return;}
+  if(e.data?.type==='topology-navigation-denied'){history.replaceState(null,'','#topologies');return;}
   if(e.data?.type==='open-publication'){switchTab('images');return;}
   if (e.data?.type !== 'deployment-created') return;
-  await loadSessions(); switchTab('topo'); if(e.data.sid)await selectSession(Number(e.data.sid));
+  if(e.data.sid)history.replaceState(null,'','?session='+encodeURIComponent(e.data.sid)+'#topologies');
+  document.getElementById('tabFrame').removeAttribute('data-src');switchTab('topologies');
 });
 window.addEventListener('pagehide',stopEvents);
 // ── Init ──

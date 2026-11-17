@@ -8,7 +8,11 @@ for port in (15051,18080,18081):
     with socket.socket() as probe:
         if probe.connect_ex(('127.0.0.1',port))==0: raise SystemExit(f'专用端口 {port} 已被占用；未改动现有进程')
 root.mkdir(parents=True,exist_ok=False)
-for path in ('state/custom_services','state/imports','coretmp','fixtures','evidence','screenshots'):(root/path).mkdir(parents=True,exist_ok=True)
+for path in ('state/custom_services','state/imports','fixtures','evidence','screenshots'):(root/path).mkdir(parents=True,exist_ok=True)
+# Unix domain socket paths have a 108-byte limit. Keep runtime paths short and persistent.
+runtime=Path.home()/'.local/share/core-http-bridge/run'/uuid.uuid4().hex[:8]
+runtime.mkdir(parents=True,exist_ok=False)
+(root/'coretmp').symlink_to(runtime,target_is_directory=True)
 prefix='chbtest'+time.strftime('%H%M%S')+uuid.uuid4().hex[:6];image=prefix+'-httpd:v1';fixture=root/'fixtures'/prefix;fixture.mkdir();(fixture/'services/templates').mkdir(parents=True)
 subprocess.run(['docker','tag',args.image,image],check=True);subprocess.run(['docker','save','-o',str(fixture/'image.tar'),image],check=True)
 manifest={'name':prefix,'software':'httpd','version':'fixture-1.0','image':{'name':image.rsplit(':',1)[0],'tag':'v1','ports':[80]},'services':[]}

@@ -3,7 +3,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 ROOT=Path(__file__).parent
 TOKEN=json.loads((ROOT/'control.json').read_text())['token']
-env=dict(os.environ,TMPDIR=str(ROOT/'coretmp'),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH='')
+env=dict(os.environ,TMPDIR=str((ROOT/'coretmp').resolve()),PYTHONDONTWRITEBYTECODE='1',PYTHONPATH='')
 children={}; logs={}; guard=threading.Lock()
 def start(name):
     log=open(ROOT/(name+'.log'),'ab',buffering=0);logs[name]=log

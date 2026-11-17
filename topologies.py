@@ -10,8 +10,93 @@ router=APIRouter()
 mutation_lock=threading.RLock()
 
 
+@router.get('/topology-workspace')
+def workspace():
+    """Join saved configurations and live execution identities without rewriting history."""
+    import app
+    import core_adapter
+    from core.services.manager import ServiceManager
+    saved=list(repo.read('topologies').values())
+    history=copy.deepcopy(list(repo.read('deployments').values()))
+    sessions=[]
+    error=None
+    try:
+        summaries=app.bridge.get_sessions()
+        tokens=core_adapter.identities(app.bridge) if summaries else {}
+        with repo.connection() as connection:
+            active={row['core_sid']:dict(row) for row in connection.execute(
+                "SELECT core_sid,drill_id,identity FROM drills WHERE status='active'")}
+        for summary in summaries:
+            session=app._session_summary_to_dict(summary)
+            token=tokens.get(str(summary.id))
+            owner=active.get(summary.id)
+            session.update(identity=token,drill_id=owner['drill_id'] if owner and token and owner['identity']==token else None)
+            sessions.append(session)
+    except Exception:
+        # Saved definitions/history remain useful when CORE is unavailable.
+        sessions=[]
+        error='无法读取 CORE 实时状态；已保存的拓扑和历史记录仍可查看。'
+    by_sid={s['id']:s for s in sessions}
+    labels={1:'未启动',2:'配置中',3:'启动中',4:'运行中',5:'停止中',6:'已关闭'}
+    for run in history:
+        run['saved_topology_id']=run.get('topology_id') or run.get('captured_topology_id')
+        live=by_sid.get(run.get('core_sid'))
+        run['live']=bool(live and live.get('drill_id') and live['drill_id']==run.get('drill_id')
+                         and run.get('status') not in ('superseded','failed','closed','interrupted'))
+        run['current_state']=live['state'] if run['live'] else None
+        run['current_status']=labels.get(live['state'],'未知') if run['live'] else ('状态待确认' if error else '历史记录')
+        if run['live'] and live['state']==1 and run.get('status')=='stopped': run['current_status']='已停止'
+    return {'ok':True,'data':{'topologies':saved,'deployments':history,'sessions':sessions,
+                            'runtime_error':error,'native_models':ServiceManager().defaults,'updated_at':repo.now()}}
+
+
+def _checked_session(sid,identity):
+    import app
+    import core_adapter
+    if not identity or core_adapter.identities(app.bridge).get(str(sid))!=identity:
+        raise HTTPException(409,'该会话已结束或被替换，请刷新拓扑列表。')
+    return app.bridge.get_session(sid)
+
+
+@router.get('/topology-workspace/sessions/{sid}')
+def workspace_session(sid:int,identity:str):
+    _checked_session(sid,identity)
+    return {'ok':True,'data':snapshot_session(sid)}
+
+
+@router.post('/topology-workspace/sessions/{sid}/{action}')
+def workspace_action(sid:int,action:str,body:dict):
+    import app
+    with mutation_lock:
+        session=_checked_session(sid,body.get('identity'))
+        if action=='stop':
+            if app._enum_val(session.state)!=4:
+                raise HTTPException(409,'会话当前不在运行中，请刷新状态。')
+            result=app.stop_session(sid)
+        elif action=='delete':
+            result=app.delete_session(sid)
+        elif action=='connectivity':
+            return connectivity(sid,body)
+        elif action=='capture':
+            try:
+                with repo.transaction():
+                    record=save({'definition':body.get('definition') or snapshot_session(sid)})
+                    run=for_session(sid)
+                    run['captured_topology_id']=record['topology_id']
+                    repo.put('deployments',run['deployment_id'],run)
+                return {'ok':True,'data':record}
+            except ValueError as exc:
+                raise HTTPException(400,str(exc)) from exc
+        else:
+            raise HTTPException(404,'未知拓扑操作')
+        if not isinstance(result,dict) or not result.get('result'):
+            raise HTTPException(502,'CORE 未完成操作，请刷新状态后查看。')
+        return {'ok':True,'data':result}
+
+
 def validate(definition, pin=True):
     import app
+    import ipaddress
     if definition.get('format')=='core-xml':
         import xml.etree.ElementTree as ET
         try: root=ET.fromstring(definition['xml_text'])
@@ -36,6 +121,29 @@ def validate(definition, pin=True):
     for link in topo.links:
         if link.node1_id not in ids or link.node2_id not in ids or link.node1_id==link.node2_id:
             raise ValueError('链路端点不存在或相同')
+        for key in ('iface1','iface2'):
+            iface=getattr(link,key)
+            if not iface: continue
+            for family,maximum in (('ip4',32),('ip6',128)):
+                address=getattr(iface,family)
+                mask=getattr(iface,family+'_mask')
+                if mask is not None and not 0<=mask<=maximum:
+                    raise ValueError(f'{key} 的 {family} 掩码位须为 0–{maximum}')
+                if address:
+                    try:
+                        parsed=ipaddress.ip_address(address)
+                        if parsed.version!=(4 if family=='ip4' else 6): raise ValueError()
+                    except ValueError as exc:
+                        raise ValueError(f'{key} 的 {family} 地址无效: {address}') from exc
+            if iface.id is not None and iface.id<0: raise ValueError('接口 ID 不能为负数')
+            if iface.mtu is not None and not 68<=iface.mtu<=65535: raise ValueError('MTU 须为 68–65535')
+        if link.options:
+            for key in ('bandwidth','delay','jitter','buffer','burst'):
+                value=getattr(link.options,key)
+                if value is not None and value<0: raise ValueError(f'链路参数 {key} 不能为负数')
+            for key in ('loss','dup'):
+                value=getattr(link.options,key)
+                if value is not None and not 0<=value<=100: raise ValueError(f'链路参数 {key} 须为 0–100')
     return topo.model_dump(exclude_none=True)
 
 
@@ -226,6 +334,9 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
             fields,dirs=versions.resolve(node['instance'],node.get('instance_version'),node.get('service_overrides'))
             node.update(fields);directories.update(dirs)
         if node['type']=='docker': node['name']=f'chb-{deployment_id[-12:]}-{node["id"]}'
+        elif node['type'].lower() in ('default','router','host','pc'):
+            # vnoded builds Unix socket/command paths from this value. Keep the user label in bindings.
+            node['name']=f'n{node["id"]}'
         bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in node}
         bound[str(node['id'])].update(display_name=display,runtime_name=node['name'])
         required.update(node.get('services') or [])
@@ -246,7 +357,11 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
         app._build_topology(session.id,app.TopologyInput.model_validate(resolved))
         if start:
             result=app.start_session(session.id,app.StartSessionRequest())
-            if not result.get('result'): raise ValueError('启动失败: '+str(result))
+            if not result.get('result'):
+                record['diagnostics']=[str(item) for item in result.get('exceptions') or []]
+                if any('name too long' in item for item in record['diagnostics']):
+                    raise ValueError('原生节点启动失败：CORE 运行目录过长，请缩短运行目录。')
+                raise ValueError('节点启动失败，请展开本次运行记录中的启动诊断。')
         return repo.read('deployments',deployment_id)
     except Exception as exc:
         try:

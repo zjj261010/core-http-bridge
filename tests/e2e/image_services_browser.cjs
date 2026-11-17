@@ -62,7 +62,7 @@ async function closeDirty(page,parent){await parent.getByRole('button',{name:'�
     const records=await json(page,'/instances'),created=records.find(t=>t.name==='browser-'+C.template);assert(created);assert.equal(created.service_selection.http,'http-8081');assert.equal(created.service_selection.prepare,'prepare-default');return {template:created.name,revision:created.version};
   });
   await scenario('节点覆盖、恢复默认及运行历史保持独立',async page=>{
-    const original=await json(page,'/topologies/'+C.topology_id);await page.goto(base+'/static/topologies.html');await page.getByRole('button',{name:original.name,exact:true}).click();await page.getByLabel('配置来源',{exact:true}).selectOption('custom');
+    const original=await json(page,'/topologies/'+C.topology_id);await page.goto(base+'/static/topologies.html');await page.locator('.topology-card').filter({has:page.getByRole('heading',{name:original.name,exact:true})}).getByRole('button',{name:'打开配置',exact:true}).click();await page.getByLabel('配置来源',{exact:true}).selectOption('custom');
     const http=page.getByRole('row').filter({hasText:'HTTP 服务'});await http.getByRole('checkbox').uncheck();await page.getByRole('button',{name:'保存',exact:true}).click();
     await page.getByText('拓扑已保存。',{exact:true}).waitFor();let saved=await json(page,'/topologies/'+C.topology_id);
     assert.equal(saved.definition.nodes[0].service_overrides.http,null);assert.equal(saved.definition.nodes[1].service_overrides.http,'http-8082');

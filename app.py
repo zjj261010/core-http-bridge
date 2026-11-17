@@ -728,15 +728,22 @@ def add_node(session_id: int, body: NodeModel):
                 binding.update(display_name=display,runtime_name=body.name)
             except ValueError as e:
                 raise HTTPException(400,str(e))
+        if body.type in (None,0):
+            if body.id is None:
+                body.id=max(bridge.get_session(session_id).nodes.keys(),default=0)+1
+            display=binding.get('display_name') or body.name or f'n{body.id}'
+            body=body.model_copy(update={'name':f'n{body.id}'})
+            binding.update(display_name=display,runtime_name=body.name)
         node_id = bridge.add_node(session_id, _wrappers_node(body))
-        if body.instance:
+        if binding:
             import platform_db
             import repository
-            drill=platform_db.ensure_drill(session_id)
             try:
+                drill=platform_db.ensure_drill(session_id)
                 with repository.transaction():
                     topologies.bind(session_id,node_id,binding)
-                    platform_db.register_deploy_ref(drill,session_id,node_id,body.instance,body.instance_version)
+                    if body.instance:
+                        platform_db.register_deploy_ref(drill,session_id,node_id,body.instance,body.instance_version)
             except Exception:
                 bridge.delete_node(session_id,node_id)
                 raise
@@ -1358,7 +1365,7 @@ async def emane_events_ws(websocket: WebSocket, session_id: int):
 # ===================================================================
 
 _NODE_TYPE_MAP = {
-    "default": 0, "router": 0, "host": 0, "PC": 0,
+    "default": 0, "router": 0, "host": 0, "PC": 0, "pc": 0,
     "switch": 4, "hub": 5,
     "wlan": 6, "wireless_lan": 6,
     "rj45": 7, "tunnel": 8,

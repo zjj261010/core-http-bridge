@@ -1,5 +1,7 @@
 # CORE HTTP Bridge
 
+> WSL 重启后的持久化与固定维护入口见 [WSL持久化与维护](docs/platform/WSL持久化与维护.md)。测试依赖、浏览器与完整验收资料保存在用户持久目录，不依赖临时目录。
+
 > 管理平台已于 2026-11-17 更新：镜像详情采用服务/启动模式两级弹窗，配置通过表格和文件导入导出。旧版本发布入口已合并。当前操作见 [镜像导入指南](docs/platform/镜像导入指南.md)，实施范围与验收见 [二次改造实施与验收记录](docs/platform/二次改造实施与验收记录.md)。
 
 将 CORE (Common Open Research Emulator) 网络仿真器的 gRPC 接口包装为 HTTP REST API。

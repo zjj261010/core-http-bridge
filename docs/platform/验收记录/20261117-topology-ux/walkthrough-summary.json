@@ -1,0 +1,41 @@
+{
+  "scope": "一次真实浏览器探索性操作，不保存或启动拓扑，不创建或删除会话；不使用模拟 API 数据。",
+  "url": "http://192.168.197.202:8080/#topologies",
+  "steps": [
+    {
+      "step": "进入拓扑管理并查看列表与运行记录",
+      "ok": true
+    },
+    {
+      "step": "点击运行画布",
+      "ok": true
+    },
+    {
+      "step": "返回拓扑管理并新建未保存拓扑",
+      "ok": true
+    },
+    {
+      "step": "点击添加模板节点并展开模板选项",
+      "ok": false,
+      "error": "locator.waitFor: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#tabFrame').contentFrame().getByLabel('节点模板', { exact: true }) to be visible\u001b[22m\n"
+    },
+    {
+      "step": "检查原生节点入口及链路编辑",
+      "ok": true
+    }
+  ],
+  "page_errors": [],
+  "blocked_mutations": [],
+  "observed_counts": {
+    "topologies": 0,
+    "deployments": 0,
+    "live_sessions": 0,
+    "templates": 0,
+    "core_services": 23
+  },
+  "limitations": [
+    "无模板，未能展开节点模板选择器；等待该控件超时，未重试。",
+    "当前无运行会话和历史记录，未现场复现列表空但有运行记录；分别读取保存拓扑和运行记录的代码原因已确认。",
+    "未启动资源或验证链路实际联通。"
+  ]
+}

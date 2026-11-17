@@ -1,0 +1,38 @@
+[
+  {
+    "name": "无模板：原生节点与交换机同画布连线、保存重开、真实启动和 ICMP",
+    "status": "passed",
+    "detail": {
+      "topology": "topo-df0cca2f16f54b459ee86fab03e2474c",
+      "sid": 1,
+      "icmp": 2,
+      "nodes": 3,
+      "links": 2
+    },
+    "errors": []
+  },
+  {
+    "name": "多 Docker/原生模板：选择指定模板、服务恢复、混合拓扑真实 HTTP",
+    "status": "passed",
+    "detail": {
+      "topology": "topo-fb49b634bad3426eb6a8a78ec11ab0cb",
+      "sid": 1,
+      "http": [
+        "200",
+        "200"
+      ],
+      "templates": 3
+    },
+    "errors": []
+  },
+  {
+    "name": "无保存配置但有运行会话：列表可见、同页查看、捕获保存并关联状态、历史仍可找回",
+    "status": "passed",
+    "detail": {
+      "sid": 1,
+      "captured": true,
+      "historyVisible": true
+    },
+    "errors": []
+  }
+]
