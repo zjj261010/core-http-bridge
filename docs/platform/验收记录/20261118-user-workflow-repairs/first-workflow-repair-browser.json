@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "name": "R3/R4：真实上传镜像、大小一致、无null文字，模式Esc取消与确认保护",
+      "status": "failed",
+      "detail": {
+        "message": "locator.innerText: Timeout 15000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#tabFrame').contentFrame().getByRole('dialog', { name: '镜像详情', exact: true }).getByRole('row').filter({ has: getByRole('dialog', { name: '镜像详情', exact: true }).getByRole('cell', { name: '本地大小', exact: true }) }).getByRole('cell').nth(1)\u001b[22m\n",
+        "stack": "locator.innerText: Timeout 15000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#tabFrame').contentFrame().getByRole('dialog', { name: '镜像详情', exact: true }).getByRole('row').filter({ has: getByRole('dialog', { name: '镜像详情', exact: true }).getByRole('cell', { name: '本地大小', exact: true }) }).getByRole('cell').nth(1)\u001b[22m\n\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:29:129\n    at async scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:13)\n    at async /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:25:2"
+      }
+    },
+    {
+      "name": "R3：镜像未暂存表单和已暂存修改的关闭、跨模块与浏览器刷新保护",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：镜像配置",
+        "stack": "Error: 前置条件未完成：镜像配置\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:42:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:41:8"
+      }
+    },
+    {
+      "name": "R3：模板编辑取消离开保留内容，完成真实模板创建",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：镜像配置",
+        "stack": "Error: 前置条件未完成：镜像配置\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:50:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:49:8"
+      }
+    },
+    {
+      "name": "R2：页面编排真实混合拓扑，节点命令HTTP 200及Docker/原生终端",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：模板",
+        "stack": "Error: 前置条件未完成：模板\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:55:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:54:8"
+      }
+    },
+    {
+      "name": "R5：监测自动选中当前拓扑，事件、指标和容器展示用户名称",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：运行拓扑",
+        "stack": "Error: 前置条件未完成：运行拓扑\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:65:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:64:8"
+      }
+    },
+    {
+      "name": "R6：停止状态一致，一次确认恢复原会话而非新增会话",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：运行拓扑",
+        "stack": "Error: 前置条件未完成：运行拓扑\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:71:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:70:8"
+      }
+    },
+    {
+      "name": "R1：删除会话和保存配置后历史保留原名，MTU=0复制保存重开",
+      "status": "blocked",
+      "detail": {
+        "message": "前置条件未完成：运行拓扑",
+        "stack": "Error: 前置条件未完成：运行拓扑\n    at need (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:16:47)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:78:3\n    at scenario (/opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:12:19)\n    at /opt/core-http-bridge/tests/e2e/user_workflow_repairs.cjs:77:8"
+      }
+    }
+  ],
+  "dialogs": [],
+  "unexpected": [],
+  "errors": []
+}

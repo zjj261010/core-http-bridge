@@ -1,0 +1,16 @@
+{
+  "config_archive_files": [
+    "catalog.json",
+    "scripts/ea6601a2253fba146811946204e67a458b5d16393be6bf46a46b93081a67209f",
+    "scripts/018f8afa30bdc5c4d7c267e5a0f7df99264102277f8a1fdf24b33380a9ae70b4",
+    "scripts/9e5753128c1ceedf3f998fe3ac1182061af374f2759c4652353433620c631018"
+  ],
+  "full_delivery_bytes": 45137148,
+  "full_delivery_files": [
+    "image.tar",
+    "catalog.json",
+    "scripts/ea6601a2253fba146811946204e67a458b5d16393be6bf46a46b93081a67209f",
+    "scripts/018f8afa30bdc5c4d7c267e5a0f7df99264102277f8a1fdf24b33380a9ae70b4",
+    "scripts/9e5753128c1ceedf3f998fe3ac1182061af374f2759c4652353433620c631018"
+  ]
+}

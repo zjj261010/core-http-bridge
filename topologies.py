@@ -10,6 +10,21 @@ router=APIRouter()
 mutation_lock=threading.RLock()
 
 
+def display_name(run):
+    """Resolve presentation metadata without rewriting immutable execution snapshots."""
+    if run.get('topology_name'): return run['topology_name']
+    if not run.get('topology_id') and run.get('captured_topology_name'): return run['captured_topology_name']
+    topology_id=run.get('topology_id') or run.get('captured_topology_id')
+    if topology_id:
+        number=run.get('revision') if run.get('topology_id') else run.get('captured_topology_revision',1)
+        revision=repo.read('topology_revisions',str(topology_id)+':'+str(number))
+        saved=revision or repo.read('topologies',topology_id)
+        if saved and saved.get('name'): return saved['name']
+    for key in ('source','execution_definition','snapshot'):
+        if (run.get(key) or {}).get('name'): return run[key]['name']
+    return '会话 '+str(run.get('core_sid',''))
+
+
 @router.get('/topology-workspace')
 def workspace():
     """Join saved configurations and live execution identities without rewriting history."""
@@ -39,6 +54,7 @@ def workspace():
     by_sid={s['id']:s for s in sessions}
     labels={1:'未启动',2:'配置中',3:'启动中',4:'运行中',5:'停止中',6:'已关闭'}
     for run in history:
+        run['display_name']=display_name(run)
         run['saved_topology_id']=run.get('topology_id') or run.get('captured_topology_id')
         live=by_sid.get(run.get('core_sid'))
         run['live']=bool(live and live.get('drill_id') and live['drill_id']==run.get('drill_id')
@@ -46,6 +62,9 @@ def workspace():
         run['current_state']=live['state'] if run['live'] else None
         run['current_status']=labels.get(live['state'],'未知') if run['live'] else ('状态待确认' if error else '历史记录')
         if run['live'] and live['state']==1 and run.get('status')=='stopped': run['current_status']='已停止'
+    for session in sessions:
+        run=next((r for r in history if r['live'] and r.get('drill_id')==session.get('drill_id')),None)
+        session['display_name']=run['display_name'] if run else '会话 '+str(session['id'])
     return {'ok':True,'data':{'topologies':saved,'deployments':history,'sessions':sessions,
                             'runtime_error':error,'native_models':ServiceManager().defaults,'updated_at':repo.now()}}
 
@@ -83,6 +102,8 @@ def workspace_action(sid:int,action:str,body:dict):
                     record=save({'definition':body.get('definition') or snapshot_session(sid)})
                     run=for_session(sid)
                     run['captured_topology_id']=record['topology_id']
+                    run['captured_topology_name']=record['name']
+                    run['captured_topology_revision']=record['revision']
                     repo.put('deployments',run['deployment_id'],run)
                 return {'ok':True,'data':record}
             except ValueError as exc:
@@ -136,7 +157,8 @@ def validate(definition, pin=True):
                     except ValueError as exc:
                         raise ValueError(f'{key} 的 {family} 地址无效: {address}') from exc
             if iface.id is not None and iface.id<0: raise ValueError('接口 ID 不能为负数')
-            if iface.mtu is not None and not 68<=iface.mtu<=65535: raise ValueError('MTU 须为 68–65535')
+            # CORE/protobuf returns 0 when MTU was not explicitly configured.
+            if iface.mtu not in (None,0) and not 68<=iface.mtu<=65535: raise ValueError('MTU 须为 68–65535，或留空使用自动值')
         if link.options:
             for key in ('bandwidth','delay','jitter','buffer','burst'):
                 value=getattr(link.options,key)
@@ -239,7 +261,10 @@ def snapshot_session(sid):
         raw['name']=b.get('display_name') or n.name
         nodes.append(raw)
     links=[app._link_to_dict(l) for l in session.links or []]
-    return {'schema_version':2,'name':f'session-{sid}','nodes':nodes,'links':links,'options':{k:getattr(v,'value',str(v)) for k,v in (getattr(session,'options',{}) or {}).items()}}
+    drill=platform_db.get_active_drill(sid)
+    run=next((r for r in repo.read('deployments').values() if r.get('drill_id')==drill and r.get('status') in ('defined','running','stopped')),None) if drill else None
+    name=display_name(run) if run else f'session-{sid}'
+    return {'schema_version':2,'name':name,'nodes':nodes,'links':links,'options':{k:getattr(v,'value',str(v)) for k,v in (getattr(session,'options',{}) or {}).items()}}
 
 
 def state(sid,status):
@@ -287,7 +312,8 @@ def prepare_start(sid):
                 platform_db.unsubscribe_events(sid)
                 platform_db.close_drill(sid,'superseded');platform_db.release_deploy_refs(core_sid=sid)
                 drill=platform_db.issue_drill(sid,identity=row['identity'])
-                current={'deployment_id':repo.identifier('deploy'),'parent_deployment_id':old['deployment_id'],'core_sid':sid,'drill_id':drill,'status':'defined','created_at':repo.now(),'bindings':bound,'has_run':False}
+                current={'deployment_id':repo.identifier('deploy'),'parent_deployment_id':old['deployment_id'],'core_sid':sid,'drill_id':drill,'status':'defined','created_at':repo.now(),'bindings':bound,'has_run':False,'topology_name':display_name(old)}
+                current.update({key:old[key] for key in ('topology_id','revision','captured_topology_id','captured_topology_name','captured_topology_revision') if key in old})
                 for node in definition['nodes']:
                     if node['type']=='docker':
                         runtime=f'chb-{current["deployment_id"][-12:]}-{node["id"]}'
@@ -322,7 +348,7 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
         response=native_xml.load(app.bridge,normalized['xml_text'],start)
         if not response['result']: raise ValueError('原生 XML 草稿部署失败')
         record=repo.read('deployments',response['deployment_id'])
-        record.update(topology_id=topology_id,revision=revision)
+        record.update(topology_id=topology_id,revision=revision,topology_name=normalized.get('name','拓扑'))
         repo.put('deployments',record['deployment_id'],record)
         return record
     resolved=copy.deepcopy(normalized)
@@ -351,7 +377,7 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
     session=app.bridge.create_session()
     drill=platform_db.ensure_drill(session.id)
     platform_db.subscribe_events(session.id)
-    record={'deployment_id':deployment_id,'topology_id':topology_id,'revision':revision,'snapshot':resolved,'source':normalized,'bindings':bound,'drill_id':drill,'core_sid':session.id,'status':'defined','created_at':repo.now()}
+    record={'deployment_id':deployment_id,'topology_id':topology_id,'revision':revision,'topology_name':normalized.get('name','拓扑'),'snapshot':resolved,'source':normalized,'bindings':bound,'drill_id':drill,'core_sid':session.id,'status':'defined','created_at':repo.now()}
     repo.put('deployments',deployment_id,record)
     try:
         app._build_topology(session.id,app.TopologyInput.model_validate(resolved))

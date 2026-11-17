@@ -1,0 +1,34 @@
+[
+  {
+    "file": "static/monitor-context.js",
+    "passed": true,
+    "output": ""
+  },
+  {
+    "file": "tests/e2e/user_workflow_repairs.cjs",
+    "passed": true,
+    "output": ""
+  },
+  {
+    "file": "tests/e2e/monitor_context_unit.cjs",
+    "passed": true,
+    "output": ""
+  },
+  {
+    "file": "static/monitor.html",
+    "script": 0,
+    "passed": true,
+    "output": ""
+  },
+  {
+    "file": "static/monitor.html",
+    "script": 4,
+    "passed": true,
+    "output": ""
+  },
+  {
+    "file": "monitor context unit",
+    "passed": true,
+    "output": "monitor context: stale identity rejected, drill-scoped names retained, valid context inherited\n"
+  }
+]

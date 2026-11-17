@@ -1,0 +1,108 @@
+[
+  {
+    "file": "topologies.py",
+    "check": "Python AST",
+    "passed": true
+  },
+  {
+    "file": "target_admin.py",
+    "check": "Python AST",
+    "passed": true
+  },
+  {
+    "file": "tests/test_user_workflow_repairs.py",
+    "check": "Python AST",
+    "passed": true
+  },
+  {
+    "file": "static/platform-ui.js",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/image-manager.js",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/template-manager.js",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/topology-manager.js",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/monitor-context.js",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "tests/e2e/user_workflow_repairs.cjs",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "tests/e2e/monitor_context_unit.cjs",
+    "check": "JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/index.html",
+    "script": 0,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/index.html",
+    "script": 3,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/index.html",
+    "script": 4,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/monitor.html",
+    "script": 0,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/monitor.html",
+    "script": 4,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/term.html",
+    "script": 0,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  },
+  {
+    "file": "static/term.html",
+    "script": 2,
+    "check": "inline JavaScript syntax",
+    "passed": true,
+    "error": ""
+  }
+]

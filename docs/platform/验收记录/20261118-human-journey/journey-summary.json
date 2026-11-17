@@ -1,0 +1,642 @@
+{
+  "date": "2026-11-18",
+  "commit": "ddde803",
+  "verdict": "存在阻断与明显使用问题，交互验收未通过",
+  "method": "真实 Chromium 单次连续走查；业务操作均由可见页面控件、键盘、鼠标和文件选择完成，无 page.request、API 造数或路由模拟。准备与清理使用专用脚本。",
+  "action_count": 56,
+  "execution_completed": 54,
+  "execution_failed": 2,
+  "failed_steps": {
+    "48": "导航确认脚本时序问题造成连带失败，不认定为产品缺陷；47步取消保护结论亦无效。",
+    "52": "历史复制后保存被 MTU=0 校验拒绝，真实产品阻断。"
+  },
+  "navigation_cancel_evidence": "本轮证据不足，未重复执行",
+  "page_errors": [],
+  "findings": [
+    {
+      "title": "镜像详情出现 nullnull 占位文字",
+      "severity": "P2",
+      "detail": "导入后弹窗的处理阶段下方实际显示 nullnull。",
+      "afterStep": 4
+    },
+    {
+      "title": "镜像大小在列表和详情口径不清",
+      "severity": "P2",
+      "detail": "同一镜像列表显示 186MB，详情显示 43 MiB，页面未说明差别。",
+      "afterStep": 4
+    },
+    {
+      "title": "启动模式编辑按 Esc 会直接丢弃修改，没有提醒",
+      "severity": "P2",
+      "detail": "新增并命名临时模式后按 Esc，弹窗直接关闭；重新打开没有该模式。",
+      "afterStep": 7
+    },
+    {
+      "title": "镜像详情未保存时切换模块，没有离开提醒",
+      "severity": "P1",
+      "detail": "暂存服务说明但未最后确定，直接点左侧节点模板即可离开，未出现确认对话框。",
+      "afterStep": 12
+    },
+    {
+      "title": "运行节点缺少终端和命令入口",
+      "severity": "P1",
+      "detail": "点击运行中的节点只得到只读属性。当前工作区按钮中没有节点终端、执行命令等入口，无法按日常方式登录或排查节点。",
+      "afterStep": 28
+    },
+    {
+      "title": "监测页没有承接当前拓扑上下文",
+      "severity": "P2",
+      "detail": "从运行拓扑进入监测，仍需重新选择“会话 1（state=4）”；未显示拓扑名称，状态也是数字。",
+      "afterStep": 30
+    },
+    {
+      "title": "监测和历史指标显示内部运行名，难以对应画布节点",
+      "severity": "P2",
+      "detail": "画布节点叫应用服务器/测试终端，但事件显示 chb-f703b6d48079-1/n2，历史指标也显示内部容器名。",
+      "afterStep": 35
+    },
+    {
+      "title": "停止后的工作区显示未启动，和已停止的含义不一致",
+      "severity": "P2",
+      "detail": "停止成功后，当前实际配置视图状态显示“未启动 · 实际配置”。",
+      "afterStep": 42
+    },
+    {
+      "title": "停止后的再次启动入口不直接",
+      "severity": "P2",
+      "detail": "停止后没有启动/再次运行按钮，需先点“编辑下次运行配置”，再点击启动。",
+      "afterStep": 42
+    },
+    {
+      "title": "本轮未保存导航取消场景证据不足",
+      "severity": "验收限制",
+      "detail": "第47步在异步离开确认到达前恢复了自动确认，随后实际离开至镜像页，第48步因此找不到返回列表。该失败归于测试时序；未重复执行同一场景，不认定为产品缺陷。",
+      "afterStep": 48
+    },
+    {
+      "title": "删除保存配置后，历史条目丢失用户拓扑名称",
+      "severity": "P1",
+      "detail": "历史仍在，但首页不再显示原拓扑名，只能通过 session-1/session-2 之类会话名识别。",
+      "afterStep": 50
+    },
+    {
+      "title": "历史配置复制后无法保存，默认 MTU 被拒绝",
+      "severity": "P1",
+      "detail": "复制历史配置后仅修改拓扑名再保存，POST /topologies 返回400：MTU须为68–65535。CORE冻结接口中的默认MTU为0，需要按未指定语义转换，不能当作用户填写的非法MTU。",
+      "afterStep": 52
+    }
+  ],
+  "actions": [
+    {
+      "step": 1,
+      "name": "从首页进入镜像管理，查看页面入口",
+      "started": "2026-11-17T16:49:04.060Z",
+      "status": "passed",
+      "detail": {
+        "navigation": "资源管理\n镜像管理\n容器管理\n节点模板\n环境构建\n拓扑管理\n运行与复盘\n数据监测\n审计日志"
+      },
+      "finished": "2026-11-17T16:49:04.300Z",
+      "screenshot": "screenshots/human-001.png"
+    },
+    {
+      "step": 2,
+      "name": "点击导入，先取消一次，确认能回到列表",
+      "started": "2026-11-17T16:49:04.373Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:49:04.470Z",
+      "screenshot": "screenshots/human-002.png"
+    },
+    {
+      "step": 3,
+      "name": "重新打开导入，选择本机镜像归档文件",
+      "started": "2026-11-17T16:49:04.516Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:49:04.602Z",
+      "screenshot": "screenshots/human-003.png"
+    },
+    {
+      "step": 4,
+      "name": "提交镜像上传并等待后台任务处理完成",
+      "started": "2026-11-17T16:49:04.647Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:49:06.507Z",
+      "screenshot": "screenshots/human-004.png"
+    },
+    {
+      "step": 5,
+      "name": "在镜像详情新增 HTTP 服务及监听端口",
+      "started": "2026-11-17T16:50:21.196Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:21.391Z",
+      "screenshot": "screenshots/human-005.png"
+    },
+    {
+      "step": 6,
+      "name": "进入服务详情，新增一个临时模式后按 Esc 退出",
+      "started": "2026-11-17T16:50:21.427Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:21.570Z",
+      "screenshot": "screenshots/human-006.png"
+    },
+    {
+      "step": 7,
+      "name": "重新查看服务，观察刚才模式是否保留",
+      "started": "2026-11-17T16:50:21.609Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:21.665Z",
+      "screenshot": "screenshots/human-007.png"
+    },
+    {
+      "step": 8,
+      "name": "新增正式启动模式，配置工作目录及脚本",
+      "started": "2026-11-17T16:50:21.709Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:21.867Z",
+      "screenshot": "screenshots/human-008.png"
+    },
+    {
+      "step": 9,
+      "name": "增加手动维护模式，并将两个模式暂存回镜像详情",
+      "started": "2026-11-17T16:50:21.909Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:22.031Z",
+      "screenshot": "screenshots/human-009.png"
+    },
+    {
+      "step": 10,
+      "name": "最后确定，阅读注册提醒并确认生效",
+      "started": "2026-11-17T16:50:22.077Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:22.413Z",
+      "screenshot": "screenshots/human-010.png"
+    },
+    {
+      "step": 11,
+      "name": "导出刚完成的配置与脚本，再关闭镜像详情",
+      "started": "2026-11-17T16:50:22.458Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:50:22.555Z",
+      "screenshot": "screenshots/human-011.png"
+    },
+    {
+      "step": 12,
+      "name": "在镜像里临时编辑服务说明，然后直接点击节点模板导航",
+      "started": "2026-11-17T16:51:31.215Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:51:31.560Z",
+      "screenshot": "screenshots/human-012.png"
+    },
+    {
+      "step": 13,
+      "name": "创建 Docker 模板，选择刚导入的镜像与默认服务",
+      "started": "2026-11-17T16:51:31.592Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:51:31.887Z",
+      "screenshot": "screenshots/human-013.png"
+    },
+    {
+      "step": 14,
+      "name": "使用复制按钮生成第二个 Docker 模板",
+      "started": "2026-11-17T16:51:31.920Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:51:32.140Z",
+      "screenshot": "screenshots/human-014.png"
+    },
+    {
+      "step": 15,
+      "name": "创建原生客户端模板，选择 CORE 原生运行时和裸节点",
+      "started": "2026-11-17T16:51:32.174Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:51:32.321Z",
+      "screenshot": "screenshots/human-015.png"
+    },
+    {
+      "step": 16,
+      "name": "从左侧进入拓扑管理并新建拓扑",
+      "started": "2026-11-17T16:53:05.917Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.046Z",
+      "screenshot": "screenshots/human-016.png"
+    },
+    {
+      "step": 17,
+      "name": "从节点库选择指定 Docker 模板，检查模式并恢复默认",
+      "started": "2026-11-17T16:53:06.081Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.247Z",
+      "screenshot": "screenshots/human-017.png"
+    },
+    {
+      "step": 18,
+      "name": "添加原生客户端模板和交换机",
+      "started": "2026-11-17T16:53:06.283Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.403Z",
+      "screenshot": "screenshots/human-018.png"
+    },
+    {
+      "step": 19,
+      "name": "拖动应用服务器，为连线腾出空间",
+      "started": "2026-11-17T16:53:06.447Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.612Z",
+      "screenshot": "screenshots/human-019.png"
+    },
+    {
+      "step": 20,
+      "name": "进入连线模式选首节点，再按 Esc 取消",
+      "started": "2026-11-17T16:53:06.649Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.765Z",
+      "screenshot": "screenshots/human-020.png"
+    },
+    {
+      "step": 21,
+      "name": "连接服务器与交换机，在右侧修改接口和链路参数",
+      "started": "2026-11-17T16:53:06.817Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:06.998Z",
+      "screenshot": "screenshots/human-021.png"
+    },
+    {
+      "step": 22,
+      "name": "连接原生客户端与交换机并配置地址",
+      "started": "2026-11-17T16:53:07.050Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:07.217Z",
+      "screenshot": "screenshots/human-022.png"
+    },
+    {
+      "step": 23,
+      "name": "直接点击画布链路，确认能选中和编辑",
+      "started": "2026-11-17T16:53:07.267Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:07.323Z",
+      "screenshot": "screenshots/human-023.png"
+    },
+    {
+      "step": 24,
+      "name": "尝试重复连接，阅读提示后取消连线",
+      "started": "2026-11-17T16:53:07.366Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:07.528Z",
+      "screenshot": "screenshots/human-024.png"
+    },
+    {
+      "step": 25,
+      "name": "保存拓扑，返回列表后重新打开",
+      "started": "2026-11-17T16:53:07.569Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:07.811Z",
+      "screenshot": "screenshots/human-025.png"
+    },
+    {
+      "step": 26,
+      "name": "点击启动先取消，确认仍留在编辑页面",
+      "started": "2026-11-17T16:53:07.852Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:07.903Z",
+      "screenshot": "screenshots/human-026.png"
+    },
+    {
+      "step": 27,
+      "name": "确认启动，等待显示同一工作区的实际运行配置",
+      "started": "2026-11-17T16:53:07.950Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:53:09.811Z",
+      "screenshot": "screenshots/human-027.png"
+    },
+    {
+      "step": 28,
+      "name": "点击运行中的服务器，寻找节点终端和命令操作",
+      "started": "2026-11-17T16:53:09.849Z",
+      "status": "passed",
+      "detail": {
+        "buttons": [
+          "刷新状态",
+          "导入",
+          "新建拓扑",
+          "返回列表",
+          "导出",
+          "复制为可编辑拓扑",
+          "编辑下次运行配置",
+          "检查联通",
+          "停止运行",
+          "删除会话",
+          "连线",
+          "节点与链路表",
+          "",
+          "",
+          "应用服务器Docker 模板",
+          "测试终端原生模板",
+          "交换机 3交换机",
+          "恢复模板默认"
+        ]
+      },
+      "finished": "2026-11-17T16:53:09.921Z",
+      "screenshot": "screenshots/human-028.png"
+    },
+    {
+      "step": 29,
+      "name": "点击检查联通，查看真实探测结果",
+      "started": "2026-11-17T16:53:09.965Z",
+      "status": "passed",
+      "detail": {
+        "probeResults": "联通检查结果\n关闭\n\n全部探测可达\n\n源节点\t目标地址\t结果\t详情\n应用服务器\t10.77.0.2\t可达\tPING 10.77.0.2 (10.77.0.2) 56(84) bytes of data. 64 bytes from 10.77.0.2: icmp_seq=1 ttl=64 time=20.8 ms --- 10.77.0.2 ping statistics --- 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 20.794/20.794/20.794/0.000 ms\n测试终端\t10.77.0.1\t可达\tPING 10.77.0.1 (10.77.0.1) 56(84) bytes of data. 64 bytes from 10.77.0.1: icmp_seq=1 ttl=64 time=10.3 ms --- 10.77.0.1 ping statistics --- 1 packets transmitted, 1 received, 0% packet loss, time 0ms rtt min/avg/max/mdev = 10.260/10.260/10.260/0.000 ms"
+      },
+      "finished": "2026-11-17T16:53:10.229Z",
+      "screenshot": "screenshots/human-029.png"
+    },
+    {
+      "step": 30,
+      "name": "从运行拓扑进入数据监测，查看默认上下文",
+      "started": "2026-11-17T16:54:18.600Z",
+      "status": "passed",
+      "detail": {
+        "selected": "",
+        "options": [
+          "选择会话…",
+          "会话 1（state=4）"
+        ]
+      },
+      "finished": "2026-11-17T16:54:18.697Z",
+      "screenshot": "screenshots/human-030.png"
+    },
+    {
+      "step": 31,
+      "name": "选择会话并订阅 CPU、流量和事件",
+      "started": "2026-11-17T16:54:18.743Z",
+      "status": "passed",
+      "detail": {
+        "cpu": "12:54:19 AM  cpu 0.1%\n",
+        "events": "2026-11-18 00:53:08  [node] 节点[chb-f703b6d48079-1] 新增 (id=1)\n2026-11-18 00:53:08  [node] 节点[n2] 新增 (id=2)\n2026-11-18 00:53:08  [node] 节点[交换机 3] 新增 (id=3)\n2026-11-18 00:53:08  [link] 链路 新增 1 ↔ 3\n2026-11-18 00:53:08  [link] 链路 新增 2 ↔ 3\n2026-11-18 00:53:09  [session] 会话事件  \n2026-11-18 00:53:09  [session] 会话事件  CORE 事件订阅已就绪 · d-20261118-005308-17d6ac508fa4bc60\n",
+        "coreContainers": ""
+      },
+      "finished": "2026-11-17T16:54:20.116Z",
+      "screenshot": "screenshots/human-031.png"
+    },
+    {
+      "step": 32,
+      "name": "查询历史指标，并暂停监测刷新",
+      "started": "2026-11-17T16:54:20.162Z",
+      "status": "passed",
+      "detail": {
+        "history": "节点\t最新采样时间\tCPU\t内存\t网络 IO\t采样条数\nchb-f703b6d48079-1 (id=1)\t2026-11-18 00:54:19\t0.01%\t21.89MiB / 7.612GiB\tRX 916B / TX 1.1KB\t11"
+      },
+      "finished": "2026-11-17T16:54:20.285Z",
+      "screenshot": "screenshots/human-032.png"
+    },
+    {
+      "step": 33,
+      "name": "运行中返回镜像详情，检查刚才跨页未保存的说明",
+      "started": "2026-11-17T16:54:20.344Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:54:20.600Z",
+      "screenshot": "screenshots/human-033.png"
+    },
+    {
+      "step": 34,
+      "name": "运行中修改镜像声明，确认只能保存待生效",
+      "started": "2026-11-17T16:54:20.646Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:54:20.996Z",
+      "screenshot": "screenshots/human-034.png"
+    },
+    {
+      "step": 35,
+      "name": "关闭镜像详情，确认原拓扑仍在运行",
+      "started": "2026-11-17T16:54:21.048Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:54:21.239Z",
+      "screenshot": "screenshots/human-035.png"
+    },
+    {
+      "step": 36,
+      "name": "进入容器管理，创建独立容器",
+      "started": "2026-11-17T16:55:11.403Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:55:13.403Z",
+      "screenshot": "screenshots/human-036.png"
+    },
+    {
+      "step": 37,
+      "name": "在容器命令栏输入命令并用 Enter 执行",
+      "started": "2026-11-17T16:55:13.442Z",
+      "status": "passed",
+      "detail": {
+        "output": "$ python3 -c \"print('human-ui-ok')\"\nhuman-ui-ok\n"
+      },
+      "finished": "2026-11-17T16:55:13.689Z",
+      "screenshot": "screenshots/human-037.png"
+    },
+    {
+      "step": 38,
+      "name": "点击独立容器终端，在弹出的窗口执行命令",
+      "started": "2026-11-17T16:55:13.726Z",
+      "status": "passed",
+      "detail": {
+        "output": "[Connecting...][Connected to standalone-chbtest0048003c5ceb-human]\n\nprintf 'terminal-ui-ok\\n'\nroot@330b103f391a:/# printf 'terminal-ui-ok\\n'\nterminal-ui-ok"
+      },
+      "finished": "2026-11-17T16:55:13.931Z",
+      "screenshot": "screenshots/human-038.png"
+    },
+    {
+      "step": 39,
+      "name": "关闭命令栏，停止独立容器，再从列表启动",
+      "started": "2026-11-17T16:55:13.966Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:55:27.650Z",
+      "screenshot": "screenshots/human-039.png"
+    },
+    {
+      "step": 40,
+      "name": "先取消删除，再确认删除本次独立容器",
+      "started": "2026-11-17T16:55:27.690Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:55:28.068Z",
+      "screenshot": "screenshots/human-040.png"
+    },
+    {
+      "step": 41,
+      "name": "进入审计日志，按容器执行命令筛选并查询",
+      "started": "2026-11-17T16:55:28.107Z",
+      "status": "passed",
+      "detail": {
+        "audit": "2026-11-18 00:55:13\tcontainer.exec\tstandalone-chbtest0048003c5ceb-human cmd：python3 -c \"print('human-ui-ok')\"\t记录"
+      },
+      "finished": "2026-11-17T16:55:28.263Z",
+      "screenshot": "screenshots/human-041.png"
+    },
+    {
+      "step": 42,
+      "name": "回到运行拓扑，停止运行并观察状态和后续入口",
+      "started": "2026-11-17T16:56:58.907Z",
+      "status": "passed",
+      "detail": {
+        "status": "未启动 · 实际配置",
+        "buttons": [
+          "刷新状态",
+          "导入",
+          "新建拓扑",
+          "返回列表",
+          "导出",
+          "复制为可编辑拓扑",
+          "编辑下次运行配置",
+          "删除会话",
+          "连线",
+          "节点与链路表",
+          "",
+          "",
+          "应用服务器Docker 模板",
+          "测试终端原生模板",
+          "交换机 3交换机",
+          "恢复模板默认"
+        ]
+      },
+      "finished": "2026-11-17T16:56:59.395Z",
+      "screenshot": "screenshots/human-042.png"
+    },
+    {
+      "step": 43,
+      "name": "按页面提示编辑下次运行配置，再次启动",
+      "started": "2026-11-17T16:56:59.431Z",
+      "status": "passed",
+      "detail": {
+        "status": "运行中 · 实际配置"
+      },
+      "finished": "2026-11-17T16:57:01.341Z",
+      "screenshot": "screenshots/human-043.png"
+    },
+    {
+      "step": 44,
+      "name": "从运行页面导出拓扑配置",
+      "started": "2026-11-17T16:57:01.381Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:57:01.430Z",
+      "screenshot": "screenshots/human-044.png"
+    },
+    {
+      "step": 45,
+      "name": "删除当前运行会话，确认配置和历史仍保留",
+      "started": "2026-11-17T16:57:01.482Z",
+      "status": "passed",
+      "detail": {
+        "card": "人工操作流程拓扑\n已停止\n\n已保存配置 · 3 个节点\n\n更新于 2026/11/18 00:53:07\n\n打开配置\n查看会话"
+      },
+      "finished": "2026-11-17T16:57:02.371Z",
+      "screenshot": "screenshots/human-045.png"
+    },
+    {
+      "step": 46,
+      "name": "通过运行记录找到此前停止的旧会话并删除",
+      "started": "2026-11-17T16:57:02.409Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:57:02.681Z",
+      "screenshot": "screenshots/human-046.png"
+    },
+    {
+      "step": 47,
+      "name": "修改下次运行配置后切换模块，先拒绝离开",
+      "started": "2026-11-17T16:57:02.731Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:57:02.845Z",
+      "screenshot": "screenshots/human-047.png"
+    },
+    {
+      "step": 48,
+      "name": "放弃临时修改回到列表，确认保存名称不变",
+      "started": "2026-11-17T16:57:02.887Z",
+      "status": "failed",
+      "error": "locator.click: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#tabFrame').contentFrame().getByRole('button', { name: '返回列表', exact: true })\u001b[22m\n",
+      "finished": "2026-11-17T16:57:14.893Z",
+      "screenshot": "screenshots/human-048.png"
+    },
+    {
+      "step": 49,
+      "name": "从当前页面重新进入拓扑列表，查看已保存配置",
+      "started": "2026-11-17T16:58:02.226Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:58:02.297Z",
+      "screenshot": "screenshots/human-049.png"
+    },
+    {
+      "step": 50,
+      "name": "删除保存的拓扑，查看首页保留下来的历史条目",
+      "started": "2026-11-17T16:58:02.332Z",
+      "status": "passed",
+      "detail": {
+        "cards": [
+          "session-2历史记录 · 会话已结束历史配置 · 3 个节点更新于 2026/11/18 00:56:59查看历史配置"
+        ]
+      },
+      "finished": "2026-11-17T16:58:02.461Z",
+      "screenshot": "screenshots/human-050.png"
+    },
+    {
+      "step": 51,
+      "name": "按实际可见的历史条目打开配置",
+      "started": "2026-11-17T16:58:02.498Z",
+      "status": "passed",
+      "detail": {
+        "title": "session-2"
+      },
+      "finished": "2026-11-17T16:58:02.554Z",
+      "screenshot": "screenshots/human-051.png"
+    },
+    {
+      "step": 52,
+      "name": "从历史复制为可编辑拓扑并另存恢复配置",
+      "started": "2026-11-17T16:58:02.603Z",
+      "status": "failed",
+      "error": "locator.waitFor: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#tabFrame').contentFrame().locator('#saveState').filter({ hasText: '已保存' }) to be visible\u001b[22m\n",
+      "finished": "2026-11-17T16:58:14.724Z",
+      "screenshot": "screenshots/human-052.png"
+    },
+    {
+      "step": 53,
+      "name": "会话已结束后回到镜像详情，完成待生效配置",
+      "started": "2026-11-17T16:59:21.255Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:59:21.971Z",
+      "screenshot": "screenshots/human-053.png"
+    },
+    {
+      "step": 54,
+      "name": "选择导出完整镜像包，等待后台打包并下载",
+      "started": "2026-11-17T16:59:22.007Z",
+      "status": "passed",
+      "detail": {
+        "file": "image-bundle.tar.gz",
+        "bytes": 45137148
+      },
+      "finished": "2026-11-17T16:59:25.768Z",
+      "screenshot": "screenshots/human-054.png"
+    },
+    {
+      "step": 55,
+      "name": "通过导入清单预览恢复配置，再取消预览",
+      "started": "2026-11-17T16:59:25.808Z",
+      "status": "passed",
+      "finished": "2026-11-17T16:59:26.135Z",
+      "screenshot": "screenshots/human-055.png"
+    },
+    {
+      "step": 56,
+      "name": "返回拓扑首页查看最终保存和历史状态",
+      "started": "2026-11-17T16:59:26.175Z",
+      "status": "passed",
+      "detail": {
+        "cards": [
+          "session-2历史记录 · 会话已结束历史配置 · 3 个节点更新于 2026/11/18 00:56:59查看历史配置"
+        ]
+      },
+      "finished": "2026-11-17T16:59:26.277Z",
+      "screenshot": "screenshots/human-056.png"
+    }
+  ],
+  "private_run": "/home/zjj/.local/share/core-http-bridge/acceptance/20261118-004753-human-journey-dccf96c1",
+  "business_code_changed": false,
+  "api_changed": false,
+  "full_unit_suite_run": false,
+  "repeated_failed_cases": false
+}

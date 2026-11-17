@@ -1,0 +1,17 @@
+{
+  "dialogs": [
+    {
+      "type": "confirm",
+      "message": "放弃当前尚未保存的拓扑修改？",
+      "accept": false
+    },
+    {
+      "type": "confirm",
+      "message": "放弃当前尚未保存的拓扑修改？",
+      "accept": true
+    }
+  ],
+  "mutations": [],
+  "errors": [],
+  "status": "passed"
+}

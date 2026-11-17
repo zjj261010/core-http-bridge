@@ -31,7 +31,7 @@ body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"S
 table{width:100%;border-collapse:collapse}
 th{background:var(--bg3);padding:8px 10px;text-align:left;font-size:11.5px;color:var(--fg2);font-weight:600;white-space:nowrap}
 td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
-.mono{font-family:Consolas,monospace;font-size:12px}
+.runtime-name{display:block;font-size:10px;color:var(--fg2);overflow-wrap:anywhere}.mono{font-family:Consolas,monospace;font-size:12px}
 .tag{display:inline-block;padding:1px 8px;border-radius:8px;font-size:11px;font-weight:600}
 .tag.core{background:#052e16;color:#4ade80;border:1px solid #14532d}
 .tag.st{background:#1e3a8a;color:#93c5fd;border:1px solid #1e40af}
@@ -45,7 +45,8 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 </style>
 <link rel="stylesheet" href="/static/workbench.css?v=20261117">
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
-<script src="/static/platform-ui.js?v=20261117-2"></script>
+<script src="/static/platform-ui.js?v=20261118-3"></script>
+<script src="/static/monitor-context.js?v=20261118-3"></script>
 <script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="bridge-page">
@@ -61,6 +62,7 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 <nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/topologies.html">拓扑管理</a><a class="on" aria-current="page" href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
 
 <div class="wrap">
+<div id="contextMessage" role="status"></div>
   <!-- 宿主载荷 -->
   <div class="cards" id="hostCards">
     <div class="card"><h4>CPU 使用率</h4><div class="big" id="cpuPct">—</div><div class="bar"><i id="cpuBar" style="width:0%"></i></div><div class="sub" id="loadavg">load: —</div></div>
@@ -73,22 +75,23 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
   <div class="section">
     <h3>演练实时数据
       <span class="controls">
-        <select id="sessSel"><option value="">选择会话…</option></select>
+        <select id="sessSel"><option value="">选择拓扑会话…</option></select>
+        <button onclick="refreshWorkspace()">刷新会话</button>
         <button id="subBtn" onclick="toggleStreams()">▶ 订阅</button>
       </span>
     </h3>
     <div class="streams">
-      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">CPU 流（core-daemon 宿主 CPU 使用率，值 0~1，×100=%）— /api/cpu-usage/stream</div><div class="logbox" id="cpuLog">未订阅</div></div>
-      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">Throughputs 流（每节点接口的实时流量速率，CORE 3 秒差分，单位 bit/s = 收+发合计；节点N/M=节点N接口M；空=当前无流量）— /api/sessions/{sid}/throughputs/stream</div><div class="logbox" id="tpLog">未订阅</div></div>
+      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">守护进程宿主 CPU 使用率</div><div class="logbox" id="cpuLog">未订阅</div></div>
+      <div><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">节点接口流量（收发合计；无数据时表示暂无流量）</div><div class="logbox" id="tpLog">未订阅</div></div>
     </div>
     <div style="margin-top:12px"><div class="hint" style="color:var(--fg2);font-size:11px;margin-bottom:4px">会话动作时间线（Events 流持续版：节点/链路增删改、告警、会话事件）</div><div class="logbox" id="evLog" style="height:220px">未订阅</div></div>
   </div>
 
   <!-- 历史指标（落库） -->
   <div class="section">
-    <h3>历史指标（platform.db 落库, 采样线程 RUNTIME 期间 5s 一拍）
+    <h3>历史指标（运行期间每 5 秒采样）
       <span class="controls">
-        <select id="histDrill"><option value="">选择演练…</option></select>
+        <select id="histDrill"><option value="">选择运行记录…</option></select>
         <button onclick="loadHistory()">查询</button>
       </span>
     </h3>
@@ -117,13 +120,13 @@ function fmtBps(v) {
   if (v >= 1e3) return (v/1e3).toFixed(1) + ' Kbit/s';
   return Math.round(v) + ' bit/s';
 }
-function evDesc(d) {
+function evDesc(d, drill) {
   // 事件详情 → 人话（设计 §7 动作时间线）。CORE 动作: add/delete/none(none=节点信息/状态更新, 非增删)
   var actMap = {add: '新增', delete: '删除', none: '状态更新', cri: '严重'};
   var act = actMap[d.action] || d.action || '';
-  if (d.type === 'node') return '节点[' + (d.node.name || d.node.id) + '] ' + act + ' (id=' + d.node.id + ')';
-  if (d.type === 'link') return '链路 ' + act + ' ' + d.link.node1_id + ' ↔ ' + d.link.node2_id;
-  if (d.type === 'alert') return '⚠ 告警 node=' + d.node_id + ' [' + d.level + '] ' + d.source + ': ' + d.text;
+  if (d.type === 'node') return '节点[' + MonitorContext.nodeName(drill,d.node.id,d.node.name) + '] ' + act + ' (id=' + d.node.id + ')';
+  if (d.type === 'link') return '链路 ' + act + ' ' + MonitorContext.nodeName(drill,d.link.node1_id) + ' ↔ ' + MonitorContext.nodeName(drill,d.link.node2_id);
+  if (d.type === 'alert') return '⚠ 告警 节点=' + MonitorContext.nodeName(drill,d.node_id) + ' [' + d.level + '] ' + d.source + ': ' + d.text;
   if (d.type === 'session') return '会话事件 ' + (d.name || '') + ' ' + (d.data || '');
   return Platform.describe(d).slice(0, 120);
 }
@@ -182,8 +185,8 @@ function tbl(items, deep) {
     + (deep ? '<th>所属演练</th><th>CPU</th><th>内存</th><th>网络 IO</th>' : '')
     + '</tr></thead><tbody>'
     + items.map(function(c) {
-        var st = c.stats;
-        return '<tr><td class="mono">' + esc(c.name) + '</td><td class="mono">' + esc(c.image) + '</td>'
+        var st = c.stats, display = deep ? MonitorContext.containerName(c.name,c.drills) : c.name;
+        return '<tr><td class="mono">' + esc(display) + (display!==c.name?'<small class="runtime-name">运行名：'+esc(c.name)+'</small>':'') + '</td><td class="mono">' + esc(c.image) + '</td>'
           + '<td>' + esc(c.status) + '</td>'
           + (deep ? '<td class="mono" style="font-size:11px">' + esc((c.drills || []).join(', ') || '—') + '</td>'
           + '<td class="mono">' + esc(st ? st.cpu : '—') + '</td>'
@@ -198,11 +201,12 @@ async function loadDrillOptions() {
   try {
     var r = await fetch('/drills');
     var drills = (await r.json()).data || [];
-    var opts = '<option value="">选择演练…</option>' + drills.map(function(d) {
-      return '<option value="' + esc(d.drill_id) + '">' + esc(d.drill_id)
-        + '（会话' + d.core_sid + ', ' + d.status + '）</option>';
+    var opts = '<option value="">选择运行记录…</option>' + drills.map(function(d) {
+      return '<option value="' + esc(d.drill_id) + '">' + esc(MonitorContext.historyLabel(d)) + '</option>';
     }).join('');
+    const previous=$('histDrill').value;
     $('histDrill').innerHTML = opts;
+    if([...$('histDrill').options].some(o=>o.value===previous))$('histDrill').value=previous;
   } catch (e) { console.error(e); }
 }
 async function loadHistory() {
@@ -221,7 +225,7 @@ async function loadHistory() {
     });
     $('histTbl').innerHTML = '<table><thead><tr><th>节点</th><th>最新采样时间</th><th>CPU</th><th>内存</th><th>网络 IO</th><th>采样条数</th></tr></thead><tbody>'
       + Object.values(byNode).map(function(n) {
-        return '<tr><td class="mono">' + esc(n.name) + ' (id=' + n.nid + ')</td>'
+        return '<tr><td class="mono">' + esc(MonitorContext.nodeName(drill,n.nid,n.name)) + '<small class="runtime-name">运行名：'+esc(n.name)+' · 节点 '+n.nid+'</small></td>'
           + '<td class="mono">' + esc(n.last.ts) + '</td>'
           + '<td class="mono">' + esc(n.last.cpu) + '</td>'
           + '<td class="mono">' + esc(n.last.mem_usage) + '</td>'
@@ -244,14 +248,17 @@ async function pollContainers() {
 
 // ── 会话选择 + SSE 透传 ──
 async function loadSessions() {
-  try {
-    var r = await fetch('/api/sessions');
-    var ss = await r.json();
-    $('sessSel').innerHTML = '<option value="">选择会话…</option>'
-      + (Array.isArray(ss) ? ss : []).map(function(s) {
-          return '<option value="' + s.id + '">会话 ' + s.id + '（state=' + s.state + '）</option>';
-        }).join('');
-  } catch (e) { console.error(e); }
+  const previous=MonitorContext.selected;
+  const options=MonitorContext.sessions;
+  $('sessSel').innerHTML='<option value="">选择拓扑会话…</option>'+options.map(s=>'<option value="'+s.id+'">'+esc(MonitorContext.sessionLabel(s))+'</option>').join('');
+  if(previous && MonitorContext.matches(previous,MonitorContext.session(previous.sid)))$('sessSel').value=String(previous.sid);
+  else if(previous){closeStreams();MonitorContext.select('');$('contextMessage').textContent='此前会话已结束或身份变化，请重新选择。';}
+}
+async function refreshWorkspace(inherit=false){
+  try{
+    await MonitorContext.refresh();await Promise.all([loadSessions(),loadDrillOptions()]);
+    if(inherit){const current=MonitorContext.inherit();if(current){$('sessSel').value=String(current.id);if(current.drill_id)$('histDrill').value=current.drill_id;$('contextMessage').textContent='当前拓扑：'+current.display_name;}}
+  }catch(error){$('contextMessage').textContent='暂时无法读取会话状态：'+error.message;}
 }
 function closeStreams() {
   streamGeneration++;
@@ -286,8 +293,8 @@ function toggleStreams() {
     try {
       var d = JSON.parse(e.data);
       var parts = [];
-      (d.ifaces || []).forEach(function(f) { parts.push('节点' + f.node_id + '/' + f.iface_id + ': ' + fmtBps(f.throughput)); });
-      (d.bridges || []).forEach(function(b) { parts.push('网桥' + b.node_id + ': ' + fmtBps(b.throughput)); });
+      (d.ifaces || []).forEach(function(f) { parts.push(MonitorContext.nodeName(MonitorContext.selected?.drill_id,f.node_id) + '/接口 ' + f.iface_id + ': ' + fmtBps(f.throughput)); });
+      (d.bridges || []).forEach(function(b) { parts.push(MonitorContext.nodeName(MonitorContext.selected?.drill_id,b.node_id) + ': ' + fmtBps(b.throughput)); });
       logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + (parts.join(' | ') || '(无流量)'), 6000);
     } catch (err) { logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + Platform.describeText(e.data).slice(0, 180), 4000); }
   };
@@ -298,13 +305,15 @@ function toggleStreams() {
     if(loading || generation!==streamGeneration)return;
     var rows=Array.from(seen.values()).sort((a,b)=>a.id-b.id).slice(-200);
     seen=new Map(rows.map(row=>[row.id,row]));
-    $('evLog').textContent=rows.map(row=>row.ts+'  ['+(row.type||'?')+'] '+evDesc(row.detail)).join('\n');
+    $('evLog').textContent=rows.map(row=>row.ts+'  ['+(row.type||'?')+'] '+evDesc(row.detail,currentDrill)).join('\n');
     logLine($('evLog'),(liveReady?'CORE 事件订阅已就绪 · ':'事件订阅待恢复 · ')+currentDrill,8000);
   }
   esEv=new EventSource(proto+location.host+'/api/sessions/'+sid+'/events/stream');
   esEv.addEventListener('ready',async function(e){
     if(generation!==streamGeneration)return;
     const ready=JSON.parse(e.data);
+    const expected=MonitorContext.selected;
+    if(expected?.drill_id && ready.drill_id!==expected.drill_id){closeStreams();$('contextMessage').textContent='会话演练身份已变化，请刷新后重新选择。';return;}
     if(currentDrill!==ready.drill_id){seen.clear();currentDrill=ready.drill_id;$('evLog').textContent='';}
     loading=true;liveReady=true;
     try{
@@ -327,14 +336,13 @@ function toggleStreams() {
   $('subBtn').classList.add('on');
 }
 
-$('sessSel').addEventListener('change',()=>{closeStreams();['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='未订阅');});
+$('sessSel').addEventListener('change',()=>{MonitorContext.select($('sessSel').value);const current=MonitorContext.session($('sessSel').value);$('contextMessage').textContent=current?'当前拓扑：'+current.display_name:'';closeStreams();['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='未订阅');});
 window.addEventListener('pagehide',closeStreams);
 function tick() { pollHost(); pollContainers(); }
-loadSessions();
-loadDrillOptions();
+refreshWorkspace(true);
 tick();
 setInterval(tick, 3000);
-setInterval(loadDrillOptions, 30000);  // 新演练出现后下拉自动补齐
+setInterval(refreshWorkspace, 30000);  // 新演练出现后下拉自动补齐
 </script>
 </body>
 </html>

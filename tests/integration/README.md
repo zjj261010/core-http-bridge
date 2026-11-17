@@ -31,3 +31,19 @@ python3 scripts/dev-tools.py python tests/integration/real_acceptance.py --url h
 CORE 的原生节点使用 Unix socket，运行路径不能过长。准备脚本将 `coretmp` 链接到当前账户 `~/.local/share/core-http-bridge/run/<短标识>/`，supervisor 使用解析后的短路径。它与验收证据一样持久保存，不使用系统临时目录。应用将原生节点运行名与用户显示名分开，避免中文、空格、斜杠和同名标签破坏底层命令及路径。
 
 `real_browser.cjs`、`focused_browser.cjs` 和 `remaining_plan_browser.cjs` 保留旧版本的验收事实，其会话画布和 JSON 表单选择器已不适用于新的拓扑工作区，不应作为当前 UI 验收入口。当前拓扑流程以上述新用例为准；其他模块按各自最新的浏览器用例验收，不把历史用例失败当成自动重复测试的理由。
+
+## 用户习惯问题修复验收
+
+`tests/e2e/user_workflow_repairs.cjs` 覆盖本轮R1–R6，业务配置和启动全部由真实页面完成，不需要运行会通过API预建目录/模板的旧fixture。输入准备只生成镜像归档和两个脚本文件：
+
+```bash
+CORE_BRIDGE_RUN_DIR=$(python3 scripts/dev-tools.py new-run user-workflow-repairs)
+python3 scripts/dev-tools.py python tests/integration/prepare_environment.py --run-dir "$CORE_BRIDGE_RUN_DIR" --image python:3.10-slim --start-via-core
+python3 scripts/dev-tools.py python tests/integration/user_workflow_fixture_files.py --run-dir "$CORE_BRIDGE_RUN_DIR"
+python3 scripts/dev-tools.py browser --run-dir "$CORE_BRIDGE_RUN_DIR" --url http://127.0.0.1:18080 tests/e2e/user_workflow_repairs.cjs
+python3 scripts/dev-tools.py python tests/integration/cleanup_environment.py --run-dir "$CORE_BRIDGE_RUN_DIR"
+```
+
+上述命令是维护入口，不因文档更新自动执行。每批仅运行授权范围，失败先分析并定向修复，不能覆盖旧失败报告。`tests/test_user_workflow_repairs.py` 是CORE默认MTU、历史名称及镜像旧size字段兼容回归；`tests/e2e/monitor_context_unit.cjs` 是身份/演练范围的名称映射检查。
+
+`topology_navigation_smoke.cjs` 用于部署后读取真实页面并验证临时编辑的取消/放弃。它不保存、不启动资源，结果要求HTTP写请求为0，必须使用独立浏览器上下文和持久证据目录，不能作为常驻任务自动运行。

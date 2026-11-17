@@ -354,6 +354,20 @@ def targets_list():
             "pieces": {k: pc[k] for k in ("image", "services", "manifest", "complete")},
             "has_manifest": pc["manifest"],
         }
+    # Keep the legacy Docker CLI size string; add the same byte count used by image details.
+    if by_id:
+        import shlex
+        inspected,code=_docker("image inspect --format '{{json .}}' "+' '.join(shlex.quote(ref) for ref in by_id),30)
+        if code==0:
+            for line in inspected.splitlines():
+                try:
+                    item=json.loads(line)
+                    if not isinstance(item,dict): continue
+                    size=item.get('Size')
+                    if not isinstance(size,int) or size<0: continue
+                    for ref in item.get('RepoTags') or []:
+                        if ref in by_id: by_id[ref]['size_bytes']=size
+                except (ValueError,TypeError): continue
     # 规则（用户定稿）: 镜像必须导入（列表行存在的前提）; 服务定义/清单可缺, 进详情补录。
     # 纯 manifest 的孤儿条目不进列表（镜像未导入则整个靶标条目不存在）。
     images = sorted(by_id.values(), key=lambda i: i["import_time"] or "", reverse=True)

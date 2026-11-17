@@ -1,0 +1,44 @@
+{
+  "stage": "loaded",
+  "core_before": {
+    "MainPID": "195",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "bridge_before": {
+    "MainPID": "19192",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "health": {
+    "status": "ok",
+    "sessions": 0
+  },
+  "workspace": {
+    "topologies": 0,
+    "sessions": 0,
+    "deployments": 0,
+    "runtime_error": null
+  },
+  "core_after": {
+    "MainPID": "195",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "bridge_after": {
+    "MainPID": "28145",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "backup": "/var/backups/core-http-bridge/user-workflow-repairs-20261118",
+  "test_supervisors": [
+    {
+      "pid": 25316,
+      "already_reaped": true
+    },
+    {
+      "pid": 26036,
+      "already_reaped": true
+    }
+  ]
+}

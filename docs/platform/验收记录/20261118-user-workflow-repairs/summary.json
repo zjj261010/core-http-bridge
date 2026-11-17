@@ -1,0 +1,233 @@
+{
+  "scope": "H01–H11 六组修复",
+  "baseline": "ddde803",
+  "status": "implemented-and-validated",
+  "python_unit": {
+    "passed": 15,
+    "failed": 0,
+    "report": "first-unit-repairs.xml"
+  },
+  "monitor_context_unit": "passed including stale entity/drill rejection and decorated drill labels",
+  "browser": {
+    "results": [
+      {
+        "name": "R3/R4：真实上传镜像、大小一致、无null文字，模式Esc取消与确认保护",
+        "status": "passed",
+        "detail": {
+          "size": "43.0 MiB",
+          "detailSize": "43.0 MiB",
+          "modalDiscardProtected": true
+        }
+      },
+      {
+        "name": "R3：镜像未暂存表单和已暂存修改的关闭、跨模块与浏览器刷新保护",
+        "status": "passed",
+        "detail": {
+          "close": true,
+          "navigation": true,
+          "reload": true
+        }
+      },
+      {
+        "name": "R3：模板编辑取消离开保留内容，完成真实模板创建",
+        "status": "passed",
+        "detail": {
+          "template": "网页模板"
+        }
+      },
+      {
+        "name": "R2：页面编排真实混合拓扑，节点命令HTTP 200及Docker/原生终端",
+        "status": "passed",
+        "detail": {
+          "http": "$ python3 -c \"import urllib.request;print(urllib.request.urlopen('http://10.90.0.1:8080',timeout=5).status)\"\n200\n退出码：0",
+          "nativeTerminal": true,
+          "dockerTerminal": true
+        }
+      },
+      {
+        "name": "R5：监测自动选中当前拓扑，事件、指标和容器展示用户名称",
+        "status": "passed",
+        "detail": {
+          "sid": "1",
+          "selection": "保留名称的真实拓扑 · 运行中（会话 1）",
+          "events": "2026-11-18 01:39:22  [node] 节点[应用服务器] 新增 (id=1)\n2026-11-18 01:39:22  [node] 节点[测试终端] 新增 (id=2)\n2026-11-18 01:39:22  [node] 节点[交换机 3] 新增 (id=3)\n2026-11-18 01:39:22  [link] 链路 新增 应用服务器 ↔ 交换机 3\n2026-11-18 01:39:22  [link] 链路 新增 测试终端 ↔ 交换机 3\n2026-11-18 01:39:24  [session] 会话事件  \n2026-11-18 01:39:24  [session] 会话事件  CORE 事件订阅已就绪 · d-20261118-013922-1f59536100a1325e\n",
+          "history": "节点\t最新采样时间\tCPU\t内存\t网络 IO\t采样条数\n应用服务器\n运行名：chb-6a5b6fc30edf-1 · 节点 1\n\t2026-11-18 01:39:29\t0.01%\t26.61MiB / 7.612GiB\tRX 990B / TX 1.5KB\t1"
+        }
+      },
+      {
+        "name": "R6：停止状态一致，一次确认恢复原会话而非新增会话",
+        "status": "passed",
+        "detail": {
+          "sid": "1",
+          "sessionCount": 1
+        }
+      },
+      {
+        "name": "R1：删除会话和保存配置后历史保留原名，MTU=0复制保存重开",
+        "status": "passed",
+        "detail": {
+          "restored": true,
+          "nodes": 3,
+          "links": 2
+        }
+      }
+    ],
+    "dialogs": [
+      {
+        "type": "confirm",
+        "message": "放弃当前启动模式尚未暂存的修改？",
+        "answer": "dismiss",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "放弃当前启动模式尚未暂存的修改？",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "放弃当前弹窗尚未保存的修改？",
+        "answer": "dismiss",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "存在尚未保存的修改，离开后将丢失，是否放弃？",
+        "answer": "dismiss",
+        "expected": true
+      },
+      {
+        "type": "beforeunload",
+        "message": "",
+        "answer": "dismiss",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "存在尚未保存的修改，离开后将丢失，是否放弃？",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "存在尚未保存的修改，离开后将丢失，是否放弃？",
+        "answer": "dismiss",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "启动“保留名称的真实拓扑”？\n3 个节点，2 条链路。\n将创建新的 CORE 会话，已有运行不变。",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "停止当前拓扑运行？保留拓扑配置和历史记录。",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "按当前会话配置再次运行？不会自动采用模板的新修订，也不会创建新的 CORE 会话。",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "删除此会话及其运行资源？保存的拓扑和运行历史继续保留。",
+        "answer": "accept",
+        "expected": true
+      },
+      {
+        "type": "confirm",
+        "message": "删除保存的拓扑配置？现有会话和运行历史继续保留。",
+        "answer": "accept",
+        "expected": true
+      }
+    ],
+    "unexpected": [],
+    "errors": []
+  },
+  "deployment_navigation": {
+    "dialogs": [
+      {
+        "type": "confirm",
+        "message": "放弃当前尚未保存的拓扑修改？",
+        "accept": false
+      },
+      {
+        "type": "confirm",
+        "message": "放弃当前尚未保存的拓扑修改？",
+        "accept": true
+      }
+    ],
+    "mutations": [],
+    "errors": [],
+    "status": "passed"
+  },
+  "platform": {
+    "stage": "loaded",
+    "core_before": {
+      "MainPID": "195",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "bridge_before": {
+      "MainPID": "19192",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "health": {
+      "status": "ok",
+      "sessions": 0
+    },
+    "workspace": {
+      "topologies": 0,
+      "sessions": 0,
+      "deployments": 0,
+      "runtime_error": null
+    },
+    "core_after": {
+      "MainPID": "195",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "bridge_after": {
+      "MainPID": "28145",
+      "NRestarts": "0",
+      "ActiveState": "active"
+    },
+    "backup": "/var/backups/core-http-bridge/user-workflow-repairs-20261118",
+    "test_supervisors": [
+      {
+        "pid": 25316,
+        "already_reaped": true
+      },
+      {
+        "pid": 26036,
+        "already_reaped": true
+      }
+    ]
+  },
+  "first_attempt": {
+    "failed": 1,
+    "blocked": 6,
+    "reason": "测试定位器将完整dialog前缀放入row的相对has定位器，未匹配到本地大小字段；没有产品HTTP报错。",
+    "report": "first-workflow-repair-browser.json"
+  },
+  "authorization": "用户明确要求自动测试并按流程继续，集中修正后定向补验，已通过的15项Python单测未重跑。",
+  "api_notes": [
+    "原有HTTP/WebSocket操作路径、请求方法与请求结构保留，终端/命令/会话恢复复用既有接口。",
+    "GET /targets 附加size_bytes，原size字符串保留。",
+    "工作区读取附加display_name；运行记录附加名称元数据，不改写旧执行快照。",
+    "拓扑保存兼容MTU=0；实际拓扑导出的name优先用户名称，不再固定为session-N。"
+  ],
+  "limits": [
+    "未重跑全量旧单元/浏览器套件。",
+    "未验收EMANE、Podman、完整原生XML矩阵、长期压力和WSL重启。",
+    "完全缺少原名称与拓扑修订的历史，只能保留原有会话名称作为回退。"
+  ],
+  "first_run": "/home/zjj/.local/share/core-http-bridge/acceptance/20261118-013040-user-workflow-repairs-3d5027c5",
+  "focused_run": "/home/zjj/.local/share/core-http-bridge/acceptance/20261118-013848-user-workflow-focused-fba731bb"
+}

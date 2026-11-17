@@ -53,6 +53,7 @@ document.getElementById('sessionLabel').textContent = 'session: '+sid;
 document.title = 'CORE Terminal - '+nm;
 
 var ws = null;
+var checkingIdentity=false;
 var out = document.getElementById('output');
 var inp = document.getElementById('input');
 var sts = document.getElementById('status');
@@ -128,9 +129,21 @@ function feedTerminal(data) {
   }
 }
 
-function toggleConn() {
+async function toggleConn() {
+  if(checkingIdentity || (ws && ws.readyState===WebSocket.CONNECTING))return;
   if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); return; }
   if (!sid || !nid) { log('Missing session or node ID', 'err'); return; }
+  var identity=params.get('identity');
+  if(identity){
+    checkingIdentity=true;
+    try{
+      var response=await fetch('/topology-workspace');
+      if(!response.ok)throw new Error('暂时无法确认会话状态');
+      var workspace=(await response.json()).data;
+      var current=workspace.sessions.find(function(s){return s.id===Number(sid)&&s.identity===identity;});
+      if(!current || current.state!==4)throw new Error('会话已结束、停止或被替换，请从拓扑页面重新打开终端');
+    }catch(error){log(error.message,'err');return;}finally{checkingIdentity=false;}
+  }
   var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   var url = proto + location.host + '/api/sessions/' + sid + '/nodes/' + nid + '/terminal/ws';
   try {

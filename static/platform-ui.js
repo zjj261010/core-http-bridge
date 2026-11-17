@@ -2,6 +2,44 @@
 window.Platform = (() => {
   'use strict';
   const clone = value => structuredClone(value);
+  const dirtyEditors = new Set();
+  let leaving = false;
+  function guardNavigation(isDirty, question = '存在尚未保存的修改，离开后将丢失，是否放弃？') {
+    const editor = {isDirty, question}; dirtyEditors.add(editor);
+    return () => dirtyEditors.delete(editor);
+  }
+  function confirmLeave() {
+    const pending = [...dirtyEditors].filter(editor => editor.isDirty());
+    return !pending.length || confirm(pending[pending.length - 1].question);
+  }
+  window.addEventListener('beforeunload', event => {
+    if (!leaving && [...dirtyEditors].some(editor => editor.isDirty())) {event.preventDefault(); event.returnValue = '';}
+  });
+  window.addEventListener('pageshow', () => {leaving = false;});
+  window.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.source !== window.parent || event.data?.type !== 'editor-navigation-request') return;
+    const allowed = confirmLeave(); if (allowed) leaving = true;
+    window.parent.postMessage({type:allowed ? 'editor-navigation-approved' : 'editor-navigation-denied', target:event.data.target, requestId:event.data.requestId}, location.origin);
+  });
+  document.addEventListener('click', event => {
+    const link = event.target.closest?.('nav a[href]');
+    if (!link || event.defaultPrevented || link.target === '_blank' || event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) return;
+    if (!confirmLeave()) event.preventDefault(); else leaving = true;
+  });
+  function workspaceContext(value) {
+    const key = 'core-bridge-runtime-context';
+    try {
+      if (arguments.length) {if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key); return value;}
+      return JSON.parse(sessionStorage.getItem(key) || 'null');
+    } catch {return null;}
+  }
+  function replace(node, ...children) {node.replaceChildren(...children.flat(Infinity).filter(child => child !== null && child !== undefined && child !== false));}
+  function bytes(value) {
+    if (!Number.isFinite(value) || value < 0) return '暂不可用';
+    const units = ['B','KiB','MiB','GiB','TiB']; let index = 0;
+    while (value >= 1024 && index < units.length - 1) {value /= 1024; index++;}
+    return value.toFixed(index ? 1 : 0) + ' ' + units[index];
+  }
   function el(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
@@ -43,14 +81,18 @@ window.Platform = (() => {
   function modal(title, body, actions=[], closed=()=>{}) {
     const opener=document.activeElement;
     const dialog=el('dialog',{class:'resource-dialog','aria-label':title});
-    const close=()=>dialog.close();
+    let isDirty=()=>false, question='放弃当前弹窗尚未保存的修改？';
+    const unregister=guardNavigation(()=>dialog.open && isDirty(), '存在尚未保存的修改，离开后将丢失，是否放弃？');
+    const finish=()=>dialog.close();
+    const close=()=>{if (!isDirty() || confirm(question)) finish();};
     const heading=el('header',{},el('h2',{},title),button('关闭',close));
     const content=el('div',{class:'dialog-content'},body);
     const footer=el('footer',{class:'actions'},actions);
     dialog.append(heading,content,footer);
-    dialog.addEventListener('close',()=>{closed();dialog.remove();if(opener?.isConnected)opener.focus();else if(opener?.dataset.returnId)document.querySelector('[data-return-id="'+CSS.escape(opener.dataset.returnId)+'"]')?.focus();},{once:true});
+    dialog.addEventListener('cancel',event=>{event.preventDefault();close();});
+    dialog.addEventListener('close',()=>{unregister();closed();dialog.remove();if(opener?.isConnected)opener.focus();else if(opener?.dataset.returnId)document.querySelector('[data-return-id="'+CSS.escape(opener.dataset.returnId)+'"]')?.focus();},{once:true});
     document.body.append(dialog);dialog.showModal();
-    return {dialog,content,footer,close,heading};
+    return {dialog,content,footer,close,finish,heading,guard:(check,prompt)=>{isDirty=check;if(prompt)question=prompt;}};
   }
   function fields(value) {
     if (value === null || value === undefined) return el('span',{},'—');
@@ -75,5 +117,5 @@ window.Platform = (() => {
   function navigation(active){const nav=document.querySelector('nav.nav');if(!nav)return;nav.replaceChildren(el('a',{href:'/',class:'nav-home'},'CORE BRIDGE'),...[['target-admin.html','镜像管理'],['containers.html','容器管理'],['instances.html','节点模板'],['topologies.html','拓扑管理'],['monitor.html','数据监测'],['audit.html','审计日志']].map(([page,name])=>el('a',{href:'/static/'+page,class:page===active?'on':''},name)));}
   function describe(value){if(value===null||value===undefined)return '无';if(Array.isArray(value))return value.map(describe).join('；');if(typeof value==='object')return Object.entries(value).map(([key,item])=>key+'：'+describe(item)).join('；');return String(value);}
   function describeText(text){try{return describe(JSON.parse(text));}catch{return String(text);}}
-  return {clone,el,api,button,field,input,select,checkbox,table,notice,localMessage,modal,fields,download,downloadConfig,ports,keyValues,navigation,errorText,describe,describeText};
+  return {clone,el,api,button,field,input,select,checkbox,table,notice,localMessage,modal,fields,download,downloadConfig,ports,keyValues,navigation,errorText,describe,describeText,guardNavigation,workspaceContext,replace,bytes};
 })();
