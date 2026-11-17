@@ -1,0 +1,32 @@
+{
+  "health": {
+    "status": 200,
+    "response": {
+      "status": "ok",
+      "sessions": 0
+    }
+  },
+  "exports": {
+    "status": 200,
+    "response": {
+      "ok": true,
+      "data": []
+    }
+  },
+  "sessions": {
+    "status": 200,
+    "response": []
+  },
+  "target-admin.html": {
+    "status": 200,
+    "new_editor": true
+  },
+  "instances.html": {
+    "status": 200,
+    "new_editor": true
+  },
+  "topologies.html": {
+    "status": 200,
+    "new_editor": true
+  }
+}

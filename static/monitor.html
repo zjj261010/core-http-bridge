@@ -45,7 +45,8 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 </style>
 <link rel="stylesheet" href="/static/workbench.css?v=20261117">
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
-<script defer src="/static/workbench.js?v=20261117"></script>
+<script src="/static/platform-ui.js?v=20261117-2"></script>
+<script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="bridge-page">
 <div class="header">
@@ -57,7 +58,7 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
     <button id="pauseBtn" onclick="togglePause()">暂停刷新</button>
   </div>
 </div>
-<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a class="on" aria-current="page" href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/topologies.html">拓扑管理</a><a class="on" aria-current="page" href="/static/monitor.html">数据监测</a><a href="/static/audit.html">审计日志</a></nav>
 
 <div class="wrap">
   <!-- 宿主载荷 -->
@@ -124,7 +125,7 @@ function evDesc(d) {
   if (d.type === 'link') return '链路 ' + act + ' ' + d.link.node1_id + ' ↔ ' + d.link.node2_id;
   if (d.type === 'alert') return '⚠ 告警 node=' + d.node_id + ' [' + d.level + '] ' + d.source + ': ' + d.text;
   if (d.type === 'session') return '会话事件 ' + (d.name || '') + ' ' + (d.data || '');
-  return JSON.stringify(d).slice(0, 120);
+  return Platform.describe(d).slice(0, 120);
 }
 
 function $(id) { return document.getElementById(id); }
@@ -276,7 +277,7 @@ function toggleStreams() {
   var proto = location.protocol === 'https:' ? 'https://' : 'http://';
   esCpu = new EventSource(proto + location.host + '/api/cpu-usage/stream?delay=1');
   esCpu.onmessage = function(e) {
-    try { var d = JSON.parse(e.data); logLine($('cpuLog'), new Date().toLocaleTimeString() + '  cpu ' + (d.usage !== undefined ? (d.usage * 100).toFixed(1) + '%' : JSON.stringify(d)), 4000); }
+    try { var d = JSON.parse(e.data); logLine($('cpuLog'), new Date().toLocaleTimeString() + '  cpu ' + (d.usage !== undefined ? (d.usage * 100).toFixed(1) + '%' : Platform.describe(d)), 4000); }
     catch (e) {}
   };
   esCpu.onerror = function() { logLine($('cpuLog'), '[cpu 流断开]', 4000); };
@@ -288,7 +289,7 @@ function toggleStreams() {
       (d.ifaces || []).forEach(function(f) { parts.push('节点' + f.node_id + '/' + f.iface_id + ': ' + fmtBps(f.throughput)); });
       (d.bridges || []).forEach(function(b) { parts.push('网桥' + b.node_id + ': ' + fmtBps(b.throughput)); });
       logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + (parts.join(' | ') || '(无流量)'), 6000);
-    } catch (err) { logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + e.data.slice(0, 180), 4000); }
+    } catch (err) { logLine($('tpLog'), new Date().toLocaleTimeString() + '  ' + Platform.describeText(e.data).slice(0, 180), 4000); }
   };
   esTp.onerror = function() { logLine($('tpLog'), '[throughputs 流断开/无数据]', 4000); };
   // Subscribe first; ready carries a journal cursor delimiting history and live events.

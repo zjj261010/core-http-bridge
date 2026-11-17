@@ -4,6 +4,7 @@
   const embedded = window.self !== window.top;
   document.documentElement.classList.toggle('embedded', embedded);
   const nav = document.querySelector('.bridge-page > .nav');
+  nav?.querySelectorAll('a').forEach(link=>{if(link.getAttribute('href')==='/static/publications.html'||link.getAttribute('href')==='/#topo')link.remove();else if(link.getAttribute('href')==='/static/topologies.html')link.textContent='拓扑管理';});
   if (nav && !embedded) document.body.prepend(nav);
   const toggle = document.getElementById('workspaceNavToggle');
   function closeNav() {

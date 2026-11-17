@@ -169,7 +169,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 </style>
 <link rel="stylesheet" href="/static/workbench.css?v=20261117">
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
-<script defer src="/static/workbench.js?v=20261117"></script>
+<script src="/static/platform-ui.js?v=20261117-2"></script>
+<script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="workspace" data-active-tab="images">
 <div class="app" id="app">
@@ -183,9 +184,7 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
     <div class="side-tab" role="button" tabindex="0" data-tab="containers" onclick="switchTab('containers')">容器管理</div>
     <div class="side-tab" role="button" tabindex="0" data-tab="instances" onclick="switchTab('instances')">节点模板</div>
     <div class="sn-title">环境构建</div>
-    <div class="side-tab" role="button" tabindex="0" data-tab="publications" onclick="switchTab('publications')">版本草稿与发布</div>
-    <div class="side-tab" role="button" tabindex="0" data-tab="drafts" onclick="switchTab('drafts')">拓扑草稿与部署</div>
-    <div class="side-tab" role="button" tabindex="0" data-tab="topo" onclick="switchTab('topo')">运行拓扑</div>
+    <div class="side-tab" role="button" tabindex="0" data-tab="topologies" onclick="switchTab('topologies')">拓扑管理</div>
     <div class="sn-title">运行与复盘</div>
     <div class="side-tab" role="button" tabindex="0" data-tab="monitor" onclick="switchTab('monitor')">数据监测</div>
     <div class="side-tab" role="button" tabindex="0" data-tab="audit" onclick="switchTab('audit')">审计日志</div>
@@ -201,8 +200,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
   <div class="sidebar-section session-context">
     <div class="section-title">操作</div>
     <div style="display:flex;flex-direction:column;gap:4px">
-      <button class="btn btn-secondary btn-sm" onclick="saveSessionDraft()">保存会话为草稿</button>
-      <button class="btn btn-secondary btn-sm" onclick="showImportModal()">导入拓扑 JSON / XML</button>
+      <button class="btn btn-secondary btn-sm" onclick="saveSessionDraft()">保存到拓扑管理</button>
+      <button class="btn btn-secondary btn-sm" onclick="showImportModal()">导入拓扑文件</button>
       <button class="btn btn-secondary btn-sm" id="stopBtn" onclick="stopSession()" style="display:none">停止运行</button>
       <button class="btn btn-secondary btn-sm" id="startBtn" onclick="startSession()" style="display:none">启动运行</button>
       <button class="btn btn-secondary btn-sm" id="deleteBtn" onclick="deleteSession()" style="display:none">删除部署</button>
@@ -267,7 +266,7 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
       <button class="panel-tab active" onclick="switchPanel('log')">操作日志</button>
       <button class="panel-tab" onclick="switchPanel('command')">节点命令</button>
       <button class="panel-tab" onclick="switchPanel('events')">演练事件</button>
-      <button class="panel-tab" onclick="switchPanel('topology')">拓扑 JSON</button>
+      <button class="panel-tab" onclick="switchPanel('topology')">拓扑配置</button>
     </div>
     <div class="panel-content" id="panelContent">
       <span style="color:var(--fg2)">等待操作...</span>
@@ -293,15 +292,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 <div class="modal-header"><h2>创建会话</h2><button class="btn-icon" onclick="closeModal('createModal')">✕</button></div>
 <div class="modal-body">
   <div class="form-group"><label>会话名称 (可选)</label><input id="sessionName" placeholder="my-network"></div>
-  <div class="form-group"><label>或导入 JSON/XML 拓扑</label><textarea id="importText" rows="8" placeholder='{"name":"demo","nodes":[{"id":1,"name":"r1","x":100,"y":100}],"links":[]}'></textarea></div>
-  <div class="form-row">
-    <div class="form-group"><label>Content-Type</label>
-      <select id="importType"><option value="json">application/json</option><option value="xml">application/xml</option></select>
-    </div>
-    <div style="display:flex;align-items:flex-end">
-      <button class="btn btn-primary" onclick="importTopology()" style="width:100%">📥 导入拓扑</button>
-    </div>
-  </div>
+  <div class="form-group"><label>导入拓扑文件</label><input id="importFile" type="file" accept=".json,.xml"></div>
+  <button class="btn btn-primary" onclick="importTopology()">导入所选文件</button>
 </div>
 <div class="modal-footer">
   <button class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
@@ -518,7 +510,7 @@ function renderSessions() {
     return;
   }
   el.innerHTML = state.sessions.map(s => `
-    <div class="session-item ${s.id === state.currentSid ? 'active' : ''}" onclick="selectSession(${s.id})">
+    <div class="session-item ${s.id === state.currentSid ? 'active' : ''}" onclick="switchTab('topo');selectSession(${s.id})">
       <div>
         <div class="name">会话 ${s.id}</div>
         <div class="meta">${s.nodes} 节点 · ${s.state === 4 ? '运行中' : s.state === 1 ? '已定义' : '状态:'+s.state}</div>
@@ -959,15 +951,16 @@ async function deleteSession() {
 
 // ── Import Topology ──
 function showImportModal() {
-  document.getElementById('importText').value = `{\n  "name": "quick-net",\n  "nodes": [\n    {"id":1,"name":"pc1","x":100,"y":100},\n    {"id":2,"name":"router","model":"router","x":200,"y":100},\n    {"id":3,"name":"pc2","x":300,"y":100}\n  ],\n  "links": [\n    {"node1_id":1,"node2_id":2,"iface1_ip4":"10.0.0.1","iface1_ip4_mask":24,"iface2_ip4":"10.0.0.2","iface2_ip4_mask":24},\n    {"node1_id":2,"node2_id":3,"iface1_ip4":"10.0.1.1","iface1_ip4_mask":24,"iface2_ip4":"10.0.1.2","iface2_ip4_mask":24}\n  ]\n}`;
+  document.getElementById('importFile').value = '';
   document.getElementById('createModal').style.display = 'flex';
   document.querySelector('#createModal h2').textContent = '导入拓扑';
 }
 
 async function importTopology() {
-  const text = document.getElementById('importText').value.trim();
-  const type = document.getElementById('importType').value;
-  if (!text) return;
+  const file = document.getElementById('importFile').files[0];
+  if (!file) return addLog('请先选择拓扑文件', 'err');
+  const text = await file.text();
+  const type = file.name.toLowerCase().endsWith('.xml') ? 'xml' : 'json';
   try {
     let resp;
     if (type === 'xml') {
@@ -1064,11 +1057,11 @@ function startEvents() {
   const output = document.getElementById('eventsOutput');
   output.textContent = '正在建立 CORE 订阅…\n';
   es.addEventListener('ready',()=>{ output.textContent += '🟢 监听事件中\n'; });
-  es.addEventListener('identity-pending',e=>{output.textContent+='归属待确认: '+e.data+'\n';});
-  es.addEventListener('upstream-error',e=>{output.textContent+='上游订阅中断: '+e.data+'\n';});
-  es.addEventListener('truncated',e=>{output.textContent += '事件缓冲已截断: '+e.data+'\n';});
+  es.addEventListener('identity-pending',e=>{output.textContent+='归属待确认: '+Platform.describeText(e.data)+'\n';});
+  es.addEventListener('upstream-error',e=>{output.textContent+='上游订阅中断: '+Platform.describeText(e.data)+'\n';});
+  es.addEventListener('truncated',e=>{output.textContent += '事件缓冲已截断: '+Platform.describeText(e.data)+'\n';});
   es.onmessage = (e) => {
-    output.textContent += e.data + '\n';
+    output.textContent += Platform.describeText(e.data) + '\n';
     output.scrollTop = output.scrollHeight;
     if (output.innerHTML.length > 50000) {
       output.innerHTML = output.innerHTML.slice(-30000);
@@ -1090,33 +1083,32 @@ function stopEvents() {
 function renderTopologyJson() {
   const pc = document.getElementById('panelContent');
   const topo = state.exportedTopology || {};
-  pc.innerHTML = '<pre id="topologyJson" style="font-size:12px;overflow-x:auto"></pre><button class="btn btn-secondary btn-sm" id="copyTopology">📋 复制</button>';
-  document.getElementById('topologyJson').textContent = JSON.stringify(topo, null, 2);
-  document.getElementById('copyTopology').onclick = () => navigator.clipboard.writeText(JSON.stringify(topo, null, 2)).then(() => addLog('拓扑已复制到剪贴板', 'ok')).catch(e => addLog('复制失败: '+e.message, 'err'));
+  pc.replaceChildren(Platform.fields(topo), Platform.button('导出配置', () => Platform.download(new Blob([JSON.stringify(topo, null, 2)], {type:'application/json'}), 'topology.json')));
 }
 
 // ── 5-Tab 前端路由（设计 §2.1: 同一单页内切换, hash 保持刷新/前进后退）──
 const TAB_SRC = {
   images:    '/static/target-admin.html',
-  drafts: '/static/topologies.html',
-  publications:'/static/publications.html',
+  topologies: '/static/topologies.html',
   containers:'/static/containers.html',
   instances: '/static/instances.html',
   monitor:   '/static/monitor.html',
   audit:     '/static/audit.html',
 };
 function switchTab(name) {
+  if(name==='drafts')name='topologies';
+  if(name==='publications')name='images';
   if(name!=='topo'&&!TAB_SRC[name])return;
-  const labels={images:'镜像管理',containers:'容器管理',instances:'节点模板',publications:'版本草稿与发布',drafts:'拓扑草稿与部署',topo:'运行拓扑',monitor:'数据监测',audit:'审计日志'};
+  const labels={images:'镜像管理',containers:'容器管理',instances:'节点模板',topologies:'拓扑管理',topo:'拓扑管理 · 运行画布',monitor:'数据监测',audit:'审计日志'};
   const category=['images','containers','instances'].includes(name)?'资源管理':['monitor','audit'].includes(name)?'运行与复盘':'环境构建';
   document.body.dataset.activeTab=name;
   document.getElementById('workspaceTitle').textContent=labels[name];
   document.getElementById('workspaceCategory').textContent=category;
   document.title=labels[name]+' · CORE Bridge';
-  document.querySelectorAll('.side-tab').forEach(t=>t.setAttribute('aria-current',t.dataset.tab===name?'page':'false'));
+  document.querySelectorAll('.side-tab').forEach(t=>t.setAttribute('aria-current',t.dataset.tab===(name==='topo'?'topologies':name)?'page':'false'));
   if(name!=='topo')stopEvents();
   const frame = document.getElementById('tabFrame');
-  document.querySelectorAll('.side-tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  document.querySelectorAll('.side-tab').forEach(t => t.classList.toggle('on', t.dataset.tab === (name==='topo'?'topologies':name)));
   if (name === 'topo') {
     // 拓扑 = 本页 canvas 视图; 离开监测等定时视图时释放 iframe 资源
     frame.style.display = 'none';
@@ -1137,25 +1129,25 @@ function switchTab(name) {
 }
 function tabFromHash() {
   const h = (location.hash || '#images').replace('#', '');
-  return h === 'topo' || TAB_SRC[h] ? h : 'images';   // 默认视图 = 镜像管理
+  return h==='drafts'?'topologies':h==='publications'?'images':h === 'topo' || TAB_SRC[h] ? h : 'images';   // 默认视图 = 镜像管理
 }
 window.addEventListener('hashchange', () => switchTab(tabFromHash()));
 
 async function checkConnectivity() {
   if (!state.currentSid) return addLog('请先选择会话','err');
-  try { const d=await api('POST',`/api/sessions/${state.currentSid}/connectivity`,{}); addLog('联通检查: '+JSON.stringify(d.data),'info'); }
+  try { const d=await api('POST',`/api/sessions/${state.currentSid}/connectivity`,{}); addLog('联通检查: '+Platform.describe(d.data),'info'); }
   catch(e) { addLog('联通检查失败: '+(e.detail || e.error || e.message),'err'); }
 }
 async function saveSessionDraft() {
   if (!state.currentSid) return addLog('请先选择会话','err');
-  try { const d = await api('POST', `/api/sessions/${state.currentSid}/draft`); addLog('已保存草稿 '+d.data.topology_id,'ok'); switchTab('drafts'); }
-  catch(e) { addLog('保存草稿失败: '+(e.error || e.detail || e.message),'err'); }
+  try { const d = await api('POST', `/api/sessions/${state.currentSid}/draft`); addLog('拓扑已保存 '+d.data.topology_id,'ok'); switchTab('drafts'); }
+  catch(e) { addLog('保存拓扑失败: '+(e.error || e.detail || e.message),'err'); }
 }
 window.addEventListener('message', async e => {
   if(e.origin!==location.origin)return;
-  if(e.data?.type==='open-publication'){switchTab('publications');document.getElementById('tabFrame').contentWindow.location.replace('/static/publications.html?embedded=1&draft_id='+encodeURIComponent(e.data.draftId));return;}
+  if(e.data?.type==='open-publication'){switchTab('images');return;}
   if (e.data?.type !== 'deployment-created') return;
-  await loadSessions(); switchTab('topo'); await selectSession(Number(e.data.sid));
+  await loadSessions(); switchTab('topo'); if(e.data.sid)await selectSession(Number(e.data.sid));
 });
 window.addEventListener('pagehide',stopEvents);
 // ── Init ──
@@ -1169,7 +1161,8 @@ async function init() {
 
   // Auto-select first session
   if (state.sessions.length > 0) {
-    await selectSession(state.sessions[0].id);
+    const requested=Number(new URLSearchParams(location.search).get('session'));
+    await selectSession(state.sessions.find(s=>s.id===requested)?.id||state.sessions[0].id);
   }
 }
 init();
@@ -1237,7 +1230,7 @@ document.addEventListener('contextmenu', function(e) {
   if (!isComp) items.push({ label: '💻 Terminal', action: 'openTerminal('+ctxNodeId+')' });
   items.push(
     { type: 'divider' },
-    { label: '📋 Copy JSON', action: 'copyNodeJson('+ctxNodeId+')' },
+    { label: '导出节点配置', action: 'copyNodeJson('+ctxNodeId+')' },
   );
   if (!sessionRunning()) {
     items.push(
@@ -1321,7 +1314,7 @@ function showNodeProps(nid) {
     </div>`;
   ['pp_name','pp_model','pp_type','pp_services'].forEach(id => document.getElementById(id).disabled = true);
   document.getElementById('pp_icon').disabled = sessionRunning();
-  document.getElementById('propModalBody').insertAdjacentHTML('beforeend', '<p>名称、类型和服务来自部署声明。修改绑定请在拓扑草稿中替换节点模板。</p>');
+  document.getElementById('propModalBody').insertAdjacentHTML('beforeend', '<p>名称、类型和服务来自部署声明。修改绑定请在拓扑管理中替换节点模板。</p>');
   if (!sessionRunning()) {
     const box=document.createElement('div');
     box.innerHTML='<label>替换节点模板 <select id="replacementTemplate"></select><select id="replacementVersion"></select></label><button class="btn" onclick="replaceNodeTemplate()">替换绑定（保留位置和链路）</button>';
@@ -1497,8 +1490,8 @@ function copyNodeJson(nid) {
   var node = state.nodes[nid];
   if (!node) return;
   var obj = {id:nid, name:node.name, model:node.model, type:node.type, x:node.x, y:node.y, services:node.services};
-  navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
-  addLog('Node JSON copied to clipboard', 'ok');
+  Platform.download(new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'}), 'node-'+nid+'.json');
+  addLog('节点配置已导出', 'ok');
 }
 
 function deleteNode(nid) {

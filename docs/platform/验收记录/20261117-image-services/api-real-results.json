@@ -1,0 +1,92 @@
+[
+  {
+    "case": "legacy-bundle-import-is-staged",
+    "status": "passed",
+    "detail": {
+      "job": "job-983fd41f0f0944c29b1947e975a2e32b",
+      "imports": 1
+    }
+  },
+  {
+    "case": "generic-image-with-no-services-imports",
+    "status": "passed",
+    "detail": {
+      "ref": "chbtest1937295d5278-python:v1",
+      "job": "job-442d03c3fd6140cf83e5635d3d4f576d"
+    }
+  },
+  {
+    "case": "files-and-full-inventory-save-without-registration",
+    "status": "passed",
+    "detail": {
+      "revision": 1,
+      "services": 4
+    }
+  },
+  {
+    "case": "final-confirmation-registers-isolated-mode-implementations",
+    "status": "passed",
+    "detail": {
+      "version": 1,
+      "registered": [
+        "imgsvc-0516db793860-r1-imgmode-45666d976bab-aad1afc35de2",
+        "imgsvc-0516db793860-r1-imgmode-e0603c499aae-b3f40f8b848c",
+        "imgsvc-0516db793860-r1-imgmode-e0603c499aae-bf0da5ff7089",
+        "imgsvc-0516db793860-r1-imgmode-1241936d4dd3-38fffc938ae8",
+        "imgsvc-0516db793860-r1-imgmode-7f5a55cf3f88-abccf33d5787"
+      ]
+    }
+  },
+  {
+    "case": "template-defaults-check-active-combination",
+    "status": "passed",
+    "detail": {
+      "template": "chbtest1937295d5278-template",
+      "revision": 1
+    }
+  },
+  {
+    "case": "two-real-containers-run-distinct-modes-with-dependency-order",
+    "status": "passed",
+    "detail": {
+      "sid": 1,
+      "deployment": "deploy-644cbbd0db644a9a9b37e2a18e89de11",
+      "http_status": [
+        200,
+        200
+      ]
+    }
+  },
+  {
+    "case": "existing-sessions-save-pending-and-keep-frozen-execution",
+    "status": "passed",
+    "detail": {
+      "revision": 3,
+      "applied_version": 1
+    }
+  },
+  {
+    "case": "configuration-and-script-export-import-roundtrip",
+    "status": "passed",
+    "detail": {
+      "zip_bytes": 2816,
+      "conflicts": 4
+    }
+  },
+  {
+    "case": "complete-image-package-exports-real-docker-image",
+    "status": "passed",
+    "detail": {
+      "bytes": 45137399,
+      "job_id": "image-export-ef04c11f964e49fc9b06dd72e3b7e76e"
+    }
+  },
+  {
+    "case": "real-registration-failure-preserves-old-version-and-retry-state",
+    "status": "passed",
+    "detail": {
+      "failed_version": 2,
+      "repaired_version": 3
+    }
+  }
+]

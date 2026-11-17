@@ -1,0 +1,64 @@
+[
+  {
+    "name": "真实脚本上传、两级暂存、取消及焦点返回",
+    "status": "passed",
+    "detail": {
+      "revision": 6,
+      "filesUploaded": true,
+      "stagingCancelled": true
+    },
+    "errors": []
+  },
+  {
+    "name": "真实清单导入冲突预览、配置附件导出和删除声明提醒",
+    "status": "passed",
+    "detail": {
+      "zipBytes": 3383
+    },
+    "errors": []
+  },
+  {
+    "name": "旧服务模式可合并，父弹窗取消不改变旧导入内容",
+    "status": "passed",
+    "detail": {
+      "sourceModes": 2
+    },
+    "errors": []
+  },
+  {
+    "name": "通过实际模板表格选择服务并检查依赖",
+    "status": "failed",
+    "detail": {
+      "message": "locator.selectOption: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('dialog[open]').getByLabel('镜像', { exact: true })\u001b[22m\n",
+      "stack": "locator.selectOption: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('dialog[open]').getByLabel('镜像', { exact: true })\u001b[22m\n\n    at /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:58:48\n    at async scenario (/opt/core-http-bridge/tests/e2e/image_services_browser.cjs:11:14)\n    at async /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:55:3"
+    },
+    "errors": []
+  },
+  {
+    "name": "节点覆盖、恢复默认及运行历史保持独立",
+    "status": "failed",
+    "detail": {
+      "message": "locator.selectOption: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByLabel('配置来源', { exact: true })\u001b[22m\n",
+      "stack": "locator.selectOption: Timeout 12000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByLabel('配置来源', { exact: true })\u001b[22m\n\n    at /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:65:228\n    at async scenario (/opt/core-http-bridge/tests/e2e/image_services_browser.cjs:11:14)\n    at async /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:64:3"
+    },
+    "errors": []
+  },
+  {
+    "name": "未完整的服务可以保存待完善，确认按钮保持禁用",
+    "status": "passed",
+    "detail": {
+      "revision": 7,
+      "state": "incomplete"
+    },
+    "errors": []
+  },
+  {
+    "name": "窄屏仍可导航，旧发布入口跳转，主导航只保留拓扑管理",
+    "status": "failed",
+    "detail": {
+      "message": "Expected values to be strictly equal:\n\n0 !== 1\n",
+      "stack": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n0 !== 1\n\n    at /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:81:12\n    at async scenario (/opt/core-http-bridge/tests/e2e/image_services_browser.cjs:11:14)\n    at async /opt/core-http-bridge/tests/e2e/image_services_browser.cjs:79:3"
+    },
+    "errors": []
+  }
+]

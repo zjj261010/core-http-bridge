@@ -30,7 +30,8 @@ td{padding:9px 12px;border-top:1px solid var(--bg3);font-size:13px}
 </style>
 <link rel="stylesheet" href="/static/workbench.css?v=20261117">
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
-<script defer src="/static/workbench.js?v=20261117"></script>
+<script src="/static/platform-ui.js?v=20261117-2"></script>
+<script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="bridge-page">
 <div class="header">
@@ -38,7 +39,7 @@ td{padding:9px 12px;border-top:1px solid var(--bg3);font-size:13px}
     <div class="eyebrow">ACTIVITY & AUDIT</div><h1>审计日志</h1><span class="sub">查询平台操作、运行节点命令与演练记录。</span>
   </div>
 </div>
-<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/publications.html">版本发布</a><a href="/static/topologies.html">拓扑草稿</a><a href="/#topo">运行拓扑</a><a href="/static/monitor.html">数据监测</a><a class="on" aria-current="page" href="/static/audit.html">审计日志</a></nav>
+<nav class="nav" aria-label="工作区导航"><a class="nav-home" href="/">CORE BRIDGE</a><a href="/static/target-admin.html">镜像管理</a><a href="/static/containers.html">容器管理</a><a href="/static/instances.html">节点模板</a><a href="/static/topologies.html">拓扑管理</a><a href="/static/monitor.html">数据监测</a><a class="on" aria-current="page" href="/static/audit.html">审计日志</a></nav>
 <div class="controls">
   <label style="color:var(--fg2);font-size:12px">动作</label>
   <select id="actionSel">
@@ -109,7 +110,7 @@ async function loadAudit() {
         outHtml = '<div class="mono" style="white-space:pre-wrap;background:var(--console);color:var(--console-fg);padding:6px;border-radius:4px;margin-top:4px;font-size:11.5px;max-height:140px;overflow:auto">$ ' + esc(det.input || '') + '\n' + esc(det.output) + '</div>';
       }
       var extra = Object.keys(det).filter(function(k) { return !['ok','input','output'].includes(k); })
-        .map(function(k) { return k + '=' + JSON.stringify(det[k]); }).join(' ');
+        .map(function(k) { return k + '：' + Platform.describe(det[k]); }).join(' ');
       var sess = e.session_id !== null && e.session_id !== undefined ? ' <span class="tag ok">会话' + e.session_id + '</span>' : '';
       return '<tr>'
         + '<td class="mono">' + esc(e.ts) + '</td>'

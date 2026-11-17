@@ -1,0 +1,26 @@
+{
+  "stage": "loaded",
+  "core_pid": 195,
+  "core_before": {
+    "MainPID": "195",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "bridge_before": {
+    "MainPID": "198",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "backup": "/var/backups/core-http-bridge/image-services-20261117-200259",
+  "release_sha256": "f8868a8b17ca3aa9e455995cdae71d4c5b206407f47c3a2aae39798e15454738",
+  "core_after": {
+    "MainPID": "195",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  },
+  "bridge_after": {
+    "MainPID": "8612",
+    "NRestarts": "0",
+    "ActiveState": "active"
+  }
+}

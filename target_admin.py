@@ -416,6 +416,17 @@ def _import_delivery(body:dict,checkpoint=None,reuse=None,input_keys=None):
             except (ValueError,OSError,subprocess.TimeoutExpired,tarfile.TarError) as e:
                 progress('image',{'ok':False,'state':'failed','detail':str(e)})
                 return JSONResponse({'ok':True,'data':result})
+    if body.get('defer_services'):
+        import image_services
+        receipt=(result['pieces'].get('image') or {}).get('receipt') or {}
+        refs=list(receipt.get('images') or {})
+        if not refs and m: refs=[m['image']['name']+':'+m['image'].get('tag','latest')]
+        if not refs and body.get('image_ref'): refs=[body['image_ref']]
+        staged=image_services.stage_delivery(body,refs)
+        progress('services',{'ok':True,'state':'pending-confirmation','detail':'配置已接收，等待镜像详情最后确认；尚未注册','imports':staged})
+        progress('manifest',{'ok':True,'state':'pending-confirmation','detail':'清单待确认，未改动已生效配置'})
+        result['hint']='请打开镜像详情，预览并合入导入内容，最后确定后统一生效'
+        return JSONResponse({'ok':True,'data':result})
     if not cached('services'):
         if sources:
             progress('services',{'ok':None,'state':'running','detail':'正在保存服务定义和模板'})
@@ -707,28 +718,22 @@ def standalone_container_exec(name: str, body: dict):
 # ═══════════════════════════════════════════════
 
 def _available_services() -> dict:
-    """可声明服务总表（清单驱动声明 §⑤ 前提）：
-    drill = 自定义演练服务（custom_services 注册，成对 normal/vuln）
-    system = CORE 内置基础服务（SSH/DefaultRoute/NAT…，netns 型常用）"""
-    registry=_service_registry()
-    system=[{'name':n,'source':'drill' if n.startswith('svc-') else 'system'} for n in sorted(registry)]
-    # 软件归属：优先 manifest（software 权威），其次 svc-<软件>-<CVE>-<mode> 命名解析
-    manifest_of = {}
-    for m in _load_manifests().values():
-        try: m=delivery.manifest(m)
-        except ValueError: continue
-        if isinstance(m, dict):
-            for s in m.get("services") or []:
-                manifest_of[s.get("name")] = (s.get("software") or m.get("software", ""), s.get("mode") or None)
-    out_drill = []
-    for s in system:
-        if s["source"] != "drill":
-            continue
-        name = s["name"]
-        software, mode = manifest_of.get(name, (name, None))
-        out_drill.append({"name": name, "mode": mode, "software": software})
-    out_system = [s["name"] for s in system if s["source"] == "system"]
-    return {"drill": out_drill, "system": out_system}
+    """Native origin is determined by CORE's built-in catalog, never display names."""
+    from core.services.manager import ServiceManager
+    manager=ServiceManager();manager.load_locals()
+    native=set(manager.services)
+    declared={}
+    for manifest in _load_manifests().values():
+        if not isinstance(manifest,dict): continue
+        for service in manifest.get('services') or []:
+            declared[service['name']]={'name':service['name'],'mode':service.get('mode'),'software':service.get('software') or manifest.get('software') or manifest.get('name'),'source':'image'}
+    custom=[]
+    for name in sorted(_service_registry()):
+        if name not in native:
+            custom.append(declared.get(name,{'name':name,'mode':None,'software':name,'source':'image' if name.startswith(('svc-','imgsvc-','imgmode-')) else 'unknown'}))
+    for name,service in declared.items():
+        if name not in native and not any(item['name']==name for item in custom): custom.append(service)
+    return {'drill':custom,'system':sorted(native),'image':[item for item in custom if item['source']=='image'],'unknown':[item for item in custom if item['source']=='unknown']}
 
 
 def _mutex_conflict(services: list, available: dict) -> dict | None:
@@ -779,6 +784,19 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
                 return _err('TARGET_INVALID','靶标版本不存在或与镜像不一致')
             man=target['manifest']
         if not man: return _err('MANIFEST_REQUIRED','docker 模板须绑定已编目的靶标版本')
+        target=repository.revision('target',inst.get('target_name') or man['name'],inst.get('target_version') or man.get('target_revision'))
+        if target and target.get('catalog'):
+            import image_services
+            try:
+                selection=inst.get('service_selection')
+                if selection is None:
+                    declared={s['name'] for s in inst.get('services',[])}
+                    selection={s['id']:mode['id'] for s in target['catalog']['services'] for mode in s['modes'] if image_services.mode_name(s,mode) in declared}
+                chosen,_=image_services.selection_for(target['catalog'],selection)
+                inst.update(service_selection=selection,services=chosen,target_name=inst.get('target_name') or man['name'],target_version=target['version'])
+                return None
+            except (ValueError,KeyError,TypeError) as e:
+                return _err('SERVICE_COMBINATION_INVALID',str(e))
         manifest_ok={s['name'] for s in man['services']}
         available['drill']=[{'name':s['name'],'mode':s.get('mode') or None,'software':s.get('software') or man.get('software') or man['name']} for s in man['services'] if s['name'] not in available['system']]
     drill_names={d['name'] for d in available['drill']}
@@ -1424,8 +1442,19 @@ def _read_bundle(directory):
     sources = {p.name:p.read_text() for p in sorted((directory/'services').glob('*.py')) if p.name != '__init__.py'}
     templates = {p.name:p.read_text() for p in sorted((directory/'services'/'templates').glob('*')) if p.is_file()}
     man_path = directory/'manifest.json'
-    return {'package':directory.name, 'python_files':sources, 'py':'', 'templates':templates,
+    result={'package':directory.name, 'python_files':sources, 'py':'', 'templates':templates,
             'manifest':json.loads(man_path.read_text()) if man_path.exists() else None}
+    catalog_path=directory/'catalog.json'
+    if catalog_path.exists():
+        import image_services
+        catalog=json.loads(catalog_path.read_text())
+        for service in catalog.get('services',[]):
+            for mode in service.get('modes',[]):
+                for item in mode.get('files',[]):
+                    stored=image_services.store_attachment((directory/'scripts'/item['sha256']).read_bytes(),item['name'],item['role'])
+                    if stored['sha256']!=item['sha256']: raise ValueError('导入脚本摘要不一致')
+        result['catalog']=catalog
+    return result
 
 
 @router.get('/targets/import/bundle/draft')
@@ -1572,7 +1601,10 @@ def version_history(kind:str,name:str):
         if raw:
             try: versions.target(name,delivery.manifest(raw))
             except ValueError as e: return _err('MANIFEST_INVALID',str(e))
-    return {'ok':True,'data':repository.history(kind,name)}
+    history=repository.history(kind,name)
+    if kind=='target':
+        history=[{**v,'activation_state':('applied' if repository.read('image_catalog_activations',name+':'+str(v['version'])) else 'pending') if v.get('catalog') else 'legacy'} for v in history]
+    return {'ok':True,'data':history}
 
 
 @router.get('/storage/migrations')
@@ -1591,7 +1623,7 @@ def target_registry():
     out=[]
     for name,m in _load_manifests().items():
         try:
-            published=repository.revision('target',name) or versions.target(name,delivery.manifest(m))
+            published=repository.revision('target',name,m.get('target_revision')) or versions.target(name,delivery.manifest(m))
             out.append({'name':name,'version':published['version'],'entity_id':published['entity_id'],'image_ref':published['image_ref'],'image_digest':published.get('image_digest')})
         except ValueError as e:
             image=m.get('image') or {}

@@ -24,7 +24,7 @@ def validate(definition, pin=True):
     for node in topo.nodes:
         if node.type.lower() not in app._NODE_TYPE_MAP: raise ValueError('未知节点类型: '+node.type)
         if node.instance:
-            resolved,_=versions.resolve(node.instance,node.instance_version)
+            resolved,_=versions.resolve(node.instance,node.instance_version,node.service_overrides)
             if node.image and node.image not in (resolved.get('image'),resolved.get('image_ref')):
                 raise ValueError('节点镜像与模板版本不一致: '+str(node.id))
             if node.services is not None:
@@ -150,7 +150,7 @@ def _signature(definition):
     import delivery_state
     nodes=[]
     for node in definition.get('nodes',[]):
-        nodes.append({k:node.get(k) for k in ('id','name','type','model','image','instance','instance_version','target_name','target_version')})
+        nodes.append({k:node.get(k) for k in ('id','name','type','model','image','instance','instance_version','target_name','target_version','service_overrides','service_selection','effective_services')})
         nodes[-1]['services']=sorted(node.get('services') or [])
     links=copy.deepcopy(definition.get('links') or [])
     for link in links:
@@ -223,10 +223,10 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
     for node in resolved['nodes']:
         display=node['name']
         if node.get('instance'):
-            fields,dirs=versions.resolve(node['instance'],node.get('instance_version'))
+            fields,dirs=versions.resolve(node['instance'],node.get('instance_version'),node.get('service_overrides'))
             node.update(fields);directories.update(dirs)
         if node['type']=='docker': node['name']=f'chb-{deployment_id[-12:]}-{node["id"]}'
-        bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref') if k in node}
+        bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in node}
         bound[str(node['id'])].update(display_name=display,runtime_name=node['name'])
         required.update(node.get('services') or [])
     import target_admin,shlex
@@ -302,7 +302,7 @@ def upgrade(topology_id:str,body:dict):
     with mutation_lock:
         d=get(topology_id)['data']
         if body.get('revision')!=d['revision']: raise HTTPException(409,'草稿版本已变化')
-        if d['definition'].get('format')=='core-xml': raise HTTPException(400,'原生 XML 草稿请在 xml_text 中显式修改绑定和服务声明；原始扩展配置将完整保留')
+        if d['definition'].get('format')=='core-xml': raise HTTPException(400,'原生 XML 请通过文件重新导入；原始扩展配置将完整保留')
         changes=[]
         for n in d['definition']['nodes']:
             if n.get('instance') and (not body.get('node_ids') or n['id'] in body['node_ids']):

@@ -142,12 +142,14 @@ async def lifespan(_app: FastAPI):
         platform_db.init()
         import jobs
         jobs.recover()
+        __import__('image_services').recover()
         platform_db.start_sampler()   # reconciler + 事件落库 + 指标采样（5s）
         logger.info("platform db sampler started")
     except Exception:
         logger.exception("platform_db startup failed")
     yield
     await asyncio.to_thread(__import__("jobs").shutdown)
+    __import__('image_services').shutdown()
     bridge.close()
     logger.info("bridge closed")
 
@@ -196,6 +198,7 @@ class GeoModel(BaseModel):
     alt: float = 0
 
 class InterfaceModel(BaseModel):
+    model_config = {'extra': 'allow'}
     id: int | None = None
     name: str | None = None
     mac: str | None = None
@@ -207,6 +210,7 @@ class InterfaceModel(BaseModel):
     node_id: int | None = None
 
 class LinkOptionsModel(BaseModel):
+    model_config = {'extra': 'allow'}
     jitter: int | None = None
     key: int | None = None
     mburst: int | None = None
@@ -227,6 +231,7 @@ class LinkModel(BaseModel):
     options: LinkOptionsModel | None = None
 
 class NodeModel(BaseModel):
+    model_config = {'extra': 'allow'}
     id: int | None = None
     name: str | None = None
     type: int | None = 0
@@ -239,6 +244,7 @@ class NodeModel(BaseModel):
     server: str | None = None
     geo: GeoModel | None = None
     instance_version: int | None = None
+    service_overrides: dict[str, str | None] | None = None
     instance: str | None = None   # 来源实例名——部署即登记引用（实例锁定扳机, 设计 §5.2）
 
 class StartSessionRequest(BaseModel):
@@ -337,6 +343,7 @@ class EmanePathlossesBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 class TopologyNode(BaseModel):
+    model_config = {'extra': 'allow'}
     """拓扑中的节点定义。"""
     id: int
     name: str
@@ -350,11 +357,13 @@ class TopologyNode(BaseModel):
     image_ref: str | None = None
     instance: str | None = None
     instance_version: int | None = None
+    service_overrides: dict[str, str | None] | None = None
     target_name: str | None = None
     target_version: int | None = None
     emane: str | None = None
 
 class TopologyLink(BaseModel):
+    model_config = {'extra': 'allow'}
     """拓扑中的链路定义。支持自定义接口IP。"""
     node1_id: int
     node2_id: int
@@ -372,6 +381,7 @@ class TopologyLink(BaseModel):
     dup: int | None = None
 
 class TopologyWlan(BaseModel):
+    model_config = {'extra': 'allow'}
     """WLAN 节点定义（含配置）。"""
     id: int
     name: str
@@ -384,6 +394,7 @@ class TopologyWlan(BaseModel):
     error: str = "0"
 
 class TopologyInput(BaseModel):
+    model_config = {'extra': 'allow'}
     """完整拓扑描述（JSON/XML 均可）。"""
     schema_version: int = 2
     name: str = "topology"
@@ -696,12 +707,12 @@ def add_node(session_id: int, body: NodeModel):
         binding = {}
         if body.instance:
             try:
-                resolved, dirs = versions.resolve(body.instance,body.instance_version)
+                resolved, dirs = versions.resolve(body.instance,body.instance_version,body.service_overrides)
                 # Incoming resolved fields are compatibility hints, never a second authority.
                 template = __import__('repository').revision('template',body.instance,resolved['instance_version'])
                 if body.image and body.image not in (resolved.get('image'),resolved.get('image_ref'),template.get('image_tag')):
                     raise ValueError('请求镜像与模板绑定不一致')
-                if body.services is not None and set(body.services) != {x['name'] for x in template.get('services',[])}:
+                if body.services is not None and set(body.services) not in ({x['name'] for x in template.get('services',[])},set(resolved['services'])):
                     raise ValueError('请求服务与模板绑定不一致')
                 if body.type not in (None,0,15 if resolved['type']=='docker' else 0):
                     raise ValueError('节点类型与模板绑定不一致')
@@ -713,7 +724,7 @@ def add_node(session_id: int, body: NodeModel):
                 if dirs:
                     result=activate(bridge,dirs,body.services or [])
                     if result['missing']: raise ValueError('服务未在 daemon 注册: '+', '.join(result['missing']))
-                binding={k:resolved[k] for k in ('instance','instance_version','target_name','target_version','image_ref') if k in resolved}
+                binding={k:resolved[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in resolved}
                 binding.update(display_name=display,runtime_name=body.name)
             except ValueError as e:
                 raise HTTPException(400,str(e))
@@ -1770,6 +1781,8 @@ from publications import router as publications_router
 app.include_router(publications_router,tags=["版本草稿与发布"])
 from jobs import router as jobs_router
 app.include_router(jobs_router, tags=["导入任务"])
+from image_services import router as image_services_router
+app.include_router(image_services_router, tags=["镜像服务管理"])
 
 if __name__ == "__main__":
     import uvicorn

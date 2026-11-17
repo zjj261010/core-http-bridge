@@ -1,5 +1,7 @@
 # CORE HTTP Bridge
 
+> 管理平台已于 2026-11-17 更新：镜像详情采用服务/启动模式两级弹窗，配置通过表格和文件导入导出。旧版本发布入口已合并。当前操作见 [镜像导入指南](docs/platform/镜像导入指南.md)，实施范围与验收见 [二次改造实施与验收记录](docs/platform/二次改造实施与验收记录.md)。
+
 将 CORE (Common Open Research Emulator) 网络仿真器的 gRPC 接口包装为 HTTP REST API。
 支持 JSON/XML 拓扑一键导入、SSE 事件流、WebSocket 交互式终端。
 

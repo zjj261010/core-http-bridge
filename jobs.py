@@ -57,7 +57,7 @@ def public(job,editable=False):
 def run(job):
     import target_admin as ta
     try:
-        job.update(status='running',message='正在加载镜像、注册服务和保存清单；docker load 不提供可靠百分比',updated_at=repo.now())
+        job.update(status='running',message='正在接收交付内容与加载镜像；服务配置在最后确认后生效，docker load 不提供可靠百分比',updated_at=repo.now())
         repo.put('jobs',job['job_id'],job)
         def checkpoint(kind,result):
             job.update(result=result,stage=kind,updated_at=repo.now())
@@ -105,7 +105,7 @@ def resume(job_id:str,body:dict):
     old=repo.read('jobs',job_id)
     if not old: raise HTTPException(404,'任务不存在')
     if old['status'] not in ('partial','failed','interrupted'): raise HTTPException(409,'该任务无需续办')
-    merged={**old['input'],**{k:v for k,v in body.items() if k in ('py','python_files','templates','manifest','image_path')}}
+    merged={**old['input'],**{k:v for k,v in body.items() if k in ('py','python_files','templates','manifest','image_path','defer_services')}}
     try: return {'ok':True,'data':submit(merged,prior=old)}
     except (ValueError,SyntaxError,TypeError) as e: raise HTTPException(400,str(e))
 

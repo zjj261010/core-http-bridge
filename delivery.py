@@ -43,7 +43,7 @@ def manifest(value):
             raise ValueError('服务 ports 必须是 1～65535 的整数列表')
         if 'software' in s and not isinstance(s['software'],str):
             raise ValueError('服务 software 必须是字符串')
-        if s.get('mode') not in (None, '', 'normal', 'vuln'):
+        if m.get('schema_version', 1) < 3 and s.get('mode') not in (None, '', 'normal', 'vuln'):
             raise ValueError('服务 mode 仅支持 normal、vuln 或单模式（留空）')
     return m
 

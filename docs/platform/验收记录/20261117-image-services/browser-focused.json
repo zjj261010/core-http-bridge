@@ -1,0 +1,27 @@
+[
+  {
+    "name": "通过实际模板表格选择服务并检查依赖",
+    "status": "passed",
+    "detail": {
+      "template": "browser-chbtest1937295d5278-template",
+      "revision": 1
+    },
+    "errors": []
+  },
+  {
+    "name": "节点覆盖、恢复默认及运行历史保持独立",
+    "status": "passed",
+    "detail": {
+      "revision": 3
+    },
+    "errors": []
+  },
+  {
+    "name": "窄屏仍可导航，旧发布入口跳转，主导航只保留拓扑管理",
+    "status": "passed",
+    "detail": {
+      "width": 390
+    },
+    "errors": []
+  }
+]

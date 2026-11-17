@@ -50,7 +50,7 @@ def load(bridge,text,start=False):
                 device.set('name',f'chb-{deployment_id[-12:]}-{nid}')
             binding['runtime_name']=device.get('name')
             if binding.get('instance'):
-                resolved,dirs=versions.resolve(binding['instance'],binding.get('instance_version'))
+                resolved,dirs=versions.resolve(binding['instance'],binding.get('instance_version'),binding.get('service_overrides'))
                 directories.update(dirs)
                 if resolved.get('image') and device.get('image') not in (resolved['image'],resolved.get('image_ref')):
                     raise ValueError('XML 镜像与其模板版本不一致')
