@@ -1325,7 +1325,8 @@ def precheck(session_id: int, wait: int = 8):
             for vcmd in vcmds:
                 def run_validate(v=vcmd):
                     try:
-                        rc, output = b.node_command(session_id, n.id, v)
+                        # shell=True: 目录模型生成的 validate 含 shell 语法（cd / && sh ...），裸 exec 会 127
+                        rc, output = b.node_command(session_id, n.id, v, True, True)
                     except Exception as e:
                         return False, {"cmd": v, "result": "error", "detail": str(e)[:120]}
                     return rc == 0, {"cmd": v, "result": "ok" if rc == 0 else "missing",
@@ -1351,7 +1352,10 @@ def precheck(session_id: int, wait: int = 8):
             import versions
             mapping,_=versions.materialize(binding['target_name'],target)
             enabled={original for original,runtime in mapping.items() if runtime in enabled} | enabled
-        ports=sorted({str(port) for svc in manifest.get('services',[]) if svc['name'] in enabled for port in svc.get('ports',[])})
+        # 目录模型下启用名是 imgsvc-* 执行名，清单条目名是 imgmode-*——按后缀对齐再匹配
+        ports=sorted({str(port) for svc in manifest.get('services',[])
+                      if svc['name'] in enabled or any(e.endswith(svc['name']) for e in enabled)
+                      for port in svc.get('ports',[])})
         entry['declaration']={'result':'consistent' if manifest or nt != 15 else 'unknown','enabled':sorted(enabled)}
         entry['network']={'result':'not-tested','detail':'服务预检不代表拓扑联通，请主动执行联通检查'}
         if not ports and (getattr(n, "image", None) or ""):
