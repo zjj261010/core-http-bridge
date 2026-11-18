@@ -1,1123 +1,202 @@
 # CORE HTTP Bridge
 
-> 2026-11-18：已修复历史恢复、运行节点终端/命令、未保存保护、监测名称和停止后再次运行，见[修复计划与验收](docs/platform/用户习惯问题修复与验收记录-20261118.md)。
+CORE HTTP Bridge 将 CORE Emulator 的 gRPC 接口接入 FastAPI 和浏览器管理平台。可以从页面导入镜像、配置节点模板、编排和运行拓扑，并查看接口流量、Snort 告警和运行历史。CORE 守护进程负责仿真，Bridge 负责平台配置、运行编排和记录，Docker 提供镜像节点及独立容器。 [CORE Emulator](https://github.com/coreemu/core)
 
-> WSL 重启后的持久化与固定维护入口见 [WSL持久化与维护](docs/platform/WSL持久化与维护.md)。测试依赖、浏览器与完整验收资料保存在用户持久目录，不依赖临时目录。
+## 管理页面
 
-> 管理平台已于 2026-11-17 更新：镜像详情采用服务/启动模式两级弹窗，配置通过表格和文件导入导出。旧版本发布入口已合并。当前操作见 [镜像导入指南](docs/platform/镜像导入指南.md)，实施范围与验收见 [二次改造实施与验收记录](docs/platform/二次改造实施与验收记录.md)。
+| 页面 | 可执行的操作 |
+|---|---|
+| 镜像管理 | 导入镜像或交付包，声明镜像的服务和启动模式，导入脚本，确认生效，导出配置或完整镜像包 |
+| 容器管理 | 创建和管理独立容器，查看容器状态和终端 |
+| 节点模板 | 分页管理 Docker 与 CORE 原生模板，按名称搜索，设置默认服务和模板修订 |
+| 拓扑管理 | 使用画布添加节点、拖拽和缩放、连线、编辑接口和链路参数，配置背景流量和 Snort 监测点 |
+| 数据监测 | 查看宿主和容器指标、接口吞吐、会话事件、背景流量任务及 Snort 告警 |
+| 审计日志 | 查询平台操作记录和演练数据 |
 
-将 CORE (Common Open Research Emulator) 网络仿真器的 gRPC 接口包装为 HTTP REST API。
-支持 JSON/XML 拓扑一键导入、SSE 事件流、WebSocket 交互式终端。
+## 安装与启动
 
-## 系统要求
+### 环境要求
 
-| 项目 | 要求 |
-|:----|:----|
-| 操作系统 | Ubuntu 22.04 / CentOS 9 |
-| Python | 3.9+（与 CORE 一致） |
-| CORE | 已安装并运行 `core-daemon` |
-| root 权限 | **仅完整实例化时需要**（`definition=false`） |
+- 项目已在 **WSL2 Ubuntu 22.04.5 LTS x86_64、CORE 9.2.1 和 Python 3.10.12** 环境验收。Bridge 使用 CORE 安装目录中的 Python 和 gRPC SDK，当前路径为 `/opt/core/venv/bin/python`。
+- `core-daemon` 默认监听 `localhost:50051`。Bridge 与守护进程共享 CORE 服务目录和请求文件目录。
+- Docker 相关功能需要可用的 Docker CLI 和守护进程。启动完整 CORE 仿真和从本机节点抓包需要 Linux 网络命名空间权限。当前 WSL 由 systemd 管理这两个服务和 Bridge。
+- 前端由 Bridge 直接提供静态文件。Python 依赖见 [requirements.txt](requirements.txt)，TCP/UDP 和 Snort 的可选依赖见下文。
 
-## 离线安装
+### 启动一个实例
 
-### 依赖清单
-
-| 包 | 版本 | 用途 | 备注 |
-|:----|:----:|:----|:----|
-| `fastapi` | >=0.115.0 | HTTP API 框架 | |
-| `uvicorn[standard]` | >=0.30.0 | ASGI 服务器 | 含 WebSocket、hot-reload、httptools |
-| `pydantic` | >=2.0.0 | 请求/响应数据校验 | |
-| `grpcio` | >=1.60.0 | gRPC 通信 | CORE 已安装，无需额外下载 |
-
-**`uvicorn[standard]` 额外依赖（已包含在 wheels 中）：**
-`websockets`, `httptools`, `watchfiles`, `uvloop`, `python-dotenv`, `pyyaml`
-
-完整依赖列表见 [`requirements.txt`](requirements.txt)。
-
-### 安装步骤
+以下命令适用于已经安装 CORE 并配置 `core-daemon` 的 Linux 主机。在仓库目录执行。
 
 ```bash
-# 解压离线包
-tar xzf core-http-bridge-offline-bundle-v1.1.0.tar.gz
-cd core-http-bridge
-
-# 安装依赖到 CORE 的 venv
-/opt/core/venv/bin/pip install --no-index \
-  --find-links wheels \
-  -r requirements.txt
-
-# 启动
-PYTHONPATH="" /opt/core/venv/bin/python3 \
-  -m uvicorn app:app --host 0.0.0.0 --port 8080
-```
-
-## 快速启动
-
-```bash
-# 1. 确保 core-daemon 在运行
 sudo systemctl start core-daemon
+# 使用镜像或容器功能时启动 Docker
+sudo systemctl start docker
 
-# 2. 启动 HTTP Bridge
-cd /opt/core-http-bridge
-PYTHONPATH="" /opt/core/venv/bin/python3 -m uvicorn app:app \
+sudo /opt/core/venv/bin/python -m pip install -r requirements.txt
+
+sudo env PYTHONPATH="" /opt/core/venv/bin/python -m uvicorn app:app \
   --host 0.0.0.0 --port 8080
-
-# 3. 验证
-curl http://localhost:8080/health
-# {"status":"ok","sessions":0}
 ```
 
-## 拓扑背景流量和 Snort
+当前 WSL 已配置 `core-bridge.service`，日常用 `sudo systemctl start core-bridge.service` 启动。更新后端代码后，检查导入任务和运行中的会话，再重启 Bridge 加载代码。
 
-在拓扑画布上打开「背景流量」或「Snort 监测点」。HTTP 从 CORE 原生源节点访问拓扑内的私有 IPv4 接口，TCP/UDP 使用两个原生节点和独立的 iperf3 接收端口。Snort 在所选原生节点的链路接口上被动监听。保存并启动后，在「网络任务与 Snort 告警」查看状态、指标和历史。
-
-HTTP 发流使用 Bridge 的 Python 运行时。TCP/UDP 需要支持 `--json-stream` 的 iperf3。Snort 需要 Snort 3 和 LibDAQ（pcap 模块）。宿主默认工具根目录为 `/opt/core-network-tools`，可通过 `CORE_BRIDGE_NETWORK_ROOT` 指定其他持久路径。对应文件为 `iperf/bin/iperf3`、`snort/bin/snort`、`snort/etc/snort/snort.lua` 和 `daq/lib/daq`。
-
-额外的 Snort 规则集放在业务数据目录的 `snort-rules/` 下，使用 `.rules` 文件。内置「无害功能验收」规则可用发往拓扑内 HTTP 服务的普通请求验证，路径可填写 `/?probe=BRIDGE_IDS_CHECK`。每次运行记录规则文件的校验值。
-
----
-
-# 完整 API 接口说明
-
-## 通用约定
-
-| 项目 | 说明 |
-|:----|:----|
-| **基础地址** | `http://<host>:8080` |
-| **API 前缀** | `/api`（所有路径以此为前缀） |
-| **Content-Type** | `application/json`（除 `/api/topology` 也支持 `application/xml`） |
-| **会话状态** | `1`=DEFINITION, `2`=CONFIGURATION, `3`=INSTANTIATION, `4`=RUNTIME |
-| **错误响应格式** | `{\"error\", \"detail\", \"hint\"}` |
-
----
-
-## 1. 会话管理 — Session
-
-### `POST /api/sessions` — 创建会话
-
-| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----:|:----|
-| `session_id` | body | `int \| null` | 否 | `null` | 指定会话 ID（自动生成） |
-
-**限制：**
-- `session_id` 如果指定，必须是正整数且不与现有会话重复
-
-**返回（201）：**
-
-```json
-{
-  "id": 1,
-  "state": 1,
-  "nodes": [],
-  "links": [],
-  "dir": "/tmp/pycore.1",
-  "user": "",
-  "file": null
-}
-```
-
-**示例：**
 ```bash
-curl -X POST http://localhost:8080/api/sessions \
-  -H "Content-Type: application/json" -d '{}'
-# [201] {"id": 1, "state": 1, "nodes": [], "links": [], ...}
+sudo systemctl restart core-bridge.service
+curl -fsS http://127.0.0.1:8080/health
 ```
 
----
+成功时健康接口返回 `{"status":"ok","sessions":0}`，其中 `sessions` 是 CORE 当前会话数。有会话时该数值会相应增加。浏览器打开 [管理平台](http://127.0.0.1:8080/) 或直接进入 [拓扑管理](http://127.0.0.1:8080/#topologies)。
 
-### `GET /api/sessions` — 获取会话列表
+## 从页面完成一次运行
 
-无参数。
+### 第一次可以用两个原生节点
 
-**返回（200）：**
-```json
-[{"id": 1, "state": 1, "nodes": 0, "file": null, "dir": "/tmp/pycore.1"}]
-```
+1. 打开「拓扑管理 → 新建拓扑」，填写名称。在节点库添加两个原生主机。
+2. 在画布点「连线」，依次选择两个节点。选中链路可设置端点 A、端点 B 的接口地址，以及带宽、时延和丢包率等链路参数。
+3. 需要服务时，点节点，在右侧「CORE 原生服务」里添加。想使用空服务列表时选择「裸节点」型号。
+4. 点「保存」，再点「启动」。启动成功后进入会话视图，可以检查联通并查看节点、链路和服务配置。
+5. 点「停止运行」可保留会话配置以便再次运行。在列表打开保存的拓扑可继续编辑。已结束的运行可从「运行记录」查看或复制为可编辑配置。
 
-**示例：**
-```bash
-curl http://localhost:8080/api/sessions
-# [200] [{"id":1, "state":1, "nodes":0, ...}]
-```
+「保存」提交的是下次运行的配置。「启动」以当前修订创建新会话。已有会话使用启动时的配置。「删除会话」清理该会话的运行资源，保存的拓扑和运行记录保留。
 
----
+支持通过文件导入和导出平台拓扑 JSON，也支持导入 CORE 原生 XML。原生 XML 以原文件格式保存、导出和启动。跨主机导入带平台绑定的 XML 时，需提前准备它引用的模板修订和镜像。
 
-### `GET /api/sessions/{session_id}` — 获取会话详情
+### 用镜像创建 Docker 节点
 
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
+1. 在「镜像管理 → 导入」选择镜像归档或完整交付包，可以上传文件或填写服务器路径。导入任务在后台运行，失败或中断的任务可在列表中「续办」。
+2. 打开镜像「详情」。镜像服务表声明镜像可提供的全部服务。点服务「详情」配置启动模式，在模式里导入启动、停止和就绪检查脚本。
+3. 在镜像详情点「确定」查看汇总，然后选择「仅保存，稍后生效」或「确认保存并生效」。注册使用独立修订名。存在 CORE 会话时，先保存待生效，在合适时间处理会话后再确认。
+4. 在「节点模板 → Docker 节点模板」选择镜像和已生效配置修订，勾选默认启用的服务，为每项服务选一个模式。允许空服务清单的工具镜像也可用于模板。
+5. 在拓扑画布添加该模板。节点可继承模板默认值，也可单独启停服务和选择模式。
 
-**返回（200）：** 完整的会话对象，包含 `nodes[]` 和 `links[]` 字段（已修复——确保迭代 `nodes.values()` 而非 `nodes.keys()`）。
+服务声明中的端口描述镜像能力。模式端口覆盖决定该模式使用的端口声明，供冲突检查和端口探测使用。程序实际监听的地址和端口由脚本、启动参数或环境变量决定，配置时应保持一致。镜像能提供哪些服务、模板默认启用哪些服务、本次节点实际启用哪些服务，分别在镜像、模板和拓扑中管理。
 
-**示例：**
-```bash
-curl http://localhost:8080/api/sessions/1
-# [200] {"id":1, "state":1, "nodes":[...], "links":[...], "dir":"/tmp/pycore.1", ...}
-```
+列表的「导出」可生成配置与脚本包，也可后台打包镜像本体和配置。导入、合并、脚本用途及兼容格式见 [镜像导入与服务配置指南](docs/platform/镜像导入指南.md)。
 
----
+### 配置 CORE 原生服务和脚本
 
-### `DELETE /api/sessions/{session_id}` — 删除会话
+原生节点可以直接从节点库添加，也可使用「CORE 原生节点模板」。候选目录来自 CORE 守护进程中可用于原生节点的已注册服务，包括内置服务和自定义服务。
 
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 要删除的会话 ID |
+1. 在节点属性中点「添加服务」，可搜索服务名称和分组。列表中的「移除」会提示依赖这项服务的已启用服务。
+2. 点「配置」调整参数或应用预设。在「配置文件 → 查看与编辑」查看 CORE 按当前接口和参数生成的脚本，也可展开查看 CORE 源模板。
+3. 修改、导入或导出脚本文本。编辑后的内容作为完整文件覆盖应用到对应节点或模板。点「恢复默认」可重新使用 CORE 动态生成的文件。
+4. 在服务弹窗确认，再从拓扑或模板页面保存。拓扑中的模板节点可以单独覆盖配置，也能恢复所绑定的模板默认值。
 
-**返回（200）：** `{"result": true}`
+模板编辑会创建新修订。已有拓扑引用原先固定的修订，可以在节点属性中显式采用新修订。运行记录按实际用到的配置保存，便于回看。
 
----
+## 背景流量与 Snort 预警
 
-### `GET /api/sessions/{session_id}/check` — 检查会话是否存在
+在拓扑画布添加「背景流量」任务，填写源节点、目标节点和接口、协议、端口、速率、启动延迟与持续时间。HTTP 从本机 CORE 原生节点访问拓扑内的业务接口，填写站内请求路径。TCP/UDP 使用两个本机 CORE 原生节点，并为同一接收节点的任务分配不同的 iperf3 端口。目标使用拓扑内的私有 IPv4 地址。
 
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
+选中链路后点「监测此链路」，选择本机原生节点端的具体接口和 Snort 规则集。探针以被动方式监听该接口。网络任务和探针随拓扑启动，在「网络任务与 Snort 告警」查看设定速率、实际数据、任务状态和告警。背景流量可单独停止。停止拓扑会结束探针和剩余任务。已结束的运行仍可在「数据监测」选择运行记录回看。
 
-**返回（200）：**
-```json
-{"result": true}   // 存在
-{"result": false}  // 不存在
-```
+### 宿主依赖与验收版本
 
----
+| 功能 | 已验收版本 | 实际使用的能力 |
+|---|---|---|
+| HTTP 背景流量 | Python 3.10.12 | CORE venv 中 Bridge 的 Python 标准库 |
+| TCP / UDP 背景流量 | iperf3 3.22 | 两端共用宿主二进制，Bridge 解析 `--json-stream` |
+| Snort 预警 | Snort 3.13.2.0 + LibDAQ 3.0.29 | pcap 被动采集，`alert_json` 输出告警，`perf_monitor` 输出 DAQ 计数 |
 
-### `POST /api/sessions/{session_id}/start` — 启动会话
+iperf3 3.17 首次提供 `--json-stream`。本项目验收的是 3.22，部署可直接用 3.22。Snort 和 LibDAQ 版本变动后，先用所选规则集校验配置，再检查实际捕获包数和告警。 [iperf3 官方版本记录](https://software.es.net/iperf/news.html) · [Snort 3.13.2.0](https://github.com/snort3/snort3/releases/tag/3.13.2.0) · [LibDAQ 3.0.29](https://github.com/snort3/libdaq/releases/tag/v3.0.29)
 
-| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `definition` | body | `bool` | 否 | `false` | `true`=仅定义（无需root）`false`=完整实例化（需root） |
+默认工具目录是 `/opt/core-network-tools`。可用 `CORE_BRIDGE_NETWORK_ROOT` 指向其他持久目录，保持以下相对路径。Bridge 还使用宿主的 `nsenter`、`ss` 和 `timeout`。
 
-**返回（200）：**
-```json
-{"result": true, "exceptions": []}
-```
-
-> ⚠️ `definition=false` 需要 **root 权限** 才能创建网络命名空间和 veth 对。
-
-**示例：**
-```bash
-# 仅定义（无需 root）
-curl -X POST http://localhost:8080/api/sessions/1/start \
-  -H "Content-Type: application/json" -d '{"definition": true}'
-# [200] {"result": true, "exceptions": []}
-
-# 完整实例化（需要 root）
-curl -X POST http://localhost:8080/api/sessions/1/start \
-  -H "Content-Type: application/json" -d '{"definition": false}'
-```
-
----
-
-### `POST /api/sessions/{session_id}/stop` — 停止会话
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-
-**行为：** 销毁运行时资源（网络命名空间、veth 对），但**保留拓扑定义**（节点和链路不会丢失）。停止后可通过 `start(definition=true)` 查看拓扑，或 `start(definition=false)` 重新实例化。
-
-**返回（200）：** `{"result": true}`
-
----
-
-### `POST /api/sessions/{session_id}/alert` — 发送告警
-
-| 参数 | 位置 | 类型 | 必填 | 允许值 | 说明 |
-|:----|:----:|:----:|:----:|:----|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `level` | body | `string` | ✅ | `DEFAULT` `FATAL` `ERROR` `WARNING` `NOTICE` | 告警级别 |
-| `source` | body | `string` | ✅ | 任意字符串 | 告警来源 |
-| `text` | body | `string` | ✅ | 任意字符串 | 告警内容 |
-| `node_id` | body | `int \| null` | 否 | — | 关联的节点 ID |
-
-**返回（200）：** `{"result": true}`
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/alert \
-  -H "Content-Type: application/json" \
-  -d '{"level":"WARNING","source":"test","text":"链路断开","node_id":1}'
-# [200] {"result": true}
-```
-
----
-
-## 2. 节点管理 — Node
-
-### `POST /api/sessions/{session_id}/nodes` — 添加节点
-
-| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `id` | body | `int` | ✅ | — | 节点 ID（自定义，正整数） |
-| `name` | body | `string` | ✅ | — | 节点名称 |
-| `model` | body | `string` | 否 | `"PC"` | 服务模型：`PC` / `router` / `host` / `mdr` |
-| `type` | body | `int` | 否 | `0` | **[节点类型表]** |
-| `position` | body | `object` | 否 | — | `{"x": float, "y": float}` |
-| `services` | body | `string[]` | 否 | — | 服务列表，如 `["zebra","OSPFv2"]` |
-| `icon` | body | `string` | 否 | — | 图标路径 |
-| `image` | body | `string` | 否 | — | Docker/镜像名 |
-| `server` | body | `string` | 否 | — | 分布式服务器名称 |
-| `geo` | body | `object` | 否 | — | `{"lat": float, "lon": float, "alt": float}` |
-
-**节点类型表：**
-
-| type | 含义 | type | 含义 |
-|:---:|:----|:---:|:----|
-| `0` | DEFAULT（路由器/主机） | `6` | WIRELESS_LAN（无线局域网） |
-| `1` | PHYSICAL（物理接口） | `10` | EMANE（射频模型） |
-| `4` | SWITCH（交换机） | `15` | DOCKER（容器） |
-| `5` | HUB（集线器） | `17` | WIRELESS（无线节点） |
-
-**限制：**
-- `name` 在同一会话内不必唯一（但不建议重复）
-- 节点类型 `DOCKER` / `PODMAN` 需要宿主机有对应运行时
-- 节点必须先被添加到会话，才能创建链路
-
-**返回（201）：** `{"node_id": int}`
-
-**示例：**
-```bash
-# 添加路由器
-curl -X POST http://localhost:8080/api/sessions/1/nodes \
-  -H "Content-Type: application/json" \
-  -d '{"id":1,"name":"r1","model":"router","type":0,
-       "position":{"x":100,"y":100},
-       "services":["zebra","OSPFv2"]}'
-# [201] {"node_id": 1}
-
-# 添加 PC
-curl -X POST http://localhost:8080/api/sessions/1/nodes \
-  -H "Content-Type: application/json" \
-  -d '{"id":2,"name":"pc1","model":"PC","type":0,
-       "position":{"x":300,"y":200}}'
-# [201] {"node_id": 2}
-
-# 添加交换机
-curl -X POST http://localhost:8080/api/sessions/1/nodes \
-  -H "Content-Type: application/json" \
-  -d '{"id":3,"name":"sw1","type":4,"position":{"x":200,"y":150}}'
-# [201] {"node_id": 3}
-```
-
----
-
-### `GET /api/sessions/{session_id}/nodes/{node_id}` — 获取节点详情
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-
-**返回（200）：**
-```json
-{
-  "node": {"id":1,"name":"r1","type":0,"model":"router",
-           "position":{"x":100,"y":100},"services":["zebra","OSPFv2"]},
-  "interfaces": [{"id":0,"name":"eth0","ip4":"10.0.0.1","ip4_mask":24}],
-  "links": [{"node1_id":1,"node2_id":2,"type":1}]
-}
-```
-
----
-
-### `PATCH /api/sessions/{session_id}/nodes/{node_id}` — 编辑节点（图标）
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-| `icon` | query | `string` | 否 | 图标路径，如 `router.png` |
-
-**返回（200）：** `{"result": true}`
-
-**示例：**
-```bash
-curl -X PATCH "http://localhost:8080/api/sessions/1/nodes/1?icon=router.png"
-# [200] {"result": true}
-```
-
----
-
-### `DELETE /api/sessions/{session_id}/nodes/{node_id}` — 删除节点
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-
-**返回（200）：** `{"result": true}`
-
----
-
-### `POST /api/sessions/{session_id}/nodes/{node_id}/move` — 移动节点
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-| `position` | body | `object` | 二选一 | `{"x": float, "y": float}` |
-| `geo` | body | `object` | 二选一 | `{"lat": float, "lon": float, "alt": float}` |
-
-**限制：** `position` 和 `geo` 不能同时省略，也不能同时提供。
-
-**返回（200）：** `{"result": true}`
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/nodes/1/move \
-  -H "Content-Type: application/json" \
-  -d '{"position":{"x":200,"y":200}}'
-# [200] {"result": true}
-```
-
----
-
-### `POST /api/sessions/{session_id}/nodes/{node_id}/command` — 执行命令
-
-| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `node_id` | path | `int` | ✅ | — | 节点 ID |
-| `command` | body | `string` | ✅ | — | 要执行的命令内容 |
-| `wait` | body | `bool` | 否 | `true` | 是否等待命令完成 |
-| `shell` | body | `bool` | 否 | `false` | 是否通过 shell 执行 |
-
-**限制：**
-- ⚠️ 需要会话已**完整实例化**（`definition=false`），仅定义状态（`definition=true`）下不可用
-- `command` 最大长度 4096 字符
-
-**返回（200）：**
-```json
-{"return_code": 0, "output": "命令执行的输出内容..."}
-```
-
-**示例：**
-```bash
-# 查看接口信息（需要 root + 实例化）
-curl -X POST http://localhost:8080/api/sessions/1/nodes/1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command":"ip addr","wait":true,"shell":true}'
-# [200] {"return_code":0, "output":"1: lo: <LOOPBACK,UP,LOWER_UP>...\\n2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP>..."}
-
-# Ping 测试
-curl -X POST http://localhost:8080/api/sessions/1/nodes/1/command \
-  -H "Content-Type: application/json" \
-  -d '{"command":"ping -c 3 10.0.0.2","wait":true,"shell":true}'
-# [200] {"return_code":0, "output":"64 bytes from 10.0.0.2: icmp_seq=1 ttl=64 time=0.123 ms\\n..."}
-```
-
----
-
-### `GET /api/sessions/{session_id}/nodes/{node_id}/terminal` — 获取终端命令
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-
-**返回（200）：**
-```json
-{"terminal": "vcmd -c /tmp/pycore.1/n1 -- /bin/bash"}
-```
-
-终端命令可在 **core-daemon 所在宿主机** 上直接运行，打开交互式 bash。
-
----
-
-### `ws /api/sessions/{session_id}/nodes/{node_id}/terminal/ws` — WebSocket 交互式终端
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-
-**协议：** 建立 WebSocket 后，后端通过 `vcmd -q -i -c <channel> -- /bin/bash` 启动交互式 bash，双向转发数据。
-
-**前端用法：**
-```javascript
-const ws = new WebSocket("ws://localhost:8080/api/sessions/1/nodes/1/terminal/ws");
-
-// 收到终端输出
-ws.onmessage = (e) => console.log(e.data);
-
-// 发送命令
-ws.send("ip addr\r\n");
-ws.send("ping 10.0.0.2\r\n");
-
-// 中断运行中的命令（Ctrl+C）
-ws.send("\x03");
-
-// 退出（Ctrl+D）
-ws.send("\x04");
-```
-
-**限制：**
-- 需要会话已实例化（`definition=false`，root 权限）
-- 关闭 WebSocket 或 Ctrl+D 退出后，进程自动清理
-
-**示例（命令行测试）：**
-```bash
-# 使用 wscat
-npm install -g wscat
-wscat -c "ws://localhost:8080/api/sessions/1/nodes/1/terminal/ws"
-
-# 连接后直接输入命令
-ip addr
-ping 10.0.0.2
-^C
-```
-
----
-
-## 3. 链路管理 — Link
-
-### `POST /api/sessions/{session_id}/links` — 添加链路
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node1_id` | body | `int` | ✅ | 节点 A ID |
-| `node2_id` | body | `int` | ✅ | 节点 B ID |
-| `iface1` | body | `object \| null` | 否 | 节点 A 的接口配置 |
-| `iface2` | body | `object \| null` | 否 | 节点 B 的接口配置 |
-| `options` | body | `object \| null` | 否 | 链路参数（QoS） |
-
-**`iface1`/`iface2` 接口配置：**
-
-| 子字段 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `id` | `int` | ✅ | — | 接口序号，从 0 开始 |
-| `name` | `string` | 否 | `"eth<id>"` | 接口名 |
-| `ip4` | `string` | 否 | — | IPv4 地址，如 `"10.0.0.1"` |
-| `ip4_mask` | `int` | 否 | — | 掩码位数，如 `24` |
-| `ip6` | `string` | 否 | — | IPv6 地址 |
-| `ip6_mask` | `int` | 否 | — | IPv6 掩码 |
-| `mac` | `string` | 否 | 自动生成 | MAC 地址 |
-
-**`options` 链路参数（QoS）：**
-
-| 子字段 | 类型 | 单位 | 说明 |
-|:----|:----:|:----:|:----|
-| `bandwidth` | `int` | bps | 带宽限制 |
-| `delay` | `int` | µs | 延迟 |
-| `loss` | `float` | % | 丢包率 |
-| `jitter` | `int` | µs | 抖动 |
-| `dup` | `int` | % | 重复包率 |
-| `mer` | `int` | — | 误码率 |
-| `burst` | `int` | — | 突发大小 |
-
-**限制：**
-- 两个节点需属于同一会话
-- `iface1.id` 对节点 A 必须唯一
-- `iface1.ip4` 和 `iface1.ip4_mask` 同时出现时 mask 默认 `24`
-- 不提供 `iface1`/`iface2` 时由系统自动分配
-
-**返回（201）：**
-```json
-{
-  "result": true,
-  "iface1": {"id":0, "name":"eth0", "ip4":"10.0.0.1", "ip4_mask":24, ...},
-  "iface2": {"id":0, "name":"eth0", "ip4":"10.0.0.2", "ip4_mask":24, ...}
-}
-```
-
-**示例：**
-```bash
-# 基本链路（无 IP，由系统自动分配）
-curl -X POST http://localhost:8080/api/sessions/1/links \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"iface1":{"id":0},"iface2":{"id":0}}'
-# [201] {"result":true, "iface1":{"id":0,"name":"veth1.0.1",...}, "iface2":{...}}
-
-# 带自定义 IP 和 QoS 的链路
-curl -X POST http://localhost:8080/api/sessions/1/links \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,
-       "iface1":{"id":0,"ip4":"10.0.0.1","ip4_mask":24},
-       "iface2":{"id":0,"ip4":"10.0.0.2","ip4_mask":24},
-       "options":{"bandwidth":100000000,"delay":5000,"loss":1.5}}'
-# [201] {"result":true, "iface1":{"id":0,"ip4":"10.0.0.1",...}, "iface2":{"id":0,"ip4":"10.0.0.2",...}}
-```
-
----
-
-### `PATCH /api/sessions/{session_id}/links` — 修改链路参数
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node1_id` | body | `int` | ✅ | 节点 A ID |
-| `node2_id` | body | `int` | ✅ | 节点 B ID |
-| `iface1` | body | `object \| null` | 否 | 接口配置（只传 id 即可） |
-| `iface2` | body | `object \| null` | 否 | 接口配置 |
-| `options` | body | `object \| null` | 否 | 需要修改的链路参数 |
-
-**返回（200）：** `{"result": true}`
-
-**用途：修改链路 QoS 参数（bandwidth/delay/loss/jitter/dup 等）。**
-
-> ✅ **改接口 IP（与 CORE-GUI 行为对齐）：**
-> - **会话未运行**（定义/停止态）：请求体中携带 `iface1`/`iface2` 的 `ip4/ip4_mask` → 桥后端**自动删链重建**（保留原接口 id/MAC 与合并后的 QoS），一次调用即可完成「改 IP + 改 QoS」。返回 `{"action": "replace_ip"}`。
-> - **运行中**（RUNTIME/DATACOLLECT）：请求改 IP → **HTTP 409 拒绝**（CORE 协议 `EditLinkRequest` 无 ip4 字段，运行中接口 IP 被锁定）。需先 `POST /api/sessions/{id}/stop` 停止会话再改；或运行中直接删链（`DELETE /links`）后以新 IP 重建（`POST /links`）。运行中仅 QoS 可改。
-> - options 为**合并式更新**：以链路当前 QoS 为基准，只覆盖请求体里传入的字段，未传入的参数保持原值（不会清零）。
-
-**示例：**
-```bash
-# 只改 delay（bandwidth 等其他参数保持原值）
-curl -X PATCH http://localhost:8080/api/sessions/1/links \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"options":{"delay":1000}}'
-# [200] {"result": true}
-
-# 未运行：改接口1 IP → 后端自动删链重建，保留 QoS delay/bandwidth
-curl -X PATCH http://localhost:8080/api/sessions/1/links \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"iface1":{"ip4":"10.9.9.9","ip4_mask":24}}'
-# [200] {"result": true, "action": "replace_ip", "state": "DEFINITION"}
-
-# 运行中改 IP → 409 拒绝
-curl -X PATCH http://localhost:8080/api/sessions/1/links \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"iface1":{"ip4":"10.9.9.99","ip4_mask":24}}'
-# [409] {"error":"会话运行中(RUNTIME)不可在线修改接口 IP", "detail":"…", "hint":"先停止会话，再改 IP；QoS 可直接改"}
-```
-
-> 查询链路当前接口 IP / QoS：`GET /api/sessions/{id}` 的 `links[]`，每条的 `iface1/iface2`（`id/ip4/ip4_mask`）与 `options`（QoS）。
-
----
-
-### `DELETE /api/sessions/{session_id}/links` — 删除链路
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node1_id` | body | `int` | ✅ | 节点 A ID |
-| `node2_id` | body | `int` | ✅ | 节点 B ID |
-| `iface1` | body | `object \| null` | 否 | `{"id": int}` |
-| `iface2` | body | `object \| null` | 否 | `{"id": int}` |
-
-> ⚠️ 部分 HTTP 客户端（如 `fetch`）不支持 DELETE 带 body。可用 `POST /api/sessions/{sid}/links/delete` 作为替代（需自行添加该端点）。
-
-**返回（200）：** `{"result": true}`
-
----
-
-### `POST /api/sessions/{session_id}/links/linked` — 切换链路通断
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node1_id` | body | `int` | ✅ | 节点 A ID |
-| `node2_id` | body | `int` | ✅ | 节点 B ID |
-| `iface1_id` | body | `int` | ✅ | 节点 A 的接口 ID |
-| `iface2_id` | body | `int` | ✅ | 节点 B 的接口 ID |
-| `linked` | body | `bool` | ✅ | `true`=接通，`false`=断开 |
-
-**行为：** 模拟网线插拔（断开时丢包 100%，接通时恢复正常），**不删除链路定义**。
-
-**返回（200）：** `{"result": true}`
-
-**示例：**
-```bash
-# 断开
-curl -X POST http://localhost:8080/api/sessions/1/links/linked \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":false}'
-# [200] {"result": true}
-
-# 接通
-curl -X POST http://localhost:8080/api/sessions/1/links/linked \
-  -H "Content-Type: application/json" \
-  -d '{"node1_id":1,"node2_id":2,"iface1_id":0,"iface2_id":0,"linked":true}'
-# [200] {"result": true}
-```
-
----
-
-## 4. WLAN 配置 — WLAN
-
-### `GET /api/sessions/{session_id}/wlan/{node_id}` — 获取 WLAN 配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | WLAN 节点 ID |
-
-**返回（200）：** 配置选项字典
-```json
-{
-  "range": {"label":"无线范围","value":"275","type":7,...},
-  "bandwidth": {"label":"带宽(bps)","value":"54000000","type":7,...},
-  "delay": {"label":"传输延迟(usec)","value":"5000","type":7,...},
-  "jitter": {"label":"抖动(usec)","value":"0","type":7,...},
-  "error": {"label":"丢包率(%)","value":"0","type":9,...}
-}
-```
-
-### `POST /api/sessions/{session_id}/wlan` — 设置 WLAN 配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `wlan_id` | body | `int` | ✅ | WLAN 节点 ID |
-| `config` | body | `object` | ✅ | 配置键值对 |
-
-**可配置项：** `range`(像素), `bandwidth`(bps), `delay`(µs), `jitter`(µs), `error`(%), `promiscuous`(0/1)
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/wlan \
-  -H "Content-Type: application/json" \
-  -d '{"wlan_id":4,"config":{"range":"300","bandwidth":"55000000"}}'
-# [200] {"result": true}
-```
-
----
-
-## 5. 移动模型 — Mobility
-
-### `GET /api/sessions/{session_id}/mobility/{node_id}` — 获取移动配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | 节点 ID |
-
-**返回（200）：** ns-2 移动脚本配置选项（`file`, `script_start`, `refresh_ms`, `loop` 等）
-
-### `POST /api/sessions/{session_id}/mobility` — 设置移动配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | body | `int` | ✅ | 节点 ID |
-| `config` | body | `object` | ✅ | 配置键值对 |
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/mobility \
-  -H "Content-Type: application/json" \
-  -d '{"node_id":1,"config":{"file":"/tmp/test.ns2","refresh_ms":"100"}}'
-# [200] {"result": true}
-```
-
-### `POST /api/sessions/{session_id}/mobility/action` — 控制移动
-
-| 参数 | 位置 | 类型 | 必填 | 允许值 | 说明 |
-|:----|:----:|:----:|:----:|:----|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `node_id` | body | `int` | ✅ | — | 节点 ID |
-| `action` | body | `string` | ✅ | `START` `PAUSE` `STOP` | 移动控制指令 |
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/mobility/action \
-  -H "Content-Type: application/json" \
-  -d '{"node_id":1,"action":"START"}'
-# [200] {"result": true}
-```
-
----
-
-## 6. 服务管理 — Service
-
-### `GET /api/sessions/{session_id}/services/defaults` — 获取服务默认配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | query | `int` | ✅ | 节点 ID |
-| `name` | query | `string` | ✅ | 服务名称，如 `DefaultRoute` |
-
-**返回（200）：**
-```json
-{
-  "templates": {"file.sh": "模板内容..."},
-  "config": {},
-  "modes": [{"name":"模式名","config":{...}}]
-}
-```
-
-### `GET /api/sessions/{session_id}/services/node` — 获取节点服务配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | query | `int` | ✅ | 节点 ID |
-| `name` | query | `string` | ✅ | 服务名称 |
-
-**返回（200）：** `{"config": {...}}`
-
-### `GET /api/sessions/{session_id}/services/rendered` — 获取服务渲染文件
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | query | `int` | ✅ | 节点 ID |
-| `name` | query | `string` | ✅ | 服务名称 |
-
-**返回（200）：** `{"rendered": {"文件名": "渲染后的文件内容..."}}`
-
-### `POST /api/sessions/{session_id}/services/action` — 服务动作
-
-| 参数 | 位置 | 类型 | 必填 | 允许值 | 说明 |
-|:----|:----:|:----:|:----:|:----|:----|
-| `session_id` | path | `int` | ✅ | — | 会话 ID |
-| `node_id` | body | `int` | ✅ | — | 节点 ID |
-| `service` | body | `string` | ✅ | — | 服务名称 |
-| `action` | body | `string` | ✅ | `START` `STOP` `RESTART` `VALIDATE` | 动作类型 |
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/sessions/1/services/action \
-  -H "Content-Type: application/json" \
-  -d '{"node_id":1,"service":"DefaultRoute","action":"VALIDATE"}'
-# [200] {"result": true}
-```
-
-### `POST /api/services/create` — 创建自定义服务
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `name` | body | `string` | ✅ | 服务名称 |
-| `group` | body | `string` | 否 | 分组 |
-| `startup` | body | `string[]` | 否 | 启动命令列表 |
-| `validate` | body | `string[]` | 否 | 验证命令列表 |
-| `shutdown` | body | `string[]` | 否 | 关闭命令列表 |
-| `directories` | body | `string[]` | 否 | 需要创建的目录 |
-| `files` | body | `string[]` | 否 | 需要生成的文件 |
-| `templates` | body | `dict` | 否 | 文件模板 |
-| `recreate` | body | `bool` | 否 | true=覆盖已存在的服务 |
-
-**返回（200）：** `{"result": true}`
-
-**示例：**
-```bash
-curl -X POST http://localhost:8080/api/services/create \
-  -H "Content-Type: application/json" \
-  -d '{"name":"my_service","group":"Custom",
-       "startup":["echo hello"],"shutdown":["echo bye"]}'
-# [200] {"result": true}
-```
-
----
-
-## 7. 无线节点 — Wireless
-
-### `POST /api/sessions/{session_id}/wireless/linked` — 控制无线链路
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `wireless_id` | body | `int` | ✅ | Wireless 节点 ID |
-| `node1_id` | body | `int` | ✅ | 节点 A ID |
-| `node2_id` | body | `int` | ✅ | 节点 B ID |
-| `linked` | body | `bool` | ✅ | `true`=连接，`false`=断开 |
-
-**限制：** 两个节点必须先通过 `AddLink` 连接到 Wireless 节点（非直接相连），再通过此接口控制互通。
-
-**返回（200）：** `{"result": true}`
-
-### `GET /api/sessions/{session_id}/wireless/{node_id}` — 获取无线配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | path | `int` | ✅ | Wireless 节点 ID |
-
-**返回（200）：** 配置选项字典（`bandwidth`, `delay`, `loss`, `jitter`, `range`, `movement` 等）
-
----
-
-## 8. EMANE 射频模型
-
-### `GET /api/sessions/{session_id}/emane/model` — 获取 EMANE 模型配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | query | `int` | ✅ | 节点 ID |
-| `model` | query | `string` | ✅ | 模型名（`rfpipe`, `ieee80211abg`, `tdma` 等） |
-| `iface_id` | query | `int` | 否 | 接口 ID（-1 表示节点级配置） |
-
-**返回：** 若无 EMANE 环境返回 `500`（"emane model does not exist"），有环境返回 `200` + 配置选项。
-
-### `POST /api/sessions/{session_id}/emane/model` — 设置 EMANE 模型配置
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `node_id` | body | `int` | ✅ | 节点 ID |
-| `model` | body | `string` | ✅ | 模型名 |
-| `config` | body | `dict` | ✅ | 配置键值对 |
-| `iface_id` | body | `int \| null` | 否 | 接口 ID |
-
-### `GET /api/sessions/{session_id}/emane/channel` — 获取事件通道
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `nem_id` | query | `int` | ✅ | NEM ID |
-
-**返回（200）：** `{"group": "224.0.0.1", "port": 50000, "device": "eth0"}`
-
-### `POST /api/sessions/{session_id}/emane/link` — EMANE 链路控制
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-| `nem1` | body | `int` | ✅ | NEM A |
-| `nem2` | body | `int` | ✅ | NEM B |
-| `linked` | body | `bool` | ✅ | 连接/断开 |
-
----
-
-## 9. XML 导入导出
-
-### `GET /api/sessions/{session_id}/xml` — 导出会话为 XML
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-
-**返回（200）：** `{"data": "<?xml version='1.0'?>...", "session_id": int}`
-
-### `POST /api/xml/open` — 从 XML 字符串导入会话
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `data` | body | `string` | ✅ | CORE XML 格式的场景描述 |
-| `start` | body | `bool` | 否 | `true`=立即实例化，`false`=仅定义 |
-
-**返回（200）：** `{"result": true, "session_id": int}`
-
----
-
-## 10. 拓扑导入 — Topology（JSON + XML）
-
-### `POST /api/topology` — 一键导入完整拓扑
-
-`Content-Type: application/json` 或 `application/xml`
-
-**顶层字段：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----|
-| `name` | `string` | 否 | 拓扑名称 |
-| `nodes` | `TopologyNode[]` | ✅ | 节点列表 |
-| `links` | `TopologyLink[]` | 否 | 链路列表 |
-| `wlans` | `TopologyWlan[]` | 否 | WLAN 节点列表 |
-
-**`TopologyNode`：**
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `id` | `int` | ✅ | — | 节点 ID |
-| `name` | `string` | ✅ | — | 节点名称 |
-| `model` | `string` | 否 | `"PC"` | `PC` / `router` / `host` / `mdr` |
-| `type` | `string` | 否 | `"default"` | `default` / `switch` / `wlan` / `wireless` / `docker` |
-| `x` | `float` | 否 | `200` | X 坐标 |
-| `y` | `float` | 否 | `200` | Y 坐标 |
-| `services` | `string[]` | 否 | — | 服务列表 |
-| `icon` | `string` | 否 | — | 图标路径 |
-
-**`TopologyLink`（支持自定义接口 IP）：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----|
-| `node1_id` | `int` | ✅ | 节点 A ID |
-| `node2_id` | `int` | ✅ | 节点 B ID |
-| `iface1_ip4` | `string` | 否 | 节点 A 的接口 IP |
-| `iface1_ip4_mask` | `int` | 否 | 节点 A 的接口掩码（默认 24） |
-| `iface2_ip4` | `string` | 否 | 节点 B 的接口 IP |
-| `iface2_ip4_mask` | `int` | 否 | 节点 B 的接口掩码 |
-| `bandwidth` | `int` | 否 | 带宽（bps） |
-| `delay` | `int` | 否 | 延迟（µs） |
-| `loss` | `float` | 否 | 丢包率（%） |
-| `jitter` | `int` | 否 | 抖动（µs） |
-| `dup` | `int` | 否 | 重复包率（%） |
-
-**`TopologyWlan`：**
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `id` | `int` | ✅ | — | 节点 ID |
-| `name` | `string` | ✅ | — | 节点名称 |
-| `x` | `float` | 否 | `200` | X 坐标 |
-| `y` | `float` | 否 | `200` | Y 坐标 |
-| `range` | `string` | 否 | `"275"` | 无线范围（像素） |
-| `bandwidth` | `string` | 否 | `"54000000"` | 带宽（bps） |
-| `delay` | `string` | 否 | `"5000"` | 延迟（µs） |
-| `jitter` | `string` | 否 | `"0"` | 抖动（µs） |
-| `error` | `string` | 否 | `"0"` | 丢包率（%） |
-
-**返回（201）：**
-```json
-{"session_id": 1, "name": "拓扑名", "nodes": 3, "links": 1}
-```
-
-**JSON 格式示例（含自定义 IP）：**
-```json
-{
-  "name": "demo-network",
-  "nodes": [
-    {"id": 1, "name": "r1", "model": "router", "x": 100, "y": 100,
-     "services": ["zebra", "OSPFv2"]},
-    {"id": 2, "name": "pc1", "model": "PC", "x": 300, "y": 200}
-  ],
-  "wlans": [
-    {"id": 3, "name": "wlan0", "x": 200, "y": 200,
-     "range": "300", "bandwidth": "55000000"}
-  ],
-  "links": [
-    {"node1_id": 1, "node2_id": 2,
-     "iface1_ip4": "10.0.0.1", "iface1_ip4_mask": 24,
-     "iface2_ip4": "10.0.0.2", "iface2_ip4_mask": 24,
-     "bandwidth": 100000000, "delay": 5000}
-  ]
-}
+```text
+/opt/core-network-tools/
+├── iperf/bin/iperf3
+├── snort/bin/snort
+├── snort/etc/snort/snort.lua
+├── daq/lib/libdaq.so.3
+└── daq/lib/daq/daq_pcap.so
 ```
 
 ```bash
-curl -X POST http://localhost:8080/api/topology \
-  -H "Content-Type: application/json" -d @上述JSON
-# [201] {"session_id":1, "name":"demo-network", "nodes":3, "links":1}
+tool_root="${CORE_BRIDGE_NETWORK_ROOT:-/opt/core-network-tools}"
+/opt/core/venv/bin/python --version
+"$tool_root/iperf/bin/iperf3" --version
+LD_LIBRARY_PATH="$tool_root/daq/lib" "$tool_root/snort/bin/snort" -V
+curl -fsS http://127.0.0.1:8080/network-activity/capabilities
 ```
 
-**XML 格式示例：**
-```xml
-<?xml version="1.0"?>
-<topology name="demo-network">
-  <node id="1" name="r1" model="router" x="100" y="100"
-        services="zebra,OSPFv2"/>
-  <node id="2" name="pc1" model="PC" x="300" y="200"/>
-  <node id="3" name="wlan0" type="wlan" x="200" y="200" range="300"/>
-  <link node1="1" node2="2"
-        iface1_ip4="10.0.0.1" iface1_ip4_mask="24"
-        iface2_ip4="10.0.0.2" iface2_ip4_mask="24"
-        bandwidth="100000000" delay="5000"/>
-</topology>
-```
+规则文件放在 `BRIDGE_DATA_DIR/snort-rules/`，扩展名为 `.rules`。每次运行记录规则文件校验值。本机已校验的社区规则快照是 `community-20261118.rules`，SHA-256 为 `274d8ab3f891c9569bb92b92261908f753f68f4cf7d70733dba702baba5239a2`。快速检查告警链路时，可选内置「无害功能验收」规则，并在拓扑内 HTTP 流量任务中使用路径 `/?probe=BRIDGE_IDS_CHECK`。确认流量经过探针所选接口后，到数据监测查看规则命中。
+
+## 配置和持久目录
+
+| 环境变量或目录 | 默认值 | 用途 |
+|---|---|---|
+| `CORE_GRPC_ADDRESS` | `localhost:50051` | CORE gRPC 地址 |
+| `BRIDGE_HOST` / `BRIDGE_PORT` | `0.0.0.0` / `8080` | 直接运行 `app.py` 时的监听地址和端口。使用 Uvicorn CLI 时按启动参数设置 |
+| `BRIDGE_DATA_DIR` | `/opt/artifacts/core-drill` | 业务数据、导入附件、背景流量日志和 Snort 规则 |
+| `BRIDGE_DB_PATH` | `${BRIDGE_DATA_DIR}/platform.db` | SQLite 配置、修订、运行记录、事件、指标和审计 |
+| `CORE_CUSTOM_SERVICES_DIR` | `/opt/core/etc/custom_services` | CORE 服务实现和已生成的服务修订 |
+| `BRIDGE_IMPORT_DIR` | `${BRIDGE_DATA_DIR}/image-imports` | 镜像导入工件 |
+| `BRIDGE_TEMP_DIR` | `${BRIDGE_DATA_DIR}/tmp` | Bridge 与守护进程共享的一次性请求文件 |
+| `CORE_BRIDGE_NETWORK_ROOT` | `/opt/core-network-tools` | iperf3、Snort 和 LibDAQ |
+| 维护工具 | `~/.local/share/core-http-bridge/tools/` | 固定测试和浏览器依赖 |
+| 验收工件 | `~/.local/share/core-http-bridge/acceptance/` | 测试日志、截图和验收数据 |
+| 生产备份 | `/var/backups/core-http-bridge/` | 数据库和服务实现备份 |
+
+业务文件保存在 WSL 持久目录。旧清单和模板在首次读取时迁移到 SQLite，并留下原文件备份。WSL 停止后，拓扑配置和历史从 SQLite 读回，仿真进程需重新启动。使用原生节点时，CORE 运行路径应足够短，以容纳 Unix socket 文件名。
+
+默认保留历史指标 30 天、会话事件及落库的 Snort 告警 90 天。审计日志默认持续保留。
+
+运行 `scripts/backup-platform.py --output <新备份目录>` 可创建 SQLite 一致副本，并复制服务目录和现有旧数据文件。自定义数据库路径用 `--db-path` 指定。完整迁移还应保存对应的代码版本、业务镜像、导入附件和规则集。更新 Bridge 会中断浏览器终端、事件连接以及由 Bridge 管理的背景流量和探针，建议在维护时间操作。 [部署与回滚](docs/platform/部署与回滚.md) · [WSL 持久化与维护](docs/platform/WSL持久化与维护.md)
+
+## 离线部署准备
+
+按目标机的 CPU 架构和发行版准备 CORE、兼容的 CORE venv、Docker 及宿主所需的系统包。联网准备机应使用相同的 Python 主次版本和平台下载 wheel。
 
 ```bash
-curl -X POST http://localhost:8080/api/topology \
-  -H "Content-Type: application/xml" -d @上述XML
-# [201] {"session_id":2, "name":"demo-network", "nodes":3, "links":1}
+# 联网准备机
+/opt/core/venv/bin/python -m pip download \
+  --only-binary=:all: --dest wheels -r requirements.txt
+
+# 离线主机
+sudo /opt/core/venv/bin/python -m pip install \
+  --no-index --find-links wheels -r requirements.txt
 ```
 
----
+将仓库与 `wheels/` 一并传入离线主机。Docker 业务镜像可以从「镜像管理」导出完整交付包后在目标机导入。背景流量和 Snort 可沿用宿主安装方式，携带已验收的工具目录、运行库和规则快照。复制工具后可用 `ldd` 检查 Snort、DAQ pcap 模块和 iperf3 的动态库，并按版本查询命令核对。运行需要的镜像应提前导入，按实际镜像 ID 和规则快照验收。 [Docker 镜像归档](https://docs.docker.com/reference/cli/docker/image/save/)
 
-## 11. 工具接口 — Utility & Global
+## HTTP API
 
-### `GET /api/interfaces` — 获取宿主机网络接口
+Swagger UI 和 OpenAPI 给出运行实例当前已加载版本的请求参数和响应模型。页面使用的业务接口有自己的路径，CORE 会话操作主要位于 `/api`。离线环境可以直接读取本机的 OpenAPI JSON。 [Swagger UI](http://127.0.0.1:8080/docs) · [OpenAPI](http://127.0.0.1:8080/openapi.json)
 
-无参数。
+| 用途 | 常用接口 |
+|---|---|
+| 健康和运行概览 | `GET /health`、`GET /topology-workspace` |
+| 保存、读取和修改拓扑 | `POST /topologies`、`GET /topologies/{topology_id}`、`PUT /topologies/{topology_id}` |
+| 部署和查看运行记录 | `POST /topologies/{topology_id}/deploy`、`GET /deployments` |
+| CORE 会话启动、停止和删除 | `POST /api/sessions/{session_id}/start`、`POST /api/sessions/{session_id}/stop`、`DELETE /api/sessions/{session_id}` |
+| 会话节点、链路和 CORE XML | `POST /api/sessions/{session_id}/nodes`、`POST /api/sessions/{session_id}/links`、`GET /api/sessions/{session_id}/xml`、`POST /api/xml/open` |
+| WLAN 和 EMANE 配置 | `GET /api/sessions/{session_id}/wlan/{node_id}`、`GET /api/sessions/{session_id}/emane/model` |
+| 镜像和导入任务 | `GET /targets`、`POST /jobs/import`、`GET /jobs/{job_id}` |
+| 节点模板和原生服务 | `GET /instances`、`GET /native-services`、`GET /native-services/{name}/defaults`、`POST /native-services/{name}/preview` |
+| 接口流量、事件和历史指标 | `GET /api/sessions/{session_id}/throughputs/stream`、`GET /api/sessions/{session_id}/events/stream`、`GET /metrics`、`GET /events` |
+| 背景流量和 Snort 记录 | `GET /network-activity/capabilities`、`GET /deployments/{deployment_id}/network-activity` |
+| 独立停止背景流量任务 | `POST /deployments/{deployment_id}/network-activity/{run_id}/{item_id}/stop` |
 
-**返回（200）：**
-```json
-{"interfaces": ["eth0", "ens3", "lo"]}
-```
+拓扑保存后使用返回的 `topology_id` 和 `revision` 进行更新或部署。若当前修订为 1，部署时直接启动可提交 `{"revision":1,"start":true}`。平台接口常用 `{"ok":true,"data":...}` 响应，CORE 桥接接口按各端点返回会话、节点或操作结果。使用相应的演练或部署标识查询历史。终端和节点移动还提供 WebSocket 接口。 [接口分类与调用说明](docs/接口文档.md)
 
-### `GET /api/config` — 获取系统配置
+## 开发和排查
 
-无参数。
+- `app.py`、`bridge.py` 提供 HTTP、WebSocket、SSE 和 CORE gRPC 桥接。
+- `topologies.py`、`native_xml.py`、`versions.py` 负责拓扑、运行记录、原生 XML 和修订绑定。
+- `target_admin.py`、`image_services.py`、`jobs.py` 管理镜像、服务目录及导入任务。`native_services.py` 负责原生服务目录和脚本预览。
+- `network_activity.py`、`network_http.py` 管理流量任务与探针，`platform_db.py` 和 `repository.py` 负责 SQLite，`static/` 提供管理页面。
 
-**返回（200）：**
-```json
-{
-  "services": [{"name":"FRRBabel","group":"FRR",...}, ...],
-  "emane_models": ["rfpipe","ieee80211abg","tdma","bypass"]
-}
-```
-
----
-
-## 12. SSE 流式接口
-
-### `GET /api/sessions/{session_id}/events/stream` — 会话事件流
-
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-
-**格式：** `text/event-stream`
 ```bash
-curl -N http://localhost:8080/api/sessions/1/events/stream
-# data: {"session_id":1, "type":"NodeEvent"}
-# data: {"session_id":1, "type":"LinkEvent"}
-# ...
+python3 scripts/dev-tools.py paths
+python3 scripts/dev-tools.py pytest tests/test_topology_workspace.py -q
 ```
 
-### `GET /api/sessions/{session_id}/throughputs/stream` — 吞吐量流
+可用 `make test` 运行仓库测试。按 [AGENTS.md](AGENTS.md) 选择必要的测试范围。真实功能验收使用新建的隔离环境，归档的验收目录保留供查阅。 [验收工具说明](tests/integration/README.md)
 
-| 参数 | 位置 | 类型 | 必填 | 说明 |
-|:----|:----:|:----:|:----:|:----|
-| `session_id` | path | `int` | ✅ | 会话 ID |
-
-每 3 秒推送一次吞吐量数据 + 心跳。
-
-### `GET /api/cpu-usage/stream` — CPU 使用率流
-
-| 参数 | 位置 | 类型 | 必填 | 默认值 | 说明 |
-|:----|:----:|:----:|:----:|:----:|:----|
-| `delay` | query | `int` | 否 | `1` | 推送间隔（秒） |
-
----
-
-## 13. WebSocket 流式接口
-
-| 路径 | 说明 |
-|:----|:----|
-| `ws://host:8080/api/sessions/{sid}/nodes/{nid}/terminal/ws` | **交互式终端**（见 Node 章节） |
-| `ws://host:8080/api/sessions/{sid}/move-nodes/ws` | 流式移动节点 |
-| `ws://host:8080/api/sessions/{sid}/emane-pathlosses/ws` | EMANE 路径损耗 |
-| `ws://host:8080/api/sessions/{sid}/emane-events/ws` | EMANE 事件（Location/CommEffect） |
-
----
-
-## 14. 错误码速查
-
-| 状态码 | 含义 | 常见原因 |
-|:----:|:----|:----|
-| `200` | 成功 | — |
-| `201` | 创建成功 | `POST .../sessions`, `POST .../nodes`, `POST .../links`, `POST .../topology` |
-| `400` | 请求参数错误 | 无效的 action 值、缺少字段、JSON/XML 格式错误 |
-| `404` | 资源不存在 | session_id / node_id / iface_id 不存在 |
-| `409` | 资源冲突 | 重复创建 |
-| `415` | 不支持的 Content-Type | 调用 `/api/topology` 用了非 JSON/XML 的 Content-Type |
-| `422` | 参数校验失败 | Pydantic 校验失败，如类型不对、缺少必填字段 |
-| `500` | 服务器内部错误 | gRPC 调用异常、Python 异常 |
-| `501` | 未实现 | EMANE 未安装时调用 EMANE 相关接口 |
-| `503` | 服务不可用 | core-daemon 未运行或 bridge 未连接 |
-
----
-
-## 15. 常见问题
-
-### core-daemon 未运行
-**现象：** `/health` 返回 `503`，API 请求返回 gRPC `UNAVAILABLE`。
-**解决：** `sudo systemctl start core-daemon`
-
-### Python 环境问题
-**现象：** `ModuleNotFoundError: No module named 'fastapi'`
-**解决：** 使用 CORE venv 运行：`PYTHONPATH="" /opt/core/venv/bin/python3 -m uvicorn app:app`
-
-### 启动会话需要 root
-**现象：** `start(definition=false)` 返回 `500`
-**解决：** 使用 `{"definition": true}` 仅定义拓扑，或使用 root 权限运行 HTTP Bridge
-
-### Stop 后拓扑丢失
-**v1.1.0 已修复：** stop 会保留节点和链路的定义，可再次 start。
-
-### GET /sessions/{id} 在添加节点后报错
-**v1.1.0 已修复：** `_session_to_dict` 中 `for n in s.nodes` 改为 `for n in s.nodes.values()`。
-
-### DELETE 请求带 body
-部分客户端（`fetch`）不支持 DELETE body。建议用 `POST` 替代或使用支持 DELETE body 的客户端（curl、httpx）。
-
----
-
-*文档版本: v1.1.1 — 最后更新: 2026-08-18*
+| 现象 | 优先检查 |
+|---|---|
+| `/health` 返回 503 | CORE 守护进程状态、gRPC 监听地址及 Bridge 日志 |
+| 页面更新后接口找不到 | Bridge 是否加载了同一个工作目录中的新后端代码 |
+| Docker 模板没有可选镜像配置 | 镜像详情是否完成最终确认，配置状态是否为「已生效」 |
+| 原生节点启动失败 | 运行记录中的启动诊断、节点服务的依赖和 CORE 运行目录长度 |
+| 背景流量任务失败 | 工具版本、目标接口与端口、源节点到目标的连通性及任务状态 |
+| Snort 告警列表为空 | 先看探针状态和包数，再核对选中接口、流量路径和规则集 |
