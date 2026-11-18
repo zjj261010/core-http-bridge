@@ -1,3 +1,5 @@
+# Historical build example without the CORE SDK or shared host runtime.
+# Use the host CORE Python environment for a supported deployment.
 FROM python:3.10-slim
 
 WORKDIR /app

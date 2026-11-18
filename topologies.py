@@ -1,7 +1,8 @@
 """Persistent topology drafts, deployments, and authoritative template bindings."""
 import copy
 import threading
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+from fastapi import APIRouter, HTTPException, Query
 import repository as repo
 import versions
 import platform_db
@@ -22,17 +23,17 @@ def display_name(run):
         if saved and saved.get('name'): return saved['name']
     for key in ('source','execution_definition','snapshot'):
         if (run.get(key) or {}).get('name'): return run[key]['name']
+    if run.get('definition_name'): return run['definition_name']
     return '会话 '+str(run.get('core_sid',''))
 
 
 @router.get('/topology-workspace')
-def workspace():
+def workspace(summary: bool = False):
     """Join saved configurations and live execution identities without rewriting history."""
     import app
     import core_adapter
     from core.services.manager import ServiceManager
     saved=list(repo.read('topologies').values())
-    history=copy.deepcopy(list(repo.read('deployments').values()))
     sessions=[]
     error=None
     try:
@@ -41,16 +42,24 @@ def workspace():
         with repo.connection() as connection:
             active={row['core_sid']:dict(row) for row in connection.execute(
                 "SELECT core_sid,drill_id,identity FROM drills WHERE status='active'")}
-        for summary in summaries:
-            session=app._session_summary_to_dict(summary)
-            token=tokens.get(str(summary.id))
-            owner=active.get(summary.id)
+        for info in summaries:
+            session=app._session_summary_to_dict(info)
+            token=tokens.get(str(info.id))
+            owner=active.get(info.id)
             session.update(identity=token,drill_id=owner['drill_id'] if owner and token and owner['identity']==token else None)
             sessions.append(session)
     except Exception:
         # Saved definitions/history remain useful when CORE is unavailable.
         sessions=[]
         error='无法读取 CORE 实时状态；已保存的拓扑和历史记录仍可查看。'
+    if summary:
+        live_drills = [session['drill_id'] for session in sessions if session.get('drill_id')]
+        history = repo.deployment_rows(limit=-1, drill_ids=live_drills, include_bindings=True)
+        history.extend(repo.deployment_rows(limit=24, archived=True))
+        history = list({run['deployment_id']:run for run in history}.values())
+        history.sort(key=lambda run: (run.get('created_at') or '', run['deployment_id']))
+    else:
+        history=copy.deepcopy(list(repo.read('deployments').values()))
     by_sid={s['id']:s for s in sessions}
     labels={1:'未启动',2:'配置中',3:'启动中',4:'运行中',5:'停止中',6:'已关闭'}
     for run in history:
@@ -67,6 +76,26 @@ def workspace():
         session['display_name']=run['display_name'] if run else '会话 '+str(session['id'])
     return {'ok':True,'data':{'topologies':saved,'deployments':history,'sessions':sessions,
                             'runtime_error':error,'native_models':ServiceManager().defaults,'updated_at':repo.now()}}
+
+
+@router.get('/deployment-history')
+def deployment_history(limit: Annotated[int, Query(ge=1, le=100)] = 25,
+                       offset: Annotated[int, Query(ge=0)] = 0, topology_id: str | None = None,
+                       drill_id: str | None = None, with_network: bool = False, archived: bool = False):
+    runs = repo.deployment_rows(limit=limit+1, offset=offset, topology_id=topology_id,
+                                drill_ids=[drill_id] if drill_id else None, with_network=with_network, archived=archived)
+    for run in runs:
+        run['display_name'] = display_name(run)
+        run['saved_topology_id'] = run.get('topology_id') or run.get('captured_topology_id')
+    return {'ok': True, 'data': {'items':runs[:limit], 'has_more':len(runs) > limit}}
+
+
+@router.get('/deployments/{deployment_id}')
+def deployment_detail(deployment_id: str):
+    record = repo.read('deployments', deployment_id)
+    if not record:
+        raise HTTPException(404, '运行记录不存在')
+    return {'ok': True, 'data':record}
 
 
 def _checked_session(sid,identity):
@@ -115,7 +144,7 @@ def workspace_action(sid:int,action:str,body:dict):
         return {'ok':True,'data':result}
 
 
-def validate(definition, pin=True):
+def validate(definition, pin=True, *, check_local=False):
     import app
     import ipaddress
     import native_services
@@ -125,16 +154,32 @@ def validate(definition, pin=True):
         try: root=ET.fromstring(definition['xml_text'])
         except (ET.ParseError,KeyError,TypeError) as e: raise ValueError('原生 XML 内容无效: '+str(e)) from e
         if root.tag!='scenario': raise ValueError('原生 XML 根节点必须是 scenario')
+        if check_local:
+            import native_xml
+            bindings = native_xml.read_bindings(root)
+            images = set()
+            for device in root.findall('./devices/device'):
+                binding = bindings.get(device.get('id'), {})
+                if not isinstance(binding, dict):
+                    raise ValueError('XML 节点绑定必须是对象')
+                resolved = {}
+                if binding.get('instance'):
+                    resolved, _ = versions.resolve(binding['instance'], binding.get('instance_version'),
+                                                   binding.get('service_overrides'), prepare_files=False)
+                image = resolved.get('image') or device.get('image')
+                if image:
+                    images.add(image)
+            require_local_images(images)
         return copy.deepcopy(definition)
     topo=app.TopologyInput.model_validate(definition)
     ids=[n.id for n in topo.nodes]+[w.id for w in topo.wlans]
     if len(ids)!=len(set(ids)): raise ValueError('节点 ID 重复')
-    kinds = {}
+    kinds, images = {}, set()
     for node in topo.nodes:
         resolved = {}
         if node.type.lower() not in app._NODE_TYPE_MAP: raise ValueError('未知节点类型: '+node.type)
         if node.instance:
-            resolved,_=versions.resolve(node.instance,node.instance_version,node.service_overrides)
+            resolved,_=versions.resolve(node.instance,node.instance_version,node.service_overrides,prepare_files=not check_local)
             if node.image and node.image not in (resolved.get('image'),resolved.get('image_ref')):
                 raise ValueError('节点镜像与模板版本不一致: '+str(node.id))
             if node.services is not None:
@@ -152,6 +197,9 @@ def validate(definition, pin=True):
             native_services.check_selection(names, node.service_configs)
         elif node.service_configs:
             raise ValueError('只有 CORE 原生节点支持单节点服务参数和文件覆盖')
+        image = resolved.get('image') or node.image
+        if image:
+            images.add(image)
     for link in topo.links:
         if link.node1_id not in ids or link.node2_id not in ids or link.node1_id==link.node2_id:
             raise ValueError('链路端点不存在或相同')
@@ -184,7 +232,31 @@ def validate(definition, pin=True):
         network_activity.validate(topo.network_activity, normalized, kinds)
     else:
         normalized.pop('network_activity', None)
+    if check_local:
+        require_local_images(images)
     return normalized
+
+
+def require_local_images(images):
+    import shlex
+    import target_admin
+    missing = [image for image in sorted(images)
+               if target_admin._docker('image inspect ' + shlex.quote(image), 30)[1]]
+    if missing:
+        raise ValueError('本机缺少镜像，请先导入：' + '、'.join(missing))
+
+
+@router.post('/topologies/import-check')
+def import_check(body: dict):
+    definition = body.get('definition')
+    if not isinstance(definition, dict):
+        raise HTTPException(400, '缺少拓扑定义')
+    try:
+        validate(definition, check_local=True)
+    except (ValueError, OSError) as error:
+        raise HTTPException(400, str(error)) from error
+    return {'ok': True, 'data': {'same_name': any(record['name'] == definition.get('name')
+                                                 for record in repo.read('topologies').values())}}
 
 
 def save(body, topology_id=None):
@@ -411,11 +483,7 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
             bound[str(node['id'])]['native_service_resets'] = resets
         bound[str(node['id'])].update(display_name=display,runtime_name=node['name'])
         required.update(node.get('services') or [])
-    import target_admin,shlex
-    for node in resolved['nodes']:
-        if node.get('image'):
-            _,code=target_admin._docker('image inspect '+shlex.quote(node['image']),30)
-            if code: raise ValueError('固定的镜像已不在本机，请重新导入: '+node['image'])
+    require_local_images({node['image'] for node in resolved['nodes'] if node.get('image')})
     if directories:
         activation=activate(app.bridge,sorted(directories),sorted(required))
         if activation['missing']: raise ValueError('daemon 服务未注册: '+', '.join(activation['missing']))

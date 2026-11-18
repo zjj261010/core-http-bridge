@@ -1,8 +1,11 @@
 """Bounded traffic generation and passive Snort sensing in local CORE namespaces."""
 from __future__ import annotations
 
+import csv
+from datetime import datetime
 import hashlib
 import ipaddress
+import io
 import json
 import logging
 import os
@@ -15,12 +18,13 @@ import threading
 import time
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 import platform_db
 import repository as repo
-from settings import settings
+from settings import request_file, settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -153,11 +157,26 @@ def _tools():
     return {
         'nsenter': Path('/usr/bin/nsenter'),
         'ss': Path('/usr/bin/ss'),
+        'timeout': Path('/usr/bin/timeout'),
         'iperf3': TOOL_ROOT / 'iperf/bin/iperf3',
         'snort': TOOL_ROOT / 'snort/bin/snort',
         'snort_config': TOOL_ROOT / 'snort/etc/snort/snort.lua',
         'daq': TOOL_ROOT / 'daq/lib/daq',
     }
+
+
+def _missing_tools(kind, tools):
+    names = {
+        'http': ('nsenter', 'timeout'),
+        'iperf3': ('nsenter', 'timeout', 'ss', 'iperf3'),
+        'snort': ('nsenter', 'snort'),
+    }[kind]
+    missing = [name for name in names if not tools[name].is_file() or not os.access(tools[name], os.X_OK)]
+    if kind == 'snort':
+        missing.extend(name for name, path in (
+            ('Snort 配置', tools['snort_config']), ('LibDAQ pcap 模块', tools['daq'] / 'daq_pcap.so'),
+        ) if not path.is_file())
+    return '缺少或无法使用宿主工具：' + '、'.join(missing) if missing else ''
 
 
 @router.get('/network-activity/capabilities')
@@ -166,10 +185,80 @@ def capabilities():
     return {'ok': True, 'data': {
         'rulesets': [{'id': name, 'name': '无害功能验收' if name == 'verification' else name}
                      for name in rulesets()],
-        'http': tools['nsenter'].is_file(),
-        'iperf3': all(tools[key].is_file() for key in ('nsenter', 'ss', 'iperf3')),
-        'snort': all(tools[key].is_file() for key in ('nsenter', 'snort', 'snort_config')) and tools['daq'].is_dir(),
+        **{kind: not _missing_tools(kind, tools) for kind in ('http', 'iperf3', 'snort')},
     }}
+
+
+def _tool_output(args, *, env=None):
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding='utf-8', errors='replace', timeout=10, env=env, check=False)
+    if result.returncode:
+        lines = result.stdout.splitlines()
+        raise ValueError(next((line for line in lines if 'error' in line.lower()),
+                              result.stdout.strip() or f'退出码 {result.returncode}')[:300])
+    return result.stdout
+
+
+def _snort_env(tools):
+    library = str(tools['daq'].parent)
+    if previous := os.environ.get('LD_LIBRARY_PATH'):
+        library += os.pathsep + previous
+    return {**os.environ, 'LD_LIBRARY_PATH': library}
+
+
+def _snort_args(tools, rules):
+    return [tools['snort'], '-c', tools['snort_config'], '-R', rules, '--daq-dir', tools['daq'],
+            '--daq', 'pcap', '--daq-mode', 'passive', '-A', 'alert_json', '--lua', SNORT_LUA]
+
+
+def _preflight_tool(kind, tools, ruleset):
+    if missing := _missing_tools(kind, tools):
+        raise ValueError(missing)
+    if kind == 'iperf3':
+        version = _tool_output([tools['iperf3'], '--version']).splitlines()
+        if '--json-stream' not in _tool_output([tools['iperf3'], '--help']):
+            raise ValueError((version[0] if version else 'iperf3') + ' 缺少 --json-stream')
+    elif kind == 'snort':
+        version = _tool_output([tools['snort'], '-V'], env=_snort_env(tools))
+        if not re.search(r'\bVersion\s+3\.', version, re.IGNORECASE):
+            raise ValueError('需要 Snort 3')
+        with request_file('.rules') as rules:
+            rules.write_bytes(_ruleset(ruleset))
+            _tool_output([*_snort_args(tools, rules), '-T'], env=_snort_env(tools))
+
+
+def preflight(plan, definition):
+    tools = _tools()
+    checked, errors = {}, {}
+    for spec in (*plan.traffic, *plan.probes):
+        if isinstance(spec, Traffic):
+            kind = 'http' if spec.protocol == 'http' else 'iperf3'
+            endpoints, node_id, ruleset = spec.target_link, spec.target_id, None
+        else:
+            kind = 'snort'
+            endpoints, node_id, ruleset = spec.link, spec.node_id, spec.ruleset
+        link = _link(definition, endpoints)
+        iface = _interface(link, node_id) if link else None
+        if not iface or iface.get('id') is None:
+            errors[spec.id] = '无法确定配置所引用的链路接口。'
+            continue
+        if isinstance(spec, Traffic):
+            try:
+                _target_address(iface.get('ip4'))
+            except ValueError as error:
+                errors[spec.id] = str(error)
+                continue
+        key = (kind, ruleset)
+        if key not in checked:
+            try:
+                _preflight_tool(kind, tools, ruleset)
+            except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+                checked[key] = (kind + ' 预检失败：' + str(error))[:350]
+            else:
+                checked[key] = ''
+        if checked[key]:
+            errors[spec.id] = checked[key]
+    return errors
 
 
 def _namespace(session, node_id):
@@ -204,8 +293,10 @@ def _resolve_interface(bridge, sid, definition, endpoints, node_id):
     return iface
 
 
-def _target_address(iface):
-    address = ipaddress.IPv4Address(iface.ip4 or '')
+def _target_address(value):
+    if not value:
+        raise ValueError('背景流量的目标接口缺少 IPv4 地址')
+    address = ipaddress.IPv4Address(value)
     private = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
     if not any(address in ipaddress.IPv4Network(network) for network in private):
         raise ValueError('背景流量目标须为拓扑节点的私有 IPv4 地址')
@@ -313,7 +404,7 @@ class Worker:
         if self.cancelled.wait(max(0, self.run.started + spec.delay - time.monotonic())):
             raise InterruptedError()
         iface = _resolve_interface(self.run.bridge, self.run.sid, self.run.definition, spec.target_link, spec.target_id)
-        address = _target_address(iface)
+        address = _target_address(iface.ip4)
         self.update(status='starting', endpoint=address)
         if spec.protocol == 'http':
             args = [sys.executable, str(Path(__file__).with_name('network_http.py')), address, spec.port,
@@ -333,7 +424,7 @@ class Worker:
                 args.extend(('-l', max(256, min(16384, spec.rate // 80))))
             consume = self.iperf_sample
         # A stalled peer must not leave a finite traffic job running indefinitely.
-        proc = self.spawn(spec.source_id, ['/usr/bin/timeout', '--foreground', '--kill-after=2s',
+        proc = self.spawn(spec.source_id, [_tools()['timeout'], '--foreground', '--kill-after=2s',
                                            str(spec.duration + 18) + 's', *args])
         self.lines(proc, consume)
 
@@ -341,7 +432,10 @@ class Worker:
         data = _json_line(line)
         if data is None:
             return False
-        self.update(status=data.pop('status', 'running'), metrics=data)
+        status = data.pop('status', 'running')
+        self.update(status='running' if status == 'done' else status, metrics=data)
+        if status == 'done' and not data.get('successes'):
+            raise ValueError('HTTP 流量没有成功请求，请核对业务端口、请求路径和返回状态。')
         return True
 
     def iperf_sample(self, line):
@@ -373,10 +467,7 @@ class Worker:
         rule_path.write_bytes(rules)
         version = hashlib.sha256(rules).hexdigest()
         self.update(interface=iface.name, rules_sha256=version)
-        proc = self.spawn(spec.node_id, [
-            tools['snort'], '-c', tools['snort_config'], '-R', rule_path, '--daq-dir', tools['daq'],
-            '--daq', 'pcap', '--daq-mode', 'passive', '-i', iface.name, '-A', 'alert_json', '--lua', SNORT_LUA,
-        ], env={**os.environ, 'LD_LIBRARY_PATH': str(tools['daq'].parent)})
+        proc = self.spawn(spec.node_id, [*_snort_args(tools, rule_path), '-i', iface.name], env=_snort_env(tools))
         columns, packets, drops, alerts = [], 0, 0, 0
 
         def consume(line):
@@ -422,7 +513,10 @@ class Worker:
             logger.info('network activity %s/%s: %s', self.run.id, self.spec.id, error)
         finally:
             try:
-                self.cleanup()
+                try:
+                    self.cleanup()
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    result = {'status': 'failed', 'error': ('清理任务进程失败：' + str(error))[:350]}
                 self.update(**({'status': 'stopped'} if self.cancelled.is_set() else result), ended_at=repo.now())
             finally:
                 self.finished.set()
@@ -437,9 +531,9 @@ def _json_line(line):
 
 
 class Run:
-    def __init__(self, record, session, bridge, plan):
+    def __init__(self, record, session, bridge, plan, errors):
         self.id = repo.identifier('net')
-        self.sid = session.id
+        self.sid = record['core_sid']
         self.drill = record['drill_id']
         self.definition = record['execution_definition']
         self.session = session
@@ -447,14 +541,17 @@ class Run:
         self.started = time.monotonic()
         self.lock = threading.Lock()
         self.path = settings.data_dir / 'network-activity' / self.id
-        self.workers = {spec.id: Worker(self, spec) for spec in [*plan.traffic, *plan.probes]}
+        specs = [*plan.traffic, *plan.probes]
+        self.workers = {spec.id: Worker(self, spec) for spec in specs if spec.id not in errors}
         self.data = {
             'run_id': self.id, 'deployment_id': record['deployment_id'], 'drill_id': self.drill,
             'core_sid': self.sid, 'created_at': repo.now(), 'started_ns': time.time_ns(),
             'node_names': {str(node['id']): node['name'] for node in self.definition.get('nodes', [])},
-            'items': {key: {**worker.spec.model_dump(mode='json'), 'status': 'pending',
-                            'kind': 'traffic' if isinstance(worker.spec, Traffic) else 'probe'}
-                      for key, worker in self.workers.items()},
+            'items': {spec.id: {**spec.model_dump(mode='json'),
+                                'kind': 'traffic' if isinstance(spec, Traffic) else 'probe',
+                                **({'status': 'failed', 'error': errors[spec.id], 'ended_at': repo.now()}
+                                   if spec.id in errors else {'status': 'pending'})}
+                      for spec in specs},
         }
         repo.put(RUN_COLLECTION, self.id, self.data)
         self.last_write = {}
@@ -471,7 +568,11 @@ class Run:
 
     def start(self):
         for key, worker in reversed(tuple(self.workers.items())):
-            threading.Thread(target=worker.execute, name=f'network-{key}', daemon=True).start()
+            try:
+                threading.Thread(target=worker.execute, name=f'network-{key}', daemon=True).start()
+            except RuntimeError as error:
+                worker.finished.set()
+                self.update(key, status='failed', error='无法启动任务：' + str(error), ended_at=repo.now())
 
     def stop(self):
         for worker in self.workers.values():
@@ -485,18 +586,21 @@ _lock = threading.RLock()
 _runs = {}
 
 
-def start(record, bridge):
-    definition = record.get('execution_definition') or {}
-    plan = Plan.model_validate(definition.get('network_activity') or {})
+def start(record, bridge, plan, errors):
     if not plan.traffic and not plan.probes:
         return
     sid = record['core_sid']
     with _lock:
-        if sid in _runs:
-            return
-        run = Run(record, bridge.get_session(sid), bridge, plan)
-        _runs[sid] = run
-        run.start()
+        run = _runs.get(sid)
+        if not run:
+            run = Run(record, bridge.get_session(sid) if len(errors) < len(plan.traffic) + len(plan.probes) else None,
+                      bridge, plan, errors)
+            if run.workers:
+                _runs[sid] = run
+                run.start()
+        with run.lock:
+            failed = [key for key, item in run.data['items'].items() if item['status'] == 'failed']
+            return {'run_id': run.id, 'failed_items': failed}
 
 
 def stop(sid, drill=None):
@@ -535,14 +639,89 @@ def history(deployment_id: str, run_id: str | None = None):
     deployment = repo.read('deployments', deployment_id)
     if deployment is None:
         raise HTTPException(404, '运行记录不存在')
-    runs = [record for record in repo.read(RUN_COLLECTION).values() if record['deployment_id'] == deployment_id]
-    runs.sort(key=lambda item: (item['created_at'], item.get('started_ns', 0)), reverse=True)
+    runs = repo.network_runs(deployment_id)
     if run_id and not any(item['run_id'] == run_id for item in runs):
         raise HTTPException(404, '该运行批次不存在')
     selected = run_id or (runs[0]['run_id'] if runs else None)
     alerts = platform_db.query_events(drill_id=deployment['drill_id'], limit=200,
                                      event_type='snort', detail_run_id=selected) if selected else []
-    return {'ok': True, 'data': {'runs': runs, 'alerts': alerts}}
+    return {'ok': True, 'data': {'runs': runs, 'alerts': alerts,
+                                 'startup_error': (deployment.get('network_activity_start') or {}).get('error')}}
+
+
+def _selected_run(deployment_id, run_id):
+    run = repo.read(RUN_COLLECTION, run_id)
+    if not run or run['deployment_id'] != deployment_id:
+        raise HTTPException(404, '该运行批次不存在')
+    return run
+
+
+@router.get('/deployments/{deployment_id}/network-activity/batches')
+def batches(deployment_id: str, run_id: str | None = None,
+            limit: Annotated[int, Query(ge=1, le=100)] = 25,
+            offset: Annotated[int, Query(ge=0)] = 0):
+    deployment = repo.read('deployments', deployment_id)
+    if deployment is None:
+        raise HTTPException(404, '运行记录不存在')
+    rows = repo.network_runs(deployment_id, limit=limit+1, offset=offset, summary=True)
+    selected = run_id or (rows[0]['run_id'] if rows else None)
+    return {'ok': True, 'data': {'items':rows[:limit], 'has_more':len(rows)>limit,
+                                 'run':_selected_run(deployment_id, selected) if selected else None,
+                                 'startup_error':(deployment.get('network_activity_start') or {}).get('error')}}
+
+
+def _alert_filters(probe, start, end, search):
+    def timestamp(value):
+        if value is None:
+            return None
+        if value.tzinfo:
+            value = value.astimezone()
+        return value.strftime('%Y-%m-%d %H:%M:%S')
+
+    first, last = timestamp(start), timestamp(end)
+    if first and last and first > last:
+        raise HTTPException(400, '开始时间须早于结束时间')
+    return {'probe':probe, 'start':first, 'end':last, 'search':search}
+
+
+@router.get('/deployments/{deployment_id}/network-activity/{run_id}/alerts')
+def alerts(deployment_id: str, run_id: str,
+           limit: Annotated[int, Query(ge=1, le=200)] = 50,
+           before_id: Annotated[int | None, Query(ge=1)] = None,
+           probe: Key | None = None, start: datetime | None = None, end: datetime | None = None,
+           search: Annotated[str | None, Query(max_length=200)] = None):
+    run = _selected_run(deployment_id, run_id)
+    filters = _alert_filters(probe, start, end, search)
+    rows = platform_db.query_snort_alerts(run['drill_id'], run_id, limit=limit+1, upper_id=before_id, **filters)
+    return {'ok': True, 'data': {'items':rows[:limit], 'next_before_id':rows[limit-1]['id'] if len(rows)>limit else None}}
+
+
+@router.get('/deployments/{deployment_id}/network-activity/{run_id}/alerts.csv')
+def export_alerts(deployment_id: str, run_id: str, probe: Key | None = None,
+                  start: datetime | None = None, end: datetime | None = None,
+                  search: Annotated[str | None, Query(max_length=200)] = None):
+    run = _selected_run(deployment_id, run_id)
+    filters = _alert_filters(probe, start, end, search)
+
+    def stream():
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['时间','规则','提示','来源','目标','探针','接口'])
+        yield '\ufeff' + output.getvalue()
+        cursor = None
+        while rows := platform_db.query_snort_alerts(run['drill_id'], run_id, limit=500, upper_id=cursor, **filters):
+            output.seek(0)
+            output.truncate()
+            for row in rows:
+                detail = row['detail']
+                values = [row['ts'], *(detail.get(key) for key in ('rule','msg','src_ap','dst_ap','probe','interface'))]
+                text = [str(value) if value is not None else '' for value in values]
+                writer.writerow(["'" + value if value.lstrip().startswith(('=', '+', '-', '@')) else value for value in text])
+            yield output.getvalue()
+            cursor = rows[-1]['id']
+
+    return StreamingResponse(stream(), media_type='text/csv',
+                             headers={'Content-Disposition': 'attachment; filename="snort-alerts.csv"'})
 
 
 @router.post('/deployments/{deployment_id}/network-activity/{run_id}/{item_id}/stop')

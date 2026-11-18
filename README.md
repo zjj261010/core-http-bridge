@@ -58,13 +58,15 @@ curl -fsS http://127.0.0.1:8080/health
 
 「保存」提交的是下次运行的配置。「启动」以当前修订创建新会话。已有会话使用启动时的配置。「删除会话」清理该会话的运行资源，保存的拓扑和运行记录保留。
 
-支持通过文件导入和导出平台拓扑 JSON，也支持导入 CORE 原生 XML。原生 XML 以原文件格式保存、导出和启动。跨主机导入带平台绑定的 XML 时，需提前准备它引用的模板修订和镜像。
+新连线按点对点链路或共享的交换网络分配 IPv4，已有手填地址保留。启动确认会提示同一网络网段不一致、地址重复及同一节点的网段重叠。
+
+拓扑文件用于在本机备份和复用，支持平台 JSON 和 CORE 原生 XML。原生 XML 以原文件格式保存、导出和启动。导入时检查引用的本机模板修订和镜像。同名拓扑可导入为副本。
 
 ### 用镜像创建 Docker 节点
 
-1. 在「镜像管理 → 导入」选择镜像归档或完整交付包，可以上传文件或填写服务器路径。导入任务在后台运行，失败或中断的任务可在列表中「续办」。
+1. 在「镜像管理 → 导入」选择镜像归档或完整交付包，可以上传文件或填写服务器路径。文件接收后即可关闭导入弹窗，在后台任务列表查看解包、归档校验、镜像加载和待确认阶段。失败或中断的任务可「续办」，已校验且文件未变化时会复用归档摘要。
 2. 打开镜像「详情」。镜像服务表声明镜像可提供的全部服务。点服务「详情」配置启动模式，在模式里导入启动、停止和就绪检查脚本。
-3. 在镜像详情点「确定」查看汇总，然后选择「仅保存，稍后生效」或「确认保存并生效」。注册使用独立修订名。存在 CORE 会话时，先保存待生效，在合适时间处理会话后再确认。
+3. 在镜像详情点「确定」查看汇总，然后选择「仅保存，稍后生效」或「确认保存并生效」。注册使用独立修订名。确认页列出阻塞注册的活动会话及查看入口。已停止的会话可以保留。
 4. 在「节点模板 → Docker 节点模板」选择镜像和已生效配置修订，勾选默认启用的服务，为每项服务选一个模式。允许空服务清单的工具镜像也可用于模板。
 5. 在拓扑画布添加该模板。节点可继承模板默认值，也可单独启停服务和选择模式。
 
@@ -88,6 +90,10 @@ curl -fsS http://127.0.0.1:8080/health
 在拓扑画布添加「背景流量」任务，填写源节点、目标节点和接口、协议、端口、速率、启动延迟与持续时间。HTTP 从本机 CORE 原生节点访问拓扑内的业务接口，填写站内请求路径。TCP/UDP 使用两个本机 CORE 原生节点，并为同一接收节点的任务分配不同的 iperf3 端口。目标使用拓扑内的私有 IPv4 地址。
 
 选中链路后点「监测此链路」，选择本机原生节点端的具体接口和 Snort 规则集。探针以被动方式监听该接口。网络任务和探针随拓扑启动，在「网络任务与 Snort 告警」查看设定速率、实际数据、任务状态和告警。背景流量可单独停止。停止拓扑会结束探针和剩余任务。已结束的运行仍可在「数据监测」选择运行记录回看。
+
+启动 CORE 会话前，Bridge 根据配置检查目标接口、工具和 Snort 规则。预检未通过的任务会在本次运行记录标为失败并显示原因，其余任务和拓扑仍可启动。HTTP 背景流量分别统计成功和错误请求。
+
+「全部运行历史」分页显示运行摘要，打开某条记录时才加载保存的配置。Snort 告警按所选运行批次查询，可按探针、时间及关键字筛选，并将筛选结果导出为 CSV。
 
 ### 宿主依赖与验收版本
 
@@ -140,33 +146,35 @@ curl -fsS http://127.0.0.1:8080/network-activity/capabilities
 
 默认保留历史指标 30 天、会话事件及落库的 Snort 告警 90 天。审计日志默认持续保留。
 
-运行 `scripts/backup-platform.py --output <新备份目录>` 可创建 SQLite 一致副本，并复制服务目录和现有旧数据文件。自定义数据库路径用 `--db-path` 指定。完整迁移还应保存对应的代码版本、业务镜像、导入附件和规则集。更新 Bridge 会中断浏览器终端、事件连接以及由 Bridge 管理的背景流量和探针，建议在维护时间操作。 [部署与回滚](docs/platform/部署与回滚.md) · [WSL 持久化与维护](docs/platform/WSL持久化与维护.md)
+运行 `scripts/backup-platform.py --output <新备份目录>` 可创建 SQLite 一致副本，并复制服务目录和现有旧数据文件。自定义数据库路径用 `--db-path` 指定，数据库不存在或为空时命令会报错。更新 Bridge 会中断浏览器终端、事件连接以及由 Bridge 管理的背景流量和探针，建议在维护时间操作。 [部署与回滚](docs/platform/部署与回滚.md) · [WSL 持久化与维护](docs/platform/WSL持久化与维护.md)
 
 ## 离线部署准备
 
-按目标机的 CPU 架构和发行版准备 CORE、兼容的 CORE venv、Docker 及宿主所需的系统包。联网准备机应使用相同的 Python 主次版本和平台下载 wheel。
+先准备 CORE、对应的 CORE venv、Docker 和所需的系统包。下列清单固定了 Linux x86_64、Python 3.10 环境中的 Bridge 依赖。联网准备机使用相同的 Python 版本和平台下载 wheel。仓库中的 `Dockerfile` 是历史构建示例，Bridge 的部署入口为宿主 CORE venv。
 
 ```bash
 # 联网准备机
 /opt/core/venv/bin/python -m pip download \
-  --only-binary=:all: --dest wheels -r requirements.txt
+  --only-binary=:all: --dest wheels -r requirements-linux-x86_64-py310.txt
 
 # 离线主机
 sudo /opt/core/venv/bin/python -m pip install \
-  --no-index --find-links wheels -r requirements.txt
+  --no-index --find-links wheels -r requirements-linux-x86_64-py310.txt
+/opt/core/venv/bin/python scripts/offline-check.py --docker --network-tools
 ```
 
-将仓库与 `wheels/` 一并传入离线主机。Docker 业务镜像可以从「镜像管理」导出完整交付包后在目标机导入。背景流量和 Snort 可沿用宿主安装方式，携带已验收的工具目录、运行库和规则快照。复制工具后可用 `ldd` 检查 Snort、DAQ pcap 模块和 iperf3 的动态库，并按版本查询命令核对。运行需要的镜像应提前导入，按实际镜像 ID 和规则快照验收。 [Docker 镜像归档](https://docs.docker.com/reference/cli/docker/image/save/)
+将仓库与 `wheels/` 一并放到离线环境。部署使用的镜像归档可提前准备，再通过本机的镜像管理导入。背景流量和 Snort 沿用宿主安装方式，准备已验收的工具目录、运行库和规则快照。复制工具后可用 `ldd` 检查 Snort、DAQ pcap 模块和 iperf3 的动态库，并按版本查询命令核对。自检的 `--docker` 和 `--network-tools` 可按实际使用的功能选择。 [Docker 镜像归档](https://docs.docker.com/reference/cli/docker/image/save/)
 
 ## HTTP API
 
-Swagger UI 和 OpenAPI 给出运行实例当前已加载版本的请求参数和响应模型。页面使用的业务接口有自己的路径，CORE 会话操作主要位于 `/api`。离线环境可以直接读取本机的 OpenAPI JSON。 [Swagger UI](http://127.0.0.1:8080/docs) · [OpenAPI](http://127.0.0.1:8080/openapi.json)
+Swagger UI 和 OpenAPI 给出运行实例当前已加载版本的请求参数和响应模型。页面使用的业务接口有自己的路径，CORE 会话操作主要位于 `/api`。Swagger UI 5.34.1 由 Bridge 从本机提供，离线时可直接使用 `/docs` 和 `/openapi.json`。 [Swagger UI](http://127.0.0.1:8080/docs) · [OpenAPI](http://127.0.0.1:8080/openapi.json) · [Swagger UI 上游版本](https://github.com/swagger-api/swagger-ui/releases/tag/v5.34.1)
 
 | 用途 | 常用接口 |
 |---|---|
 | 健康和运行概览 | `GET /health`、`GET /topology-workspace` |
 | 保存、读取和修改拓扑 | `POST /topologies`、`GET /topologies/{topology_id}`、`PUT /topologies/{topology_id}` |
 | 部署和查看运行记录 | `POST /topologies/{topology_id}/deploy`、`GET /deployments` |
+| 分页查看运行历史和单条快照 | `GET /deployment-history`、`GET /deployments/{deployment_id}` |
 | CORE 会话启动、停止和删除 | `POST /api/sessions/{session_id}/start`、`POST /api/sessions/{session_id}/stop`、`DELETE /api/sessions/{session_id}` |
 | 会话节点、链路和 CORE XML | `POST /api/sessions/{session_id}/nodes`、`POST /api/sessions/{session_id}/links`、`GET /api/sessions/{session_id}/xml`、`POST /api/xml/open` |
 | WLAN 和 EMANE 配置 | `GET /api/sessions/{session_id}/wlan/{node_id}`、`GET /api/sessions/{session_id}/emane/model` |
@@ -174,6 +182,7 @@ Swagger UI 和 OpenAPI 给出运行实例当前已加载版本的请求参数和
 | 节点模板和原生服务 | `GET /instances`、`GET /native-services`、`GET /native-services/{name}/defaults`、`POST /native-services/{name}/preview` |
 | 接口流量、事件和历史指标 | `GET /api/sessions/{session_id}/throughputs/stream`、`GET /api/sessions/{session_id}/events/stream`、`GET /metrics`、`GET /events` |
 | 背景流量和 Snort 记录 | `GET /network-activity/capabilities`、`GET /deployments/{deployment_id}/network-activity` |
+| 分页查询或导出 Snort 告警 | `GET /deployments/{deployment_id}/network-activity/{run_id}/alerts`、`GET /deployments/{deployment_id}/network-activity/{run_id}/alerts.csv` |
 | 独立停止背景流量任务 | `POST /deployments/{deployment_id}/network-activity/{run_id}/{item_id}/stop` |
 
 拓扑保存后使用返回的 `topology_id` 和 `revision` 进行更新或部署。若当前修订为 1，部署时直接启动可提交 `{"revision":1,"start":true}`。平台接口常用 `{"ok":true,"data":...}` 响应，CORE 桥接接口按各端点返回会话、节点或操作结果。使用相应的演练或部署标识查询历史。终端和节点移动还提供 WebSocket 接口。 [接口分类与调用说明](docs/接口文档.md)

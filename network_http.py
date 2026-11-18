@@ -57,12 +57,15 @@ def run(address, port, path, rate, duration):
                 else:
                     skipped += 1
                 next_request = now + 1 / rate
-            if now - last_sample >= 1 or now >= end and not pending:
+            if now - last_sample >= 1:
                 report('running', requests=total, errors=errors, bytes=size, skipped=skipped,
+                       successes=total - errors,
                        requests_per_second=round((total - last_total) / max(0.01, now - last_sample), 2))
                 last_sample, last_total = now, total
             if now < end or pending:
                 time.sleep(max(0.001, min(0.02, next_request - now)) if now < end else 0.02)
+    report('done', requests=total, successes=total - errors, errors=errors, bytes=size, skipped=skipped,
+           requests_per_second=round(total / max(duration, time.monotonic() - start), 2))
 
 
 if __name__ == '__main__':

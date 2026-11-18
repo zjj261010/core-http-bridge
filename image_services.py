@@ -371,13 +371,16 @@ def selection_for(catalog, selections):
     return chosen, check
 
 
-def execution(published, selections):
+def execution(published, selections, *, prepare_files=True):
     import target_admin as ta
     catalog = published['catalog']
     chosen, _ = selection_for(catalog, selections)
     identity = key(json.dumps({'selection':selections,'content':catalog.get('content_hash'),'implementation':published['sources']}, sort_keys=True))
     prefix = 'imgsvc-' + key(published['image_digest'])[:10] + '-r' + str(published['version']) + '-' + identity[:8] + '-'
     directory = Path(ta.CUSTOM_SERVICES_DIR) / ('image_exec_' + key(prefix))
+    resolved = [{**s, 'execution_name': prefix + s['name']} for s in chosen], str(directory)
+    if not prepare_files:
+        return resolved
     # Execute the frozen implementation, not a regeneration using today's compiler.
     sources = copy.deepcopy(published['sources'])
     names = {n:prefix+n for text in sources.values() for n in delivery.names(text)}
@@ -413,7 +416,7 @@ def execution(published, selections):
         path = directory / 'templates' / Path(filename).name
         if not path.exists():
             path.write_text(content)
-    return [{**s, 'execution_name': prefix + s['name']} for s in chosen], str(directory)
+    return resolved
 
 
 def stage_delivery(body, refs):
@@ -431,6 +434,22 @@ def stage_delivery(body, refs):
         repo.put('image_catalog_imports', staged['import_id'], staged)
         result.append(staged['import_id'])
     return result
+
+
+def activation_blockers(bridge):
+    blockers = []
+    for session in bridge.get_sessions():
+        state = getattr(session, 'state', None)
+        state = getattr(state, 'value', state)
+        if state not in (1, 6):
+            blockers.append({'id': session.id, 'state': state})
+    return blockers
+
+
+@router.get('/image-services/activation-status')
+def activation_status():
+    import app
+    return {'ok': True, 'data': {'blockers': activation_blockers(app.bridge)}}
 
 
 def commit(cid, body):
@@ -456,6 +475,8 @@ def commit(cid, body):
                   'revision': current['revision'] + 1, 'issues': issues, 'state': 'incomplete' if issues else 'pending',
                   'stage': 'saved', 'request_id': body.get('request_id'), 'updated_at': repo.now()}
         record.pop('info', None)
+        record.pop('activation_blockers', None)
+        record.pop('message', None)
         if content_hash != current.get('content_hash'):
             record.pop('pending_target_version',None)
         repo.put('image_catalogs', cid, record)
@@ -465,12 +486,13 @@ def commit(cid, body):
             record['message'] = '配置已保存；请确认服务注册及可能的 CORE 重启影响后生效'
             repo.put('image_catalogs', cid, record)
             return record
-        sessions = app.bridge.get_sessions()
-        if sessions:
-            record['message'] = '配置已保存待生效。存在 CORE 会话，请先在拓扑管理中处理全部会话'
-            repo.put('image_catalogs', cid, record)
-            return record
         try:
+            blockers = activation_blockers(app.bridge)
+            if blockers:
+                record.update(message='配置已保存待生效。请先停止下列活动会话，再确认生效。',
+                              activation_blockers=blockers)
+                repo.put('image_catalogs', cid, record)
+                return record
             record['stage'] = 'materializing'
             repo.put('image_catalogs', cid, record)
             ref = record['image_ref']

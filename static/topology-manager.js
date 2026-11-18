@@ -13,6 +13,7 @@
   P.navigation('topologies.html');
   const message = () => el('div', {'aria-live':'polite'});
   const allNodes = () => [...(definition?.nodes || []), ...(definition?.wlans || [])];
+  const addressNodes = () => [...definition.nodes, ...definition.wlans.map(node => ({...node,type:'wlan'}))];
   const topologyRef = run => run?.saved_topology_id || run?.topology_id || run?.captured_topology_id;
   const runName = run => run?.display_name || run?.topology_name || run?.source?.name || run?.snapshot?.name || '历史拓扑';
   const editable = () => !!definition && view === 'edit';
@@ -25,9 +26,29 @@
     return el('section', {class:'topology-group'}, el('h3', {}, title),
       el('div', {class:'topology-group-body'}, ...contents));
   }
-  function historyPanel(title, runs) {
-    return el('details', {class:'topology-panel topology-history'}, el('summary', {}, title),
-      el('div', {class:'topology-panel-body'}, runTable(runs)));
+  function historyPanel(title, scope = {}) {
+    const body = el('div', {class:'topology-panel-body'});
+    const panel = el('details', {class:'topology-panel topology-history'}, el('summary', {}, title), body);
+    let offset = 0, loading = false;
+    async function show(page) {
+      if (loading) return;
+      loading = true;
+      const params = new URLSearchParams({...scope,limit:'25',offset:String(page)});
+      try {
+        const history = await api('/deployment-history?' + params);
+        offset = page;
+        const previous = button('上一页', () => show(offset - 25));
+        const next = button('下一页', () => show(offset + 25));
+        previous.disabled = !offset;
+        next.disabled = !history.has_more;
+        body.replaceChildren(runTable(history.items), el('div', {class:'actions'},
+          previous, el('span', {}, '第 ' + (offset / 25 + 1) + ' 页'), next));
+      } catch (error) {
+        body.replaceChildren(el('p', {class:'notice error'}, error.message), button('重试', () => show(page)));
+      } finally {loading = false;}
+    }
+    panel.addEventListener('toggle', () => {if (panel.open && !loading && !body.hasChildNodes()) show(0);});
+    return panel;
   }
   function changed() {
     dirty = true;
@@ -37,7 +58,7 @@
   function disabled(control, reason) { control.disabled = true; control.title = reason; return control; }
   function discard() { return !dirty || confirm('放弃当前尚未保存的拓扑修改？'); }
   async function refresh(renderPage = true) {
-    const result = await api('/topology-workspace');
+    const result = await api('/topology-workspace?summary=true');
     data = result;
     if (renderPage) render();
   }
@@ -77,22 +98,22 @@
     const record = data.topologies.find(r => r.topology_id === topologyRef(run)) || null;
     setDefinition(def, record, 'live', {sid:session.id, identity:session.identity, deployment_id:run?.deployment_id, topology_id:topologyRef(run)});
   }
-  function openHistory(run) {
+  async function openHistory(summary) {
     if (!discard()) return;
-    opening++;
+    const token = ++opening;
+    const run = await api('/deployments/' + encodeURIComponent(summary.deployment_id));
+    if (token !== opening) return;
     const def = P.clone(run.native_xml ? {format:'core-xml', name:'历史拓扑', xml_text:run.native_xml} : run.execution_definition || run.snapshot || run.source);
     if (!def) throw Error('此旧记录没有保存拓扑配置，请从原文件导入。');
-    def.name = runName(run);
-    setDefinition(def, data.topologies.find(r => r.topology_id === topologyRef(run)) || null, 'history', {deployment_id:run.deployment_id, topology_id:topologyRef(run)});
+    def.name = runName(summary);
+    setDefinition(def, data.topologies.find(r => r.topology_id === topologyRef(run)) || null, 'history',
+      {deployment_id:run.deployment_id, topology_id:topologyRef(run), drill_id:run.drill_id});
   }
   function associated(session) {
     return data.deployments.find(r => r.live && r.core_sid === session.id && r.drill_id === session.drill_id);
   }
   function contextSession() {
     return context?.sid ? data.sessions.find(s => s.id === context.sid && s.identity === context.identity) : null;
-  }
-  function relatedRuns() {
-    return data.deployments.filter(r => current ? topologyRef(r) === current.topology_id || r.deployment_id === context?.deployment_id : r.deployment_id === context?.deployment_id);
   }
   function render() {
     optionsToken++;
@@ -133,9 +154,8 @@
       const key = topologyRef(run) || run.deployment_id;
       if (archived.has(key) || run.live || data.topologies.some(r => r.topology_id === topologyRef(run))) continue;
       archived.add(key);
-      const def = run.source || run.snapshot || run.execution_definition;
       items.push({name:runName(run), kind:'history', run, status:'历史记录 · 会话已结束',
-        nodes:(def?.nodes?.length || 0) + (def?.wlans?.length || 0), time:run.created_at});
+        nodes:run.node_count ?? 0, time:run.created_at});
     }
     return items;
   }
@@ -167,7 +187,7 @@
       if (!visible.length) container.append(el('div', {class:'empty'}, entries.length ? '没有匹配的拓扑，请调整筛选。' : '还没有拓扑。点击“新建拓扑”添加节点，或导入已有文件。'));
     }
     updateCards();
-    app.append(historyPanel('全部运行历史（' + data.deployments.length + '）', data.deployments));
+    app.append(historyPanel('全部运行历史'));
   }
   function renderWorkspace() {
     const session = contextSession(), run = session ? associated(session) : null;
@@ -187,9 +207,10 @@
         definition = null; current = null; dirty = false; await refresh();
       }));
     } else {
-      actions.append(button('导出', exportFile), button(view === 'live' && !current ? '保存为拓扑' : '复制为可编辑拓扑', () => {
+      actions.append(button('导出', exportFile), button(view === 'live' && !current ? '保存为拓扑' : '复制为可编辑拓扑', async () => {
         const run = data.deployments.find(r => r.deployment_id === context?.deployment_id);
-        const def = run?.native_xml ? {schema_version:2, format:'core-xml', xml_text:run.native_xml} : normalize(definition);
+        const detail = run?.has_native_xml ? await api('/deployments/' + encodeURIComponent(run.deployment_id)) : run;
+        const def = detail?.native_xml ? {schema_version:2, format:'core-xml', xml_text:detail.native_xml} : normalize(definition);
         def.name = current?.name || definition.name || '会话拓扑';
         const capture = view === 'live' && !current && contextSession() ? {...context, capture:true} : null;
         setDefinition(def, null, 'edit', capture); changed(); P.notice('已转为可编辑配置。保存后出现在拓扑列表，原会话不变。');
@@ -219,6 +240,13 @@
           el('span', {class:'tag ' + (view === 'edit' ? 'dk' : 'lock')}, {edit:'编辑配置', live:'会话视图', history:'历史配置'}[view]),
           el('span', {id:'saveState', class:'muted', role:'status'}, status))),
       el('div', {class:'topology-actionbar'}, back, actions)));
+    const networkStatus = run?.network_activity_start;
+    if (session?.state === 4 && networkStatus?.error) {
+      app.append(el('p', {class:'notice error'}, networkStatus.error));
+    } else if (session?.state === 4 && networkStatus?.failed_items?.length) {
+      app.append(el('p', {class:'notice error'}, networkStatus.failed_items.length +
+        ' 项网络任务启动失败。打开「网络任务与 Snort 告警」查看具体原因。'));
+    }
     if (definition.format === 'core-xml') {
       app.append(el('section', {class:'surface'}, el('h2', {}, '原生 XML 拓扑'), el('p', {class:'notice'},
         '原始 XML 配置完整保留，可导出、保存并启动。启动后在此查看实际节点和链路。修改原始 XML 请使用外部编辑器后重新导入。')));
@@ -253,8 +281,9 @@
       app.append(el('div', {class:'topology-workspace'}, palette, center, inspector));
       if (auxiliary) app.append(auxiliaryTables());
     }
-    const runs = relatedRuns();
-    app.append(historyPanel('当前拓扑的运行记录（' + runs.length + '）', runs));
+    const drill = session?.drill_id || context?.drill_id;
+    if (current || drill) app.append(historyPanel('当前拓扑的运行记录',
+      current ? {topology_id:current.topology_id} : {drill_id:drill}));
   }
   function nodeName(id) { return allNodes().find(n => n.id === id)?.name || '#' + id; }
   function updateNodeLabel(node) {
@@ -347,16 +376,10 @@
       P.notice('这两个节点已有链路。点击画布上的链路即可修改。', true); return;
     }
     const link = {node1_id:firstEndpoint, node2_id:id};
-    for (const [key, nodeId] of [['iface1',firstEndpoint],['iface2',id]]) {
-      const node = allNodes().find(n => n.id === nodeId);
-      if (['switch','hub','wlan'].includes(node.type) || definition.wlans.includes(node)) continue;
-      const used = definition.links.flatMap(l => [['node1_id','iface1'],['node2_id','iface2']].filter(([end]) => l[end] === nodeId).map(([,iface]) => l[iface]?.id)).map((id,index) => id ?? index);
-      const ifaceId = Math.max(-1, ...used) + 1;
-      const host = (nodeId - 1) % 250 + 1, network = 90 + Math.floor((nodeId - 1) / 250) % 150;
-      link[key] = {id:ifaceId, ip4:'10.' + network + '.' + (ifaceId % 250) + '.' + host, ip4_mask:24};
-    }
+    const warning = TopologyAddressing.assign(link, definition.links, addressNodes());
     definition.links.push(link); selectedLink = definition.links.length - 1; selected = null;
-    connect = false; firstEndpoint = null; changed(); P.notice('链路已添加，可在右侧调整接口地址和参数。'); render();
+    connect = false; firstEndpoint = null; changed(); render();
+    P.notice(warning || '链路已添加，可在右侧调整接口地址和参数。', !!warning);
   }
   function canvas() {
     const nodes = allNodes();
@@ -658,15 +681,16 @@
       el('div', {class:'topology-panel-body topology-properties'}, propertyGroup('节点', nodes), propertyGroup('链路', links)));
   }
   function runTable(runs) {
-    return table(['拓扑','运行时间','状态','操作'], runs.slice().reverse().map(run => {
-      const record = data.topologies.find(r => r.topology_id === topologyRef(run));
+    return table(['拓扑','运行时间','状态','操作'], runs.map(summary => {
+      const run = data.deployments.find(item => item.deployment_id === summary.deployment_id && item.live) || summary;
       const session = run.live && data.sessions.find(s => s.id === run.core_sid && s.drill_id === run.drill_id);
       const actions = el('div', {class:'actions'}, button('查看本次配置', () => openHistory(run)));
       if (session) actions.append(button('查看会话', () => openSession(session, run)));
-      if ((run.execution_definition || run.source || run.snapshot)?.network_activity)
+      if (run.has_network_activity)
         actions.append(button('网络任务与告警', () => NetworkActivity.show(run.deployment_id)));
       return [runName(run), stamp(run.created_at),
-        el('div', {}, run.current_status, el('small', {class:'muted'}, session ? '会话 ' + session.id : '最后记录：' + (historyNames[run.status] || run.status)),
+        el('div', {}, run.current_status || (data.runtime_error ? '状态待确认' : '历史记录'),
+          el('small', {class:'muted'}, session ? '会话 ' + session.id : '最后记录：' + (historyNames[run.status] || run.status)),
           run.error ? el('p', {class:'notice error'}, run.error.length > 180 ? run.error.slice(0,180) + '…' : run.error) : null,
           run.diagnostics?.length || run.error?.length > 180 ? el('details', {}, el('summary', {}, '启动诊断'), el('pre', {class:'topology-diagnostics'}, (run.diagnostics || [run.error]).join('\n'))) : null), actions];
     }));
@@ -677,7 +701,7 @@
     return api('/topology-workspace/sessions/' + session.id + '/' + action, 'POST', {identity:session.identity});
   }
   async function checkedRuntime(expected, states = [4]) {
-    const fresh = await api('/topology-workspace');
+    const fresh = await api('/topology-workspace?summary=true');
     const session = fresh.sessions.find(s => s.id === expected.sid && s.identity === expected.identity);
     if (!session) throw Error('会话已结束或被替换，请刷新状态。');
     if (!states.includes(session.state)) throw Error('会话状态已变化，请刷新后操作。');
@@ -747,8 +771,11 @@
     if (!editable()) return;
     validateLocal();
     const active = current && data.deployments.filter(run => topologyRef(run) === current.topology_id && run.live).length;
+    const warnings = definition.format === 'core-xml' ? [] : TopologyAddressing.warnings(definition.links, addressNodes());
+    const addressNotice = warnings.length ? '\nIPv4 检查\n' + warnings.slice(0, 8).join('\n') +
+      (warnings.length > 8 ? '\n另有 ' + (warnings.length - 8) + ' 项。' : '') + '\n仍要启动？' : '';
     if (!confirm('启动“' + definition.name + '”？\n' + allNodes().length + ' 个节点，' + (definition.links?.length || 0) + ' 条链路。\n' +
-      (dirty || !current ? '当前修改会先保存。\n' : '') + (active ? '此拓扑已有 ' + active + ' 个活动会话。\n' : '') + '将创建新的 CORE 会话，已有运行不变。')) return;
+      (dirty || !current ? '当前修改会先保存。\n' : '') + (active ? '此拓扑已有 ' + active + ' 个活动会话。\n' : '') + '将创建新的 CORE 会话，已有运行不变。' + addressNotice)) return;
     if (dirty || !current) await save();
     try {
       const run = await api('/topologies/' + current.topology_id + '/deploy', 'POST', {revision:current.revision, start:true});
@@ -765,10 +792,19 @@
         const file = event.target.files[0]; if (!file) return;
         const text = await file.text();
         let def = file.name.toLowerCase().endsWith('.xml') ? {schema_version:2, format:'core-xml', name:file.name.replace(/\.xml$/i, ''), xml_text:text} : JSON.parse(text);
-        def = def.definition || def;
+        def = def?.definition || def;
         if (!def || typeof def !== 'object' || Array.isArray(def) || (def.format !== 'core-xml' && !Array.isArray(def.nodes))) throw Error('文件中没有有效的拓扑节点列表');
+        const preview = await api('/topologies/import-check', 'POST', {definition:def});
         if (!discard()) return;
-        opening++; setDefinition(def); changed(); P.notice('文件已导入。检查节点和链路后保存；尚未创建运行会话。');
+        if (preview.same_name) {
+          let suffix = 1;
+          const used = new Set(data.topologies.map(record => record.name));
+          let name;
+          do {name = def.name + '（副本' + (suffix === 1 ? '' : ' ' + suffix) + '）'; suffix++;} while (used.has(name));
+          if (!confirm('已有同名拓扑，是否以“' + name + '”导入为新拓扑？')) return;
+          def.name = name;
+        }
+        opening++; setDefinition(def); changed(); P.notice('本机引用检查通过。检查节点和链路后保存。');
       } catch (error) {P.notice(error.message, true);}
     }}); control.click();
   }
@@ -781,7 +817,7 @@
   P.guardNavigation(() => dirty, '放弃当前尚未保存的拓扑修改？');
   window.addEventListener('keydown', event => {if (event.key === 'Escape' && connect) {connect = false; firstEndpoint = null; render();}});
   async function load() {
-    const results = await Promise.allSettled([api('/topology-workspace'), api('/instances'), NativeServices.readCatalog()]);
+    const results = await Promise.allSettled([api('/topology-workspace?summary=true'), api('/instances'), NativeServices.readCatalog()]);
     if (results[0].status === 'rejected') throw results[0].reason;
     data = results[0].value;
     templates = results[1].status === 'fulfilled' ? results[1].value : [];

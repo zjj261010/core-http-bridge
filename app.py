@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.openapi.docs import get_swagger_ui_html, get_swagger_ui_oauth2_redirect_html
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -163,7 +164,30 @@ app = FastAPI(
     description="HTTP REST API 包装 CORE 网络仿真器的 gRPC 接口",
     version="1.1.0",
     lifespan=lifespan,
+    docs_url=None,
 )
+
+SWAGGER_ASSETS = 'static/vendor/swagger-ui/5.34.1'
+
+
+@app.get('/docs', include_in_schema=False)
+def swagger_docs(request: Request):
+    root = request.scope.get('root_path', '').rstrip('/')
+    assets = root + '/' + SWAGGER_ASSETS
+    return get_swagger_ui_html(
+        openapi_url=root + app.openapi_url,
+        title=f'{app.title} - Swagger UI',
+        swagger_js_url=assets + '/swagger-ui-bundle.js',
+        swagger_css_url=assets + '/swagger-ui.css',
+        swagger_favicon_url=assets + '/favicon-32x32.png',
+        oauth2_redirect_url=root + app.swagger_ui_oauth2_redirect_url,
+        swagger_ui_parameters={'validatorUrl': None},
+    )
+
+
+@app.get('/docs/oauth2-redirect', include_in_schema=False)
+def swagger_oauth_redirect():
+    return get_swagger_ui_oauth2_redirect_html()
 
 
 @app.exception_handler(Exception)
@@ -660,24 +684,48 @@ def check_session(session_id: int):
 @app.post("/api/sessions/{session_id}/start")
 def start_session(session_id: int, body: StartSessionRequest):
     """启动会话 (definition=True 仅定义, False 实例化并启动服务)"""
-    s = bridge.get_session(session_id)
-    if not body.definition:
-        import topologies
-        deployment=topologies.prepare_start(session_id)
-        for nid,node in s.nodes.items():
-            runtime=deployment.get('bindings',{}).get(str(nid),{}).get('runtime_name')
-            if runtime: node.name=runtime
-    result, exceptions = bridge.start_session(s, definition=body.definition)
-    if result:
-        import topologies
-        topologies.for_session(session_id)
-        topologies.state(session_id,'defined' if body.definition else 'running')
+    import network_activity
+    import repository
+    import topologies
+
+    with topologies.mutation_lock:
+        session = bridge.get_session(session_id)
+        plan, errors, network_error = None, {}, None
         if not body.definition:
+            deployment = topologies.prepare_start(session_id)
+            for nid, node in session.nodes.items():
+                runtime = deployment.get('bindings', {}).get(str(nid), {}).get('runtime_name')
+                if runtime:
+                    node.name = runtime
+            definition = deployment.get('execution_definition') or {}
+            if definition.get('network_activity'):
+                try:
+                    plan = Plan.model_validate(definition['network_activity'])
+                    errors = network_activity.preflight(plan, definition)
+                except Exception as error:
+                    network_error = ('网络任务预检未完成：' + str(error))[:350]
+                    logger.exception('network activity preflight failed for session %s', session_id)
+        result, exceptions = bridge.start_session(session, definition=body.definition)
+        response = {'result': result, 'exceptions': exceptions}
+        if not result:
+            return response
+        topologies.for_session(session_id)
+        topologies.state(session_id, 'defined' if body.definition else 'running')
+        if plan is None and not network_error:
+            return response
+        record = topologies.for_session(session_id)
+        if not network_error:
             try:
-                __import__('network_activity').start(topologies.for_session(session_id), bridge)
-            except Exception:
+                response['network_activity'] = network_activity.start(record, bridge, plan, errors)
+            except Exception as error:
+                network_error = ('网络任务未能启动：' + str(error))[:350]
                 logger.exception('network activity could not start for session %s', session_id)
-    return {"result": result, "exceptions": exceptions}
+        if network_error:
+            response['network_activity'] = {'error': network_error}
+        if summary := response.get('network_activity'):
+            record['network_activity_start'] = summary
+            repository.put('deployments', record['deployment_id'], record)
+        return response
 
 @app.post("/api/sessions/{session_id}/stop")
 def stop_session(session_id: int):

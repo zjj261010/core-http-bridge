@@ -491,7 +491,10 @@ def _bundle_body(body):
     if not body.get('dir') or not directory.is_dir():
         raise ValueError('包目录不存在')
     draft = _read_bundle(directory)
-    return {**draft, **body, 'package': body.get('package') or (body.get('manifest') or {}).get('name') or draft['package'], 'image_path': str(directory/'image.tar')}
+    merged = {**draft, **body}
+    merged['package'] = body.get('package') or (merged.get('manifest') or {}).get('name') or draft['package']
+    merged['image_path'] = str(directory / 'image.tar')
+    return merged
 
 
 @router.post('/targets/import/bundle')
@@ -1220,10 +1223,19 @@ def audit_list(action: str | None = None, session_id: int | None = None,
 
 
 @router.get("/drills")
-def drills_list(limit: int = 200):
+def drills_list(limit: int = 200, display_names: bool = False):
     """演练身份列表（drill_id 为数据主键; CORE 会话号可回收, 仅作展示）"""
     import platform_db
-    return JSONResponse({"ok": True, "data": platform_db.query_drills(limit=limit)})
+    rows = platform_db.query_drills(limit=limit)
+    if display_names:
+        import topologies
+        names = {}
+        for deployment in repository.deployment_rows(limit=-1, drill_ids=[row['drill_id'] for row in rows]):
+            if deployment['drill_id'] not in names:
+                names[deployment['drill_id']] = topologies.display_name(deployment)
+        for row in rows:
+            row['display_name'] = names.get(row['drill_id'], row['name'])
+    return JSONResponse({"ok": True, "data": rows})
 
 
 @router.delete("/drills/{drill_id}/data")
@@ -1571,8 +1583,58 @@ def _service_name_owner(name: str) -> str | None:
     return None
 
 
+def unpack_uploaded_delivery(upload_id, cancelled):
+    import shutil
+    import tempfile
+    from pathlib import PurePosixPath
+
+    upload = repository.read('uploads', upload_id)
+    if not upload or not upload.get('archive_path'):
+        raise ValueError('上传的交付包不存在，请重新上传')
+    root = Path(upload['root'])
+    archive = Path(upload['archive_path'])
+    destination = root / 'content'
+    if destination.is_dir():
+        return destination
+    staging = Path(tempfile.mkdtemp(prefix='.unpack-', dir=root))
+    try:
+        with tarfile.open(archive, 'r|*') as package:
+            for member in package:
+                path = PurePosixPath(member.name)
+                if path.is_absolute() or '..' in path.parts or not (member.isdir() or member.isfile()):
+                    raise ValueError('交付包仅支持普通文件和包内目录：' + member.name)
+                target = staging.joinpath(*path.parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with package.extractfile(member) as source, target.open('xb') as output:
+                    while chunk := source.read(4 * 1024 * 1024):
+                        if cancelled():
+                            raise InterruptedError('交付包解包已中断')
+                        output.write(chunk)
+        entries = list(staging.iterdir())
+        if not entries:
+            raise ValueError('交付包为空')
+        extracted = entries[0] if len(entries) == 1 and entries[0].is_dir() else staging
+        try:
+            extracted.rename(destination)
+        except OSError:
+            if not destination.is_dir():
+                raise
+        archive.unlink(missing_ok=True)
+        return destination
+    except FileNotFoundError:
+        if destination.is_dir():
+            return destination
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
 @router.post("/targets/import/bundle/upload")
-async def bundle_upload(request: Request, name: str = ""):
+async def bundle_upload(request: Request, name: str = "", defer_extract: bool = False):
     """整体导入-本机上传：上传整包压缩包（.tar.gz，内含 image.tar/services/manifest.json），
     服务端解包落位 IMAGE_IMPORT_DIR/<包名>/ 并返回清单草稿。确认注册走 /targets/import/bundle/confirm"""
     import re as _re
@@ -1595,6 +1657,13 @@ async def bundle_upload(request: Request, name: str = ""):
                 await asyncio.to_thread(f.write,chunk)
     except Exception as e:
         return _err("UPLOAD_FAILED", str(e)[:200], status=500)
+    if defer_extract:
+        upload_id = repository.identifier('upload')
+        repository.put('uploads', upload_id, {
+            'path': target_dir, 'root': target_dir, 'archive_path': archive, 'created_at': repository.now(),
+        })
+        _audit('bundle.upload', package=pkg, size=size, ok=True)
+        return JSONResponse({'ok': True, 'data': {'package': pkg, 'upload_id': upload_id, 'size': size}})
     # 解包（--no-same-owner; GNU tar 拒绝绝对路径成员; 解包后校验无逃逸）
     rc = await asyncio.to_thread(subprocess.run, f"tar -xzf '{archive}' -C '{target_dir}' --no-same-owner 2>&1",
                         shell=True, capture_output=True, text=True, timeout=120)
@@ -1678,7 +1747,11 @@ def discard_uploads(body:dict):
         record=next(((key,value) for key,value in repository.read('uploads').items() if value['path']==requested),None)
         if record is None: continue  # User-provided server directories are never deleted.
         for job in repository.read('jobs').values():
-            if job['status'] in ('queued','running') and requested in (job['input'].get('dir'),job['input'].get('image_path')):
+            job_input = job['input']
+            if job['status'] in ('queued','running') and (
+                requested in (job_input.get('dir'), job_input.get('source_dir'), job_input.get('image_path')) or
+                job_input.get('bundle_upload_id') == record[0]
+            ):
                 return _err('UPLOAD_IN_USE','上传文件正在被后台任务使用',status=409)
         key,value=record
         shutil.rmtree(value['root'],ignore_errors=False)

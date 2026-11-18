@@ -14,10 +14,13 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 
-def file_digest(path):
+def file_digest(path, *, cancelled=lambda: False):
     h=hashlib.sha256()
     with open(path,'rb') as f:
-        for chunk in iter(lambda:f.read(4*1024*1024),b''): h.update(chunk)
+        for chunk in iter(lambda:f.read(4*1024*1024),b''):
+            if cancelled():
+                raise InterruptedError('归档校验已中断')
+            h.update(chunk)
     return h.hexdigest()
 
 
@@ -50,16 +53,33 @@ def prepare(body):
     return body,mapping
 
 
-def identities(body,previous=None):
+def archive_identity(path, previous, cancelled):
+    stamp = os.stat(path)
+    signature = [stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns]
+    if previous.get('archive_signature') == signature and previous.get('archive_sha256'):
+        return previous['archive_sha256'], signature
+    value = file_digest(path, cancelled=cancelled)
+    stamp = os.stat(path)
+    if signature != [stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns]:
+        raise ValueError('镜像归档在校验时发生变化，请重新续办')
+    return value, signature
+
+
+def identities(body,previous=None, *, cancelled=lambda: False):
     previous=previous or {}
     path=body.get('image_path')
-    if path and os.path.isfile(path): archive=file_digest(path)
-    elif previous.get('image_path')==path: archive=previous.get('archive_sha256')
-    else: archive=None
+    signature = None
+    if path and os.path.isfile(path):
+        archive, signature = archive_identity(path, previous, cancelled)
+    elif previous.get('image_path')==path:
+        archive=previous.get('archive_sha256')
+    else:
+        archive=None
     m=body.get('manifest') or {};image=m.get('image') or {}
     ref=image['name']+':'+image.get('tag','latest') if image.get('name') else None
     values={'image':{'archive_sha256':archive,'declared_ref':ref},'services':{'package':body['package'],'sources':body['python_files'],'templates':body.get('templates') or {},'declared_services':([] if body['python_files'] else [s['name'] for s in m.get('services',[])])},'manifest':{'manifest':clean_manifest(m),'image':{'archive_sha256':archive,'declared_ref':ref},'services':{'package':body['package'],'sources':body['python_files'],'templates':body.get('templates') or {},'declared_services':([] if body['python_files'] else [s['name'] for s in m.get('services',[])])}}}
-    return {k:digest(v) for k,v in values.items()}, {'image_path':path,'archive_sha256':archive,'declared_ref':ref}
+    return {k:digest(v) for k,v in values.items()}, {'image_path':path,'archive_sha256':archive,
+                                                   'archive_signature':signature,'declared_ref':ref}
 
 
 def archive_refs(path):

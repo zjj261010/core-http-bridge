@@ -104,11 +104,12 @@ def template(name,body):
     return repo.publish('template',name,template_body(name,body))
 
 
-def resolve(name,version=None,service_overrides=None):
+def resolve(name,version=None,service_overrides=None, *, prepare_files=True):
     import target_admin as ta
     t=repo.revision('template',name,version)
     if not t:
-        if version is not None: raise ValueError('节点模板版本不存在')
+        if version is not None or not prepare_files:
+            raise ValueError(f'本机缺少节点模板修订：{name}' + (f' / {version}' if version is not None else ''))
         raw=ta._load_store(ta.INSTANCE_STORE).get(name)
         if not raw: raise ValueError('节点模板不存在: '+name)
         t=template(name,raw)
@@ -132,14 +133,14 @@ def resolve(name,version=None,service_overrides=None):
         if target_revision.get('catalog'):
             import image_services
             selection=copy.deepcopy(t.get('service_selection') or {}) if service_overrides is None else copy.deepcopy(service_overrides)
-            chosen,directory=image_services.execution(target_revision,selection)
+            chosen,directory=image_services.execution(target_revision,selection,prepare_files=prepare_files)
             out.update(image=target_revision['image_digest'],image_ref=target_revision['image_ref'],target_name=t['target_name'],target_version=t['target_version'],
                        service_overrides=copy.deepcopy(service_overrides),effective_services=chosen,service_selection=selection,
                        services=[s['execution_name'] for s in chosen])
             return out,[directory]
         if service_overrides is not None:
             raise ValueError('此旧模板尚未迁移服务模式清单，请先在镜像管理中确认配置后保存新模板')
-        mapping,directory=materialize(t['target_name'],target_revision)
+        mapping,directory=(materialize if prepare_files else execution_mapping)(t['target_name'],target_revision)
         dirs.append(directory)
         out.update(image=target_revision.get('image_digest') or target_revision['image_ref'],target_name=t['target_name'],target_version=t['target_version'],image_ref=target_revision['image_ref'])
         out['services']=[mapping.get(s,s) for s in services]

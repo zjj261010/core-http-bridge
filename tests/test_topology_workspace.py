@@ -19,6 +19,38 @@ def definition():
         'extension':{'keep':'unchanged'}}
 
 
+def test_local_import_checks_name_and_template_without_saving(client):
+    stored = definition()
+    client.post('/topologies', json={'definition': stored}).raise_for_status()
+    response = client.post('/topologies/import-check', json={'definition': stored})
+    assert response.json()['data'] == {'same_name': True}
+    stored['nodes'][0].update(instance='deleted-template', instance_version=3)
+    response = client.post('/topologies/import-check', json={'definition': stored})
+    assert response.status_code == 400 and 'deleted-template / 3' in response.text
+    assert len(repo.read('topologies')) == 1
+    assert not repo.read('deployments')
+
+
+def test_history_pages_return_summaries_and_fetch_complete_record_separately(client, mock_bridge):
+    mock_bridge.get_sessions.return_value = []
+    saved = client.post('/topologies', json={'definition':definition()}).json()['data']
+    for index in range(4):
+        run = {'deployment_id':f'run-{index}','drill_id':f'drill-{index}',
+               'created_at':f'2026-11-18 10:00:0{index}', 'status':'closed',
+               'source':definition(), 'topology_id':saved['topology_id'] if index < 3 else None}
+        repo.put('deployments', run['deployment_id'], run)
+    first = client.get('/deployment-history', params={'limit':2, 'topology_id':saved['topology_id']}).json()['data']
+    second = client.get('/deployment-history', params={'limit':2, 'offset':2, 'topology_id':saved['topology_id']}).json()['data']
+    assert [row['deployment_id'] for row in first['items']] == ['run-2','run-1']
+    assert first['has_more'] and not second['has_more']
+    assert [row['deployment_id'] for row in second['items']] == ['run-0']
+    assert 'source' not in first['items'][0] and first['items'][0]['node_count'] == 2
+    assert client.get('/deployments/run-2').json()['data']['source'] == definition()
+    archive = client.get('/topology-workspace', params={'summary':True}).json()['data']['deployments']
+    assert [row['deployment_id'] for row in archive] == ['run-3']
+    assert 'source' in client.get('/topology-workspace').json()['data']['deployments'][0]
+
+
 def test_workspace_shows_unbound_live_session_without_creating_saved_topology(client, mock_bridge):
     mock_bridge.get_sessions.return_value=[summary()]
     result=client.get('/topology-workspace').json()['data']

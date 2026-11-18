@@ -71,7 +71,7 @@ async function deleteLive(f){await f.getByRole('button',{name:'删除会话',exa
   await link(f,'Docker 模板乙 1','原生客户端');await link(f,'Docker 模板甲 3','原生模板 4');
   const saved=await save(page,f);assert.equal(saved.definition.nodes[0].instance,'Docker 模板乙');assert.equal(saved.definition.nodes[2].instance,'Docker 模板甲');assert(!saved.definition.nodes[0].service_overrides);
   const run=await start(page,f),outputs=[];
-  for(const [source,address] of [[2,'10.90.0.1'],[4,'10.90.0.3']]){
+  for(const {node2_id:source,iface1:{ip4:address}} of saved.definition.links){
     const value=await request(page,'POST','/api/sessions/'+run.core_sid+'/nodes/'+source+'/command',{command:`python3 -c "import urllib.request;print(urllib.request.urlopen('http://${address}:8080',timeout=5).status)"`,wait:true,shell:true});
     assert.equal(value.return_code,0,JSON.stringify(value));assert(value.output.includes('200'));outputs.push(value.output.trim());
   }

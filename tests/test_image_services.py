@@ -60,6 +60,20 @@ def test_existing_sessions_and_incomplete_modes_are_saved_not_activated(image_ap
     assert calls==[]
 
 
+def test_activation_lists_only_sessions_that_block_registration(image_api):
+    client, catalog, calls, bridge = image_api
+    stopped = SimpleNamespace(id=1, state=1)
+    bridge.get_sessions.return_value = [stopped, SimpleNamespace(id=2, state=4)]
+    blockers = [{'id': 2, 'state': 4}]
+    assert client.get('/image-services/activation-status').json()['data']['blockers'] == blockers
+    pending = save(client, catalog, [service()], 'apply').json()['data']
+    assert pending['activation_blockers'] == blockers and not calls
+    bridge.get_sessions.return_value = [stopped]
+    applied = save(client, pending, [service()], 'apply').json()['data']
+    assert applied['state'] == 'applied' and len(calls) == 1
+    assert 'activation_blockers' not in applied
+
+
 def test_failed_registration_reuses_saved_revision_and_preserves_last_applied(image_api,monkeypatch):
     client,catalog,calls,bridge=image_api
     first=save(client,catalog,[service()],'apply').json()['data']

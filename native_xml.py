@@ -11,6 +11,15 @@ import versions
 KEY='http_bridge_bindings_v1'
 
 
+def read_bindings(root):
+    metadata = root.find('session_metadata')
+    item = next((x for x in metadata if x.get('name') == KEY), None) if metadata is not None else None
+    bound = json.loads(item.get('value', '{}')) if item is not None else {}
+    if not isinstance(bound, dict):
+        raise ValueError('XML 中的平台绑定必须是对象')
+    return bound
+
+
 def export(bridge,sid):
     import topologies
     with request_file('.xml') as path:
@@ -33,11 +42,7 @@ def load(bridge,text,start=False):
         root=ET.fromstring(text)
         if root.tag!='scenario': raise ValueError('原生 CORE XML 根节点必须是 scenario')
         metadata=root.find('session_metadata')
-        bound={}
-        if metadata is not None:
-            item=next((x for x in metadata if x.get('name')==KEY),None)
-            if item is not None: bound=json.loads(item.get('value','{}'))
-        if not isinstance(bound,dict): raise ValueError('XML 中的平台绑定必须是对象')
+        bound=read_bindings(root)
         deployment_id=repo.identifier('deploy')
         directories=set();required=set()
         for device in root.findall('./devices/device'):

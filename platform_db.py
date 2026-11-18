@@ -313,6 +313,27 @@ def query_events(drill_id=None,limit=200,core_sid=None,before_id=None,after_id=N
     return rows
 
 
+def query_snort_alerts(drill_id, run_id, *, limit, upper_id=None, probe=None, start=None, end=None, search=None):
+    where = ["drill_id=?", "type='snort'", "json_valid(detail)", "json_extract(detail,'$.run_id')=?"]
+    args = [drill_id, run_id]
+    for value, condition in ((upper_id, 'id<?'), (start, 'ts>=?'), (end, 'ts<=?'),
+                             (probe, "json_extract(detail,'$.probe_id')=?")):
+        if value is not None:
+            where.append(condition)
+            args.append(value)
+    if search:
+        fields = ('rule', 'msg', 'probe', 'src_ap', 'dst_ap')
+        where.append('(' + ' OR '.join(
+            f"instr(lower(coalesce(json_extract(detail,'$.{key}'),'')),lower(?))>0" for key in fields
+        ) + ')')
+        args.extend([search] * len(fields))
+    with database.connection(DB_PATH) as connection:
+        rows = connection.execute(
+            f"SELECT id,ts,detail FROM events WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+            [*args, limit])
+        return [{**row, 'detail': json.loads(row['detail'])} for row in rows]
+
+
 def event_cursor(drill_id):
     init()
     with database.connection(DB_PATH) as c:

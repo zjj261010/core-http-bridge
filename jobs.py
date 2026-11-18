@@ -1,8 +1,7 @@
 """Bounded, persistent delivery jobs with explicit piece-wise resume."""
 import concurrent.futures
-import hashlib
+import copy
 import json
-import os
 import threading
 from fastapi import APIRouter, HTTPException
 import repository as repo
@@ -21,28 +20,23 @@ def recover():
             repo.put('jobs',job['job_id'],job)
 
 
-def fingerprint(body):
-    normalized,_=ds.prepare(body)
-    return ds.digest(ds.identities(normalized)[0])
-
-
 def submit(body,prior=None):
     if _stopping.is_set(): raise HTTPException(503,'服务正在停止')
+    if any(key in body and not isinstance(body[key], str) for key in ('dir', 'image_path', 'bundle_upload_id')):
+        raise HTTPException(400,'导入路径或上传编号格式无效')
     if not _slots.acquire(False): raise HTTPException(429,'后台任务已满，请稍后重试')
     try:
-        normalized,_=ds.prepare(body)
-        keys,image_input=ds.identities(normalized,(prior or {}).get('image_input'))
-        job={'job_id':repo.identifier('job'),'status':'queued','input':normalized,'input_keys':keys,'image_input':image_input,'created_at':repo.now(),'updated_at':repo.now(),'result':{'pieces':{}},'resume_from':(prior or {}).get('job_id')}
+        job={'job_id':repo.identifier('job'),'status':'queued','stage':'queued','input':body,
+             'created_at':repo.now(),'updated_at':repo.now(),'result':{'pieces':{}},
+             'resume_from':(prior or {}).get('job_id')}
         if prior:
-            import copy
-            job['previous_pieces']=copy.deepcopy((prior.get('result') or {}).get('pieces',{}))
-            old_image=prior.get('image_input') or {}
-            receipt=(job['previous_pieces'].get('image') or {}).get('receipt') or {}
-            if old_image.get('archive_sha256')==image_input.get('archive_sha256') and not old_image.get('declared_ref') and image_input.get('declared_ref') in receipt.get('images',{}):
-                job['previous_pieces']['image']['input_key']=keys['image']
+            previous = {**(prior.get('previous_pieces') or {}), **(prior.get('result') or {}).get('pieces', {})}
+            job['previous_pieces']=copy.deepcopy(previous)
+            job['image_input']=prior.get('image_input') or {}
+        result = public(job)
         repo.put('jobs',job['job_id'],job)
         _executor.submit(run,job)
-        return public(job)
+        return result
     except Exception:
         _slots.release();raise
 
@@ -57,12 +51,33 @@ def public(job,editable=False):
 def run(job):
     import target_admin as ta
     try:
-        job.update(status='running',message='正在接收交付内容与加载镜像；服务配置在最后确认后生效，docker load 不提供可靠百分比',updated_at=repo.now())
-        repo.put('jobs',job['job_id'],job)
-        def checkpoint(kind,result):
-            job.update(result=result,stage=kind,updated_at=repo.now())
+        def persist(**changes):
+            job.update(updated_at=repo.now(), **changes)
             repo.put('jobs',job['job_id'],job)
-        response=ta._import_delivery(job['input'],checkpoint=checkpoint,reuse=job.get('previous_pieces'),input_keys=job['input_keys'])
+
+        body = job['input']
+        if 'bundle_upload_id' in body and not body.get('source_dir'):
+            persist(status='running',stage='unpacking',message='正在解包交付文件')
+            directory = ta.unpack_uploaded_delivery(body['bundle_upload_id'], _stopping.is_set)
+            body = {**body, 'dir': str(directory)}
+        persist(status='running',stage='validating',message='正在校验归档及交付内容')
+        normalized,_=ds.prepare(body)
+        if body.get('image_path'):
+            normalized['image_path'] = body['image_path']
+        old_image=job.get('image_input') or {}
+        keys,image_input=ds.identities(normalized,old_image,cancelled=_stopping.is_set)
+        previous = job.get('previous_pieces') or {}
+        receipt=(previous.get('image') or {}).get('receipt') or {}
+        if (old_image.get('archive_sha256')==image_input.get('archive_sha256') and
+                not old_image.get('declared_ref') and image_input.get('declared_ref') in receipt.get('images',{})):
+            previous['image']['input_key']=keys['image']
+        persist(input=normalized,input_keys=keys,image_input=image_input,stage='loading',message='正在处理交付内容')
+        def checkpoint(kind,result):
+            state = result['pieces'][kind]['state']
+            message = ('镜像已接收，等待在镜像详情确认' if state == 'pending-confirmation'
+                       else result['pieces'][kind]['detail'])
+            persist(result=result,stage=kind,message=message)
+        response=ta._import_delivery(normalized,checkpoint=checkpoint,reuse=previous,input_keys=keys)
         payload=json.loads(response.body)
         if payload.get('data'): job['result']=payload['data']
         else: job['error']=payload.get('error')
@@ -71,7 +86,9 @@ def run(job):
             pieces=payload['data'].get('pieces',{})
             states=[p.get('ok') for p in pieces.values()]
             status='succeeded' if states and all(x is True for x in states) else 'partial' if any(x is True for x in states) else 'failed'
-        job.update(status=status,message='任务已结束，请查看各件结果',updated_at=repo.now())
+        message = (payload['data']['hint'] if status == 'succeeded' and normalized.get('defer_services')
+                   else '任务已结束，请查看各件结果')
+        job.update(status=status,message=message,updated_at=repo.now())
     except Exception as e:
         job.update(status='failed',message=str(e),updated_at=repo.now())
     finally:

@@ -5,6 +5,8 @@
   P.navigation('target-admin.html');
   const uid=prefix=>prefix+'-'+(crypto.randomUUID?crypto.randomUUID():[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join(''));  // randomUUID 仅安全上下文(HTTPS/localhost)可用, HTTP+IP 访问走 getRandomValues 回退
   const stateName=value=>({applied:'已生效',pending:'已保存待生效',unconfigured:'未配置服务',incomplete:'已保存待完善',failed:'生效失败'})[value]||value;
+  const importStatus={queued:'排队中',running:'处理中',succeeded:'已完成',partial:'部分完成',failed:'失败',interrupted:'已中断'};
+  const importStage={queued:'等待处理',unpacking:'解包',validating:'校验归档',loading:'准备加载',image:'加载镜像',services:'服务配置',manifest:'清单'};
   const guarded=(message,fn)=>async()=>{try{await fn();}catch(error){P.localMessage(message,error.message,true);}};
   const noticeArea=()=>el('div',{'aria-live':'polite'});
   function imageSection(title, contents, actions=null, variant=''){
@@ -15,27 +17,53 @@
   function modeGroup(title,...contents){
     return el('section',{class:'mode-group'},el('h4',{},title),contents);
   }
+  function blockingSessions(sessions = []){
+    const states={2:'配置中',3:'启动中',4:'运行中',5:'停止中'};
+    return sessions.length ? table(['CORE 会话','状态','操作'],sessions.map(session=>[
+      session.id,states[session.state]||'状态待确认',
+      el('a',{href:'/static/topologies.html?session='+encodeURIComponent(session.id),target:'_blank',rel:'noopener'},'查看会话')
+    ])) : null;
+  }
   async function load(){
     const data=await api('/targets');images=data.images;manifests=data.manifests;
     app.replaceChildren(el('header',{class:'page-heading'},el('div',{},el('h1',{},'镜像管理'),el('p',{class:'muted'},'声明镜像提供的完整服务，在模板与节点中选择实际启用项。')),button('导入',importImage,true)),
-      table(['镜像 / 标签','本地大小','导入时间','操作'],images.map(image=>[image.ref,P.bytes(image.size_bytes),image.import_time||'未记录',el('div',{class:'actions'},button('详情',()=>openImage(image.ref),true),button('导出',()=>exportImage(image.ref)),button('删除镜像',()=>removeImage(image.ref)))])),el('section',{id:'jobs',class:'surface'}));
+      el('div',{id:'imageInventory'},imageTable(images)),el('section',{id:'jobs',class:'surface'}));
     await loadJobs();
+  }
+  function imageTable(items){
+    return table(['镜像 / 标签','本地大小','导入时间','操作'],items.map(image=>[
+      image.ref,P.bytes(image.size_bytes),image.import_time||'未记录',
+      el('div',{class:'actions'},button('详情',()=>openImage(image.ref),true),button('导出',()=>exportImage(image.ref)),
+        button('删除镜像',()=>removeImage(image.ref)))
+    ]));
   }
   async function removeImage(ref){if(!confirm('删除本地镜像 '+ref+'？已被容器或部署使用的镜像会被拒绝。'))return;await api('/targets/image/delete','POST',{ref});await load();}
   async function loadJobs(){
     clearTimeout(jobTimer);const area=document.getElementById('jobs');if(!area)return;
     const [jobs,exports]=await Promise.all([api('/jobs'),api('/image-services/exports')]);if(!area.isConnected)return;
-    const imports=table(['时间','状态 / 阶段','结果','操作'],jobs.slice().reverse().map(job=>[
-      job.created_at,job.status+' / '+(job.stage||'等待处理'),
-      el('div',{},job.message||'',Object.entries(job.result?.pieces||{}).map(([name,item])=>el('p',{},name+'：'+item.detail))),
-      ['failed','partial','interrupted'].includes(job.status)?button('续办',()=>resumeImport(job)):button('查看结果',()=>P.modal('任务结果',P.fields(job.result||{}),[button('刷新',loadJobs)]))
-    ]));
+    const imports=table(['时间','状态 / 阶段','结果','操作'],jobs.slice().reverse().map(job=>{
+      const refs=Object.keys(job.result?.pieces?.image?.receipt?.images||{});
+      return [
+        job.created_at,(importStatus[job.status]||job.status)+' · '+(importStage[job.stage]||job.stage||'等待处理'),
+        el('div',{},job.message||'',Object.entries(job.result?.pieces||{}).map(([name,item])=>el('p',{},name+'：'+item.detail))),
+        el('div',{class:'actions'},
+          ['failed','partial','interrupted'].includes(job.status)?button('续办',()=>resumeImport(job)):
+            button('查看结果',()=>P.modal('任务结果',P.fields(job.result||{}),[button('刷新',loadJobs)])),
+          refs.length === 1 ? button('打开镜像详情',()=>openImage(refs[0])) : null)
+      ];
+    }));
     const exported=table(['镜像','状态 / 阶段','结果','操作'],exports.slice().reverse().map(job=>[
       job.image_ref,job.state+' / '+(job.stage||'等待处理'),job.message||'',
       job.state==='succeeded'?el('a',{href:job.download},'下载完整镜像包'):['failed','interrupted'].includes(job.state)?button('重新导出',()=>exportImage(job.image_ref,null,'full')):'后台处理中'
     ]));
     area.replaceChildren(el('h2',{},'导入任务'),imports,el('h2',{},'完整包导出任务'),exported);
-    if(jobs.some(job=>['queued','running'].includes(job.status))||exports.some(job=>['queued','running'].includes(job.state)))jobTimer=setTimeout(()=>loadJobs().catch(error=>P.notice(error.message,true)),2000);
+    const importing=jobs.some(job=>['queued','running'].includes(job.status));
+    if(area.dataset.importing==='true' && !importing){
+      const data=await api('/targets');
+      if(area.isConnected){images=data.images;document.getElementById('imageInventory').replaceChildren(imageTable(images));}
+    }
+    area.dataset.importing=String(importing);
+    if(importing||exports.some(job=>['queued','running'].includes(job.state)))jobTimer=setTimeout(()=>loadJobs().catch(error=>P.notice(error.message,true)),2000);
   }
 
   async function resumeImport(job){const record=await api('/jobs/'+job.job_id),message=noticeArea();const imagePath=input('',()=>{});const body=el('div',{},el('p',{},'沿用已接收文件和已完成结果。如镜像文件已移动，可重新指定路径；配置内容在镜像详情中导入和修改。'),field('新的镜像路径（可留空）',imagePath),message);const modal=P.modal('续办导入',body);modal.footer.append(button('取消',modal.close),button('继续导入',guarded(message,async()=>{const patch=imagePath.value?{image_path:imagePath.value,defer_services:true}:{defer_services:true};await api('/jobs/'+job.job_id+'/resume','POST',patch);modal.close();await loadJobs();}),true));}
@@ -68,7 +96,7 @@
         previewImport({rows,legacy_sources:item.catalog.legacy_sources,legacy_templates:item.catalog.legacy_templates},work,acceptPreview,body);
       }));
       P.replace(body,message,
-        imageSection('基本信息',[metadata,work.message?el('p',{class:'notice'},work.message):null,
+        imageSection('基本信息',[metadata,work.message?el('p',{class:'notice'},work.message):null,blockingSessions(work.activation_blockers),
           work.migration_note?el('p',{class:'muted'},work.migration_note):null],null,'image-metadata'),
         imageSection('服务清单',[table(['服务','软件版本','用途','启动模式','操作'],serviceRows),
           el('p',{class:'muted'},'清单包含镜像的全部服务。暂时不运行时在模板或节点取消启用；移除声明不会卸载镜像软件。')],serviceActions),
@@ -102,8 +130,20 @@
       name.focus({preventScroll:true});
     }
     function deleteDeclaration(service){const area=el('section',{class:'surface'},el('h3',{},'移除 '+service.name+' 的声明？'),el('p',{},'会移除本清单中的该服务及其模式，不卸载软件，不直接停止已有节点。旧模板和历史实现继续保留。若只是本次不运行，请保留声明并在模板或节点取消启用。'),el('p',{class:'muted'},'相关模板修订：'+(work.references?.revisions?.length||0)+'；最终确认时统一核对引用。'),el('div',{class:'actions'},button('保留',render),button('确认移除声明',()=>{work.services=work.services.filter(s=>s.id!==service.id);changed();render();})));body.append(area);area.scrollIntoView({block:'nearest'});}
-    async function review(){if(draft){P.localMessage(message,'请先暂存服务修改或取消当前服务编辑。',true);return;}const result=await api('/image-services/'+work.catalog_id+'/validate','POST',{services:work.services});const sessions=await api('/api/sessions');const acknowledgment=checkbox(false,()=>{apply.disabled=!acknowledgment.querySelector('input').checked||sessions.length>0||result.issues.length>0;},'我已了解统一注册及 CORE 重启可能影响会话、终端和事件订阅。');
-      P.replace(body,message,imageSection('最后确认', [P.fields({声明服务:work.services.map(s=>s.name),新增服务:work.services.filter(s=>!baseline.services.some(old=>old.id===s.id)).map(s=>s.name),移除声明:baseline.services.filter(s=>!work.services.some(now=>now.id===s.id)).map(s=>s.name),当前CORE会话:sessions.length,受引用模板修订:work.references?.revisions||[]}),el('div',{class:'notice'},'此处才保存并统一注册。实现使用独立修订名，正常加载无需主动重启 CORE；需要重启时会影响全部会话。当前存在会话时只允许保存待生效。'),result.issues.length?P.fields({待完善项:result.issues}):null,acknowledgment]));
+    async function review(){
+      if(draft){P.localMessage(message,'请先暂存服务修改或取消当前服务编辑。',true);return;}
+      const result=await api('/image-services/'+work.catalog_id+'/validate','POST',{services:work.services});
+      const status=await api('/image-services/activation-status').catch(()=>null);
+      const blockers=status?.blockers||[];
+      const acknowledgment=checkbox(false,()=>{
+        apply.disabled=!acknowledgment.querySelector('input').checked||!status||blockers.length>0||result.issues.length>0;
+      },'我确认保存并向 CORE 注册此配置。若后续需要重启 CORE，全部会话将受影响。');
+      const guidance=!status?'CORE 状态暂不可用，可以先保存配置。':blockers.length?
+        '请先停止下列活动会话。也可以先保存配置，稍后生效。':'独立修订可以直接注册，已停止的会话可以保留。';
+      P.replace(body,message,imageSection('最后确认', [
+        P.fields({声明服务:work.services.map(s=>s.name),新增服务:work.services.filter(s=>!baseline.services.some(old=>old.id===s.id)).map(s=>s.name),移除声明:baseline.services.filter(s=>!work.services.some(now=>now.id===s.id)).map(s=>s.name),受引用模板修订:work.references?.revisions||[]}),
+        el('div',{class:'notice'},guidance),blockingSessions(blockers),
+        result.issues.length?P.fields({待完善项:result.issues}):null,acknowledgment]));
       modal.content.scrollTop=0;
       const save=async action=>{const record=await api('/image-services/'+work.catalog_id+'/commit','POST',{...work,base_revision:work.revision,action,acknowledge:acknowledgment.querySelector('input').checked,request_id:uid('request')});work={...work,...record};baseline=P.clone(work);dirty=false;render();P.localMessage(message,stateName(record.state)+'。'+(record.message||''),record.state==='failed');await load();};
       const apply=button('确认保存并生效',guarded(message,()=>save('apply')),true);apply.disabled=true;
@@ -155,7 +195,22 @@
     function editor(mode){const fileArea=el('div');
       function files(){fileArea.replaceChildren(table(['用途','文件','摘要','操作'],mode.files.map((item,index)=>[({startup:'启动',shutdown:'停止',validate:'就绪检查'})[item.role],item.name,item.sha256.slice(0,12),el('div',{class:'actions'},el('a',{href:'/image-services/attachments/'+item.sha256+'?name='+encodeURIComponent(item.name),download:item.name},'导出'),button('上移',()=>{if(index){[mode.files[index-1],mode.files[index]]=[mode.files[index],mode.files[index-1]];files();}}),button('移除',()=>{mode.files.splice(index,1);files();validateLocal();}))])));}
       files();const role=select([['startup','启动'],['shutdown','停止'],['validate','就绪检查']],'startup',()=>{});const upload=el('input',{type:'file',multiple:true,onchange:async event=>{try{for(const file of event.target.files){const attachment=await api('/image-services/attachments?name='+encodeURIComponent(file.name)+'&role='+role.value,'POST',file,true);const index=mode.files.findIndex(f=>f.name===attachment.name&&f.role===attachment.role);if(index<0)mode.files.push(attachment);else mode.files[index]=attachment;}files();validateLocal();}catch(error){P.localMessage(message,error.message,true);}}});
-      const override=el('div');function renderPorts(){P.replace(override,checkbox(mode.ports!==null,value=>{mode.ports=value?P.clone(service.ports):null;renderPorts();},'此模式覆盖服务端口（可保留空表表示不监听）'),mode.ports!==null?P.ports(mode.ports):el('p',{class:'muted'},'沿用服务声明的端口'));}renderPorts();
+      const override=el('div');
+      const effectivePorts=el('div');
+      function summarizePorts(){
+        const rows=mode.ports??service.ports;
+        P.replace(effectivePorts,el('p',{class:'muted'},'生效端口声明 · '+(mode.ports===null?'从服务继承':'此模式覆盖')),
+          rows.length?table(['监听地址','协议','端口'],rows.map(row=>[
+            row.address||'0.0.0.0',(row.protocol||'tcp').toUpperCase(),
+            row.end&&row.end!==row.port?row.port+'–'+row.end:row.port
+          ])):el('p',{class:'muted'},'未声明端口'));
+      }
+      function renderPorts(){
+        P.replace(override,checkbox(mode.ports!==null,value=>{mode.ports=value?P.clone(service.ports):null;renderPorts();},
+          '此模式覆盖服务端口'),mode.ports!==null?P.ports(mode.ports,summarizePorts):null,effectivePorts);
+        summarizePorts();
+      }
+      renderPorts();
       const dependencies=catalog.services.filter(s=>s.id!==service.id).map(s=>{const existing=(mode.depends_on||[]).find(d=>d.service_id===s.id),dep={service_id:s.id};const options=select([['','任一模式'],...s.modes.map(m=>[m.id,m.name])],existing?.mode_id||'',value=>{const item=mode.depends_on.find(d=>d.service_id===s.id);if(item)item.mode_id=value||null;});options.disabled=!existing;return el('div',{class:'actions'},checkbox(!!existing,checked=>{mode.depends_on??=[];mode.depends_on=mode.depends_on.filter(d=>d.service_id!==s.id);if(checked)mode.depends_on.push(dep);options.disabled=!checked;},s.name),options);});
       const purpose=field('导入用途',role), filePicker=field('选择脚本文件',upload);
       return imageSection('编辑模式 · '+mode.name,[
@@ -164,11 +219,11 @@
           field('启动方式',select([['script','按脚本启动'],['manual','仅手动操作'],...(mode.implementation?[['legacy','保留原有实现附件']]:[])],mode.strategy,value=>{mode.strategy=value;validateLocal();})),
           field('执行器',select([['sh','sh'],['bash','bash'],['python3','python3'],['shebang','按脚本声明']],mode.interpreter||'sh',value=>mode.interpreter=value)),
           field('工作目录',input(mode.workdir||'/',value=>mode.workdir=value))),
-        field('启动参数',input(mode.args||'',value=>mode.args=value)),
+        field('传给启动脚本的参数',input(mode.args||'',value=>mode.args=value)),
         modeGroup('脚本文件',fileArea,el('div',{class:'form-grid'},purpose,filePicker),
           el('p',{class:'muted'},'脚本随本次模式暂存，服务在镜像详情最后确认时统一注册。')),
         modeGroup('环境变量',P.keyValues(mode.env??=[])),
-        modeGroup('端口',override),
+        modeGroup('端口',override,el('p',{class:'muted'},'端口声明用于组合与就绪检查。脚本实际监听的端口由脚本、启动参数或环境变量决定。')),
         dependencies.length?modeGroup('依赖服务',dependencies):null
       ],null,'mode-editor');
     }
@@ -178,6 +233,40 @@
   function previewImport(preview,catalog,accepted,parent){const content=el('div'),area=imageSection('导入冲突预览',content),message=noticeArea();const choices=preview.rows.map(row=>{row=P.clone(row);const name=input(row.incoming.name,value=>row.incoming.name=value);const action=select([['skip','跳过'],...(row.match_id?[['replace','替换服务及全部模式']]:[]),['add','新增独立服务']],row.action,value=>row.action=value);return {row,controls:[name,row.existing?.name||'无匹配服务',row.incoming.modes.map(m=>m.name).join('、'),action]};});content.append(el('p',{class:'muted'},'新增同名服务前请修改名称；替换包含该服务全部模式与脚本。合入后仍需最后确定。'),table(['导入名称','现有服务','导入模式','处理方式'],choices.map(x=>x.controls),'preview'),message,el('div',{class:'actions'},button('取消预览',()=>area.remove()),button('合入本次编辑',guarded(message,async()=>{const result=await api('/image-services/import/merge','POST',{catalog,preview:{...preview,rows:choices.map(x=>x.row)}});accepted(result.catalog);area.remove();}),true)));parent.append(area);area.scrollIntoView({block:'nearest'});}
   function importImage(){const message=noticeArea(),source=select([['upload','本机上传'],['path','服务器路径']],'upload',render),kind=select([['bundle','完整交付包（tar.gz）'],['image','镜像归档（tar）']],'bundle',render),path=input('',()=>{}),name=input('image-import',()=>{}),file=el('input',{type:'file'}),form=el('div');const modal=P.modal('导入',el('div',{},el('div',{class:'form-grid'},field('来源',source),field('内容',kind)),form,message));
     function render(){form.replaceChildren(field('导入名称',name),source.value==='upload'?field('文件',file):field(kind.value==='bundle'?'服务器包目录':'服务器镜像路径',path),el('p',{class:'muted'},'接收镜像与配置后，在镜像详情中预览服务清单，最后确定才注册。'));}render();
-    modal.footer.append(button('取消',modal.close),button('导入',guarded(message,async()=>{let body={defer_services:true};if(source.value==='path'){if(!path.value.trim())throw Error('请填写服务器路径');body[kind.value==='bundle'?'dir':'image_path']=path.value.trim();}else {if(!file.files[0])throw Error('请选择文件');P.localMessage(message,'正在上传，请保持页面打开。上传完成后后台加载镜像。');if(kind.value==='bundle'){const uploaded=await api('/targets/import/bundle/upload?name='+encodeURIComponent(name.value),'POST',file.files[0],true);body.dir=uploaded.dir;}else{const uploaded=await api('/targets/import/upload?rel_path='+encodeURIComponent(name.value+'/'+file.files[0].name),'POST',file.files[0],true);body.image_path=uploaded.path;}}const job=await api('/jobs/import','POST',body);P.localMessage(message,'已提交后台任务 '+job.job_id+'。完成后打开镜像详情确认服务。');await loadJobs();const poll=async()=>{if(!modal.dialog.open)return;try{const status=await api('/jobs/'+job.job_id);P.localMessage(message,status.message||status.status);if(['queued','running'].includes(status.status))setTimeout(poll,1500);else{await load();const refs=Object.keys(status.result?.pieces?.image?.receipt?.images||{});if(refs.length===1){modal.close();await openImage(refs[0]);}}}catch(error){P.localMessage(message,error.message,true);}};setTimeout(poll,1000);}),true));}
+    modal.footer.append(button('取消',modal.close),button('导入',guarded(message,async()=>{
+      const body={defer_services:true};
+      if(source.value==='path'){
+        if(!path.value.trim())throw Error('请填写服务器路径');
+        body[kind.value==='bundle'?'dir':'image_path']=path.value.trim();
+      }else{
+        if(!file.files[0])throw Error('请选择文件');
+        P.localMessage(message,'正在上传，请保持页面打开。文件接收后，可在后台继续处理。');
+        if(kind.value==='bundle'){
+          const uploaded=await api('/targets/import/bundle/upload?defer_extract=true&name='+encodeURIComponent(name.value),'POST',file.files[0],true);
+          if(uploaded.upload_id)body.bundle_upload_id=uploaded.upload_id;else body.dir=uploaded.dir;
+        }else{
+          const uploaded=await api('/targets/import/upload?rel_path='+encodeURIComponent(name.value+'/'+file.files[0].name),'POST',file.files[0],true);
+          body.image_path=uploaded.path;
+        }
+      }
+      const job=await api('/jobs/import','POST',body);
+      P.localMessage(message,'已提交后台任务。可以关闭弹窗，在导入任务列表查看进度。');
+      await loadJobs();
+      const poll=async()=>{
+        if(!modal.dialog.open)return;
+        try{
+          const status=await api('/jobs/'+job.job_id);
+          if(!modal.dialog.open)return;
+          P.localMessage(message,status.message||importStatus[status.status]||status.status);
+          if(['queued','running'].includes(status.status))setTimeout(poll,1500);
+          else{
+            await load();
+            const refs=Object.keys(status.result?.pieces?.image?.receipt?.images||{});
+            if(refs.length===1 && modal.dialog.open){modal.close();await openImage(refs[0]);}
+          }
+        }catch(error){P.localMessage(message,error.message,true);}
+      };
+      setTimeout(poll,1000);
+    }),true));}
   load().catch(error=>P.notice(error.message,true));
 })();

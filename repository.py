@@ -34,12 +34,32 @@ CREATE TABLE IF NOT EXISTS schema_migrations(name TEXT PRIMARY KEY,applied_at TE
 _schema_lock=threading.RLock()
 
 
+def _history_indexes(connection):
+    if connection.execute("SELECT 1 FROM schema_migrations WHERE name='history-query-v1'").fetchone():
+        return
+    connection.execute("""CREATE INDEX IF NOT EXISTS deployment_history_time ON documents(
+        COALESCE(json_extract(body,'$.created_at'),''),name) WHERE collection='deployments'""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS deployment_history_drill ON documents(
+        json_extract(body,'$.drill_id')) WHERE collection='deployments'""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS deployment_history_topology ON documents(
+        COALESCE(json_extract(body,'$.topology_id'),json_extract(body,'$.captured_topology_id')),
+        COALESCE(json_extract(body,'$.created_at'),''),name) WHERE collection='deployments'""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS network_activity_deployment ON documents(
+        json_extract(body,'$.deployment_id'),json_extract(body,'$.created_at'),json_extract(body,'$.started_ns'),name)
+        WHERE collection='network_activity'""")
+    connection.execute("""CREATE INDEX IF NOT EXISTS snort_batch_events ON events(
+        drill_id,json_extract(detail,'$.run_id'),id) WHERE type='snort' AND json_valid(detail)""")
+    connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES('history-query-v1',?)", (now(),))
+
+
 def initialize():
     platform_db.init()
     if database.current(platform_db.DB_PATH): return
     with _schema_lock, database.connection(platform_db.DB_PATH) as c:
         table=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
-        if table and c.execute("SELECT 1 FROM schema_migrations WHERE name='plan-closure-v1'").fetchone(): return
+        if table and c.execute("SELECT 1 FROM schema_migrations WHERE name='plan-closure-v1'").fetchone():
+            _history_indexes(c)
+            return
         c.executescript(_SCHEMA)
         columns={r[1] for r in c.execute('PRAGMA table_info(revisions)')}
         if 'publication_state' not in columns:
@@ -59,6 +79,7 @@ def initialize():
                 _revision_refs(c,r['kind'],r['name'],r['version'],json.loads(r['body']),legacy=True)
             c.execute("INSERT INTO schema_migrations VALUES('revision-references-v1',?)",(now(),))
         c.execute("INSERT OR IGNORE INTO schema_migrations VALUES('plan-closure-v1',?)",(now(),))
+        _history_indexes(c)
 
 
 @contextlib.contextmanager
@@ -150,6 +171,64 @@ def read(collection, name=None):
             r = c.execute('SELECT body FROM documents WHERE collection=? AND name=?', (collection,name)).fetchone()
             return json.loads(r[0]) if r else None
         return {r['name']: json.loads(r['body']) for r in c.execute('SELECT name,body FROM documents WHERE collection=?', (collection,))}
+
+
+_DEPLOYMENT_FIELDS = ('core_sid', 'drill_id', 'status', 'created_at', 'topology_id', 'revision',
+                      'captured_topology_id', 'captured_topology_name', 'captured_topology_revision',
+                      'topology_name', 'network_activity_start', 'diagnostics', 'error')
+_DEPLOYMENT_TOPOLOGY = "COALESCE(json_extract(body,'$.topology_id'),json_extract(body,'$.captured_topology_id'))"
+_DEPLOYMENT_NETWORK = """COALESCE(json_extract(body,'$.execution_definition.network_activity'),
+    json_extract(body,'$.source.network_activity'),json_extract(body,'$.snapshot.network_activity'))"""
+
+
+def deployment_rows(*, limit, offset=0, topology_id=None, drill_ids=None,
+                    with_network=False, archived=False, include_bindings=False):
+    fields = ','.join(f"json_extract(body,'$.{key}') AS {key}" for key in _DEPLOYMENT_FIELDS)
+    projection = f"""name AS deployment_id,{fields}, {_DEPLOYMENT_NETWORK} IS NOT NULL AS has_network_activity,
+        json_extract(body,'$.native_xml') IS NOT NULL AS has_native_xml,
+        COALESCE(json_extract(body,'$.source.name'),json_extract(body,'$.execution_definition.name'),
+                 json_extract(body,'$.snapshot.name')) AS definition_name,
+        COALESCE(json_array_length(body,'$.source.nodes'),json_array_length(body,'$.snapshot.nodes'),
+                 json_array_length(body,'$.execution_definition.nodes'),0) +
+        COALESCE(json_array_length(body,'$.source.wlans'),json_array_length(body,'$.snapshot.wlans'),0) AS node_count"""
+    where = ["collection='deployments'"]
+    args = []
+    if topology_id:
+        where.append(_DEPLOYMENT_TOPOLOGY + "=?")
+        args.append(topology_id)
+    if drill_ids is not None:
+        if not drill_ids:
+            return []
+        where.append("json_extract(body,'$.drill_id') IN (" + ','.join('?' for _ in drill_ids) + ')')
+        args.extend(drill_ids)
+    if with_network:
+        where.append(_DEPLOYMENT_NETWORK + " IS NOT NULL")
+    if archived:
+        where.append("COALESCE(json_extract(body,'$.status'),'') NOT IN ('running','defined','stopped')")
+        where.append(f"NOT EXISTS (SELECT 1 FROM documents AS saved WHERE saved.collection='topologies' "
+                     f"AND saved.name={_DEPLOYMENT_TOPOLOGY.replace('body,', 'documents.body,')})")
+    if include_bindings:
+        projection += ",json_extract(body,'$.bindings') AS bindings"
+    with connection() as c:
+        rows = c.execute(f"SELECT {projection} FROM documents WHERE {' AND '.join(where)} "
+                         "ORDER BY COALESCE(json_extract(body,'$.created_at'),'') DESC,name DESC LIMIT ? OFFSET ?",
+                         [*args, limit, offset])
+        result = [dict(row) for row in rows]
+    for row in result:
+        for key in ('network_activity_start', 'diagnostics', 'bindings'):
+            if row.get(key):
+                row[key] = json.loads(row[key])
+    return result
+
+
+def network_runs(deployment_id, *, limit=-1, offset=0, summary=False):
+    fields = "name AS run_id,json_extract(body,'$.created_at') AS created_at" if summary else 'body'
+    with connection() as c:
+        rows = c.execute(f"""SELECT {fields} FROM documents
+            WHERE collection='network_activity' AND json_extract(body,'$.deployment_id')=?
+            ORDER BY json_extract(body,'$.created_at') DESC,json_extract(body,'$.started_ns') DESC,name DESC
+            LIMIT ? OFFSET ?""", (deployment_id, limit, offset))
+        return [dict(row) if summary else json.loads(row['body']) for row in rows]
 
 
 def put(collection, name, body):

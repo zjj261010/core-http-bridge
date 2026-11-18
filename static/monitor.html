@@ -48,10 +48,11 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 .controls button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 </style>
 <link rel="stylesheet" href="/static/workbench.css?v=20261117">
+<link rel="stylesheet" href="/static/resource-editor.css?v=20261118-11">
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
 <script src="/static/platform-ui.js?v=20261118-3"></script>
-<script src="/static/monitor-context.js?v=20261118-3"></script>
-<script src="/static/network-activity.js?v=20261118-1"></script>
+<script src="/static/monitor-context.js?v=20261118-4"></script>
+<script src="/static/network-activity.js?v=20261118-3"></script>
 <script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="bridge-page">
@@ -80,7 +81,11 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
     <h3>背景流量与 Snort 告警</h3>
     <label for="networkDeployment">拓扑运行</label>
     <select id="networkDeployment"><option value="">选择运行记录…</option></select>
-    <div id="networkRuntime"></div>
+    <div class="controls">
+      <button type="button" id="networkPrevious" disabled>较新运行</button>
+      <button type="button" id="networkNext" disabled>较早运行</button>
+    </div>
+    <div id="networkRuntime" class="resource-page"></div>
   </div>
 
   <!-- CORE 实时流 -->
@@ -124,6 +129,7 @@ var lastTicks = null;
 var esCpu = null, esTp = null, esEv = null;
 var streamGeneration=0;
 let stopNetworkRuntime = () => {};
+let networkOffset = 0, networkPageToken = 0;
 
 function fmtBps(v) {
   // CORE throughput 单位 bit/s(收+发合计) → 可读单位
@@ -213,7 +219,7 @@ function tbl(items, deep) {
 // ── 历史指标（platform.db）──
 async function loadDrillOptions() {
   try {
-    var r = await fetch('/drills');
+    var r = await fetch('/drills?display_names=true');
     var drills = (await r.json()).data || [];
     var opts = '<option value="">选择运行记录…</option>' + drills.map(function(d) {
       return '<option value="' + esc(d.drill_id) + '">' + esc(MonitorContext.historyLabel(d)) + '</option>';
@@ -227,8 +233,10 @@ async function loadHistory() {
   var drill = $('histDrill').value;
   if (!drill) return;
   try {
+    await MonitorContext.loadHistory(drill);
     var r = await fetch('/metrics?drill_id=' + encodeURIComponent(drill) + '&limit=2000');
     var entries = (await r.json()).data.entries || [];
+    if ($('histDrill').value !== drill) return;
     if (!entries.length) { $('histTbl').innerHTML = '<div class="empty">该演练暂无采样数据（RUNTIME 期间才开始采样）</div>'; return; }
     // 按节点聚合: 最新一拍 + 采样数
     var byNode = {};
@@ -270,18 +278,31 @@ async function loadSessions() {
 }
 async function refreshWorkspace(inherit=false){
   try{
-    const workspace=await MonitorContext.refresh();await Promise.all([loadSessions(),loadDrillOptions()]);
+    await MonitorContext.refresh();await Promise.all([loadSessions(),loadDrillOptions()]);
     if(inherit){const current=MonitorContext.inherit();if(current){$('sessSel').value=String(current.id);if(current.drill_id)$('histDrill').value=current.drill_id;$('contextMessage').textContent='当前拓扑：'+current.display_name;}}
-    const network = $('networkDeployment');
-    const previous = network.value;
-    const runs = workspace.deployments.filter(run => (run.execution_definition || run.source || run.snapshot)?.network_activity);
-    const current = MonitorContext.run(MonitorContext.selected?.drill_id)?.deployment_id;
-    network.replaceChildren(new Option('选择运行记录…',''), ...runs.slice().reverse().map(run =>
-      new Option(run.display_name + ' · ' + run.current_status + ' · ' + run.created_at, run.deployment_id)));
-    network.value = runs.some(run => run.deployment_id === previous) ? previous :
-      runs.some(run => run.deployment_id === current) ? current : '';
-    if (previous !== network.value || inherit === true) openNetworkRuntime();
+    await loadNetworkDeployments(networkOffset, inherit);
   }catch(error){$('contextMessage').textContent='暂时无法读取会话状态：'+error.message;}
+}
+async function loadNetworkDeployments(offset, inherit=false) {
+  const token = ++networkPageToken;
+  try {
+    const history = await Platform.api('/deployment-history?with_network=true&limit=25&offset=' + offset);
+    if (token !== networkPageToken) return;
+    const network = $('networkDeployment'), previous = network.value;
+    const live = MonitorContext.run(MonitorContext.selected?.drill_id);
+    const items = history.items;
+    if (inherit && live?.has_network_activity && !items.some(row => row.deployment_id === live.deployment_id)) items.unshift(live);
+    network.replaceChildren(new Option('选择运行记录…',''), ...items.map(run =>
+      new Option(run.display_name + ' · ' + (run.created_at || '—'), run.deployment_id)));
+    network.value = items.some(run => run.deployment_id === previous) ? previous :
+      inherit && live && items.some(run => run.deployment_id === live.deployment_id) ? live.deployment_id : '';
+    if (previous !== network.value || inherit) openNetworkRuntime();
+    networkOffset = offset;
+    $('networkPrevious').disabled = !offset;
+    $('networkNext').disabled = !history.has_more;
+  } catch (error) {
+    if (token === networkPageToken) $('contextMessage').textContent='暂时无法读取网络运行历史：'+error.message;
+  }
 }
 function openNetworkRuntime() {
   stopNetworkRuntime();
@@ -368,6 +389,8 @@ function toggleStreams() {
 
 $('sessSel').addEventListener('change',()=>{MonitorContext.select($('sessSel').value);const current=MonitorContext.session($('sessSel').value);$('contextMessage').textContent=current?'当前拓扑：'+current.display_name:'';closeStreams();['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='未订阅');});
 $('networkDeployment').addEventListener('change',openNetworkRuntime);
+$('networkPrevious').addEventListener('click',() => loadNetworkDeployments(Math.max(0,networkOffset-25)));
+$('networkNext').addEventListener('click',() => loadNetworkDeployments(networkOffset+25));
 window.addEventListener('pagehide',closeStreams);
 window.addEventListener('pagehide',() => stopNetworkRuntime());
 function tick() { pollHost(); pollContainers(); }
