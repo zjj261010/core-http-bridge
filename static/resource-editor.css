@@ -1,6 +1,6 @@
 .resource-page{padding:0;color:var(--fg);background:var(--bg);font:14px/1.6 system-ui,sans-serif}
 .resource-page main{padding:24px;max-width:1440px;margin:auto}
-.page-heading,.actions,.resource-dialog header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.page-heading,.actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .page-heading{margin-bottom:22px}.page-heading h1{margin:0}.muted{color:var(--fg2)}
 .actions{justify-content:flex-start}.surface{padding:20px;background:var(--bg2);border:1px solid var(--bg3);border-radius:12px;margin:16px 0}
 .data-table-wrap{overflow:auto;margin:12px 0} .resource-page table,.resource-dialog table{width:100%;border-collapse:collapse}
@@ -12,10 +12,38 @@
 .resource-page input,.resource-page select,.resource-page textarea,.resource-dialog input,.resource-dialog select,.resource-dialog textarea{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:7px;padding:7px 9px;max-width:100%;min-width:0}
 .form-field{display:flex;flex-direction:column;gap:6px;margin:10px 0;min-width:0}.form-field>span{color:var(--fg2)}.form-field input,.form-field select,.form-field textarea{width:100%}
 .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.check-field{display:flex;gap:8px;align-items:center;margin:12px 0}.check-field input{width:auto}
-.resource-dialog{padding:0;background:var(--bg2);color:var(--fg);border:1px solid var(--bg3);border-radius:14px;width:min(1000px,94vw);max-height:90vh;overflow:auto}
-.resource-dialog::backdrop{background:rgb(10 17 30 / .55)}.resource-dialog header,.resource-dialog footer{padding:16px 22px;border-bottom:1px solid var(--bg3)}.resource-dialog footer{border-bottom:0;border-top:1px solid var(--bg3)}.resource-dialog h2,.resource-dialog h3{margin:0}.dialog-content{padding:20px 22px}.resource-dialog section{margin:16px 0}.resource-dialog .surface{background:var(--bg)}
+.resource-dialog{padding:0;background:var(--bg2);color:var(--fg);border:1px solid var(--bg3);border-radius:14px;width:min(1000px,94vw);max-height:90vh;max-height:90dvh;overflow:hidden}
+.resource-dialog[open]{display:flex;flex-direction:column}
+.resource-dialog::backdrop{background:rgb(10 17 30 / .55)}
+.resource-dialog>header,.resource-dialog>footer{flex:none;padding:14px 22px;background:var(--bg2)}
+.resource-dialog>header{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:12px;border-bottom:1px solid var(--bg3)}
+.resource-dialog>header h2{align-self:center;font-size:18px;line-height:1.4;overflow-wrap:anywhere}
+.resource-dialog>footer{border-top:1px solid var(--bg3)}
+.resource-dialog>footer:empty{display:none}
+.resource-dialog h2,.resource-dialog h3{margin:0}
+.dialog-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:20px 22px;scroll-padding-block:16px}
+.resource-dialog section{margin:16px 0}.resource-dialog .surface{background:var(--bg)}
+
+.image-dialog .dialog-content{background:#f3f6fa}
+.image-dialog-section{min-width:0;border:1px solid #b9c7d6;border-radius:10px;background:var(--bg2)}
+.image-dialog .image-dialog-section{margin:0 0 16px}
+.image-dialog .image-dialog-section:last-child{margin-bottom:0}
+.image-dialog-section-title{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:11px 16px;border-bottom:1px solid #b9c7d6;border-radius:9px 9px 0 0;background:#e9eff6}
+.image-dialog-section-title h3{min-width:0;font-size:15px;overflow-wrap:anywhere}
+.image-dialog-section-body{min-width:0;padding:14px 16px}
+.image-dialog-section-body>:first-child{margin-top:0}
+.image-dialog-section-body>:last-child{margin-bottom:0}
+.image-dialog-section-body table{border-collapse:separate}
+.image-dialog-section-body th:first-child,.image-dialog-section-body td:first-child{padding-left:12px}
+.image-dialog-section-body input[type=file]{width:100%}
+.image-dialog-section-body .mode-group{border-top:1px solid var(--bg3);padding-top:14px;margin-top:16px}
+.mode-group h4{margin:0 0 10px;font-size:14px}
+.mode-group .data-table-wrap{margin:0 0 12px}
+.image-dialog .mode-editor{border-color:var(--accent)}
+.mode-editor .image-dialog-section-title{border-color:var(--accent);background:#e6f3f7}
+.mode-row-active{color:var(--accent);font-weight:600}
 .notice:not(:empty){padding:12px 16px;border-radius:8px;background:var(--accent-soft,#e8f6fb);color:var(--fg);margin:12px 0}.notice.error:not(:empty){border-left:4px solid var(--err);color:var(--err)}.notice:empty{display:none}
 .changed-row{border-left:3px solid var(--accent);padding-left:8px}.field-list{display:grid;gap:8px}.topology-tabs{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}.topology-grid{display:grid;grid-template-columns:minmax(170px,1fr) minmax(0,4fr);gap:20px}.node-card{padding:10px;border:1px solid var(--bg3);border-radius:8px;margin:8px 0}.node-card[aria-pressed=true]{border-color:var(--accent);background:var(--bg2)}
 .topology-canvas{position:relative;min-height:330px;background:var(--bg);overflow:auto;border:1px solid var(--bg3);border-radius:10px}.topology-canvas svg{position:absolute;inset:0;pointer-events:none}.topology-canvas .canvas-node{position:absolute;touch-action:none;padding:10px 14px;max-width:180px;overflow-wrap:anywhere;background:var(--bg2);border:1px solid var(--accent);border-radius:8px;color:var(--fg)}
-@media(max-width:700px){.resource-page main{padding:14px}.form-grid,.topology-grid{grid-template-columns:minmax(0,1fr)}.resource-dialog{width:96vw}.dialog-content{padding:14px}.resource-dialog header,.resource-dialog footer{padding:14px}.data-table-wrap table{min-width:510px}.resource-page .nav{flex-wrap:wrap}}
+@media(max-width:700px){.resource-page main{padding:14px}.form-grid,.topology-grid{grid-template-columns:minmax(0,1fr)}.resource-dialog{width:96vw}.dialog-content{padding:12px}.resource-dialog>header,.resource-dialog>footer{padding:10px 12px}.image-dialog-section-title,.image-dialog-section-body{padding:10px 12px}.data-table-wrap table{min-width:510px}.image-dialog .image-metadata table{min-width:0}.resource-page .nav{flex-wrap:wrap}}
 @media(pointer:coarse){.resource-page button,.resource-dialog button{min-height:44px}.resource-page input,.resource-dialog input,.resource-page select,.resource-dialog select{font-size:16px}}

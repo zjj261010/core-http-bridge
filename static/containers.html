@@ -33,7 +33,12 @@ td{padding:10px 12px;border-top:1px solid var(--bg3);font-size:13px;vertical-ali
 .st.down{background:#3b2f05;color:var(--warn);border:1px solid #713f12}
 .toast{position:fixed;top:60px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:13px;z-index:300;display:none;max-width:420px}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;display:none}
-.modal-box{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg2);border:1px solid var(--bg3);border-radius:10px;padding:24px;width:480px}
+.modal-bg .modal-box{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:480px;max-height:calc(100dvh - 24px);padding:0;margin:0;overflow:hidden;display:flex;flex-direction:column}
+.modal-box .modal-header,.modal-box .modal-footer{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px}
+.modal-box .modal-header{justify-content:space-between;border-bottom:1px solid var(--border)}
+.modal-box .modal-header h3{margin:0}
+.modal-box .modal-body{min-height:0;padding:8px 16px 16px;overflow:auto;overscroll-behavior:contain}
+.modal-box .modal-footer{justify-content:flex-end;border-top:1px solid var(--border)}
 h3{margin-bottom:16px;font-size:15px}
 label{display:block;margin-bottom:4px;color:var(--fg2);font-size:12px;margin-top:10px}
 input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:var(--fg);border:1px solid var(--bg3);border-radius:6px;font-size:13px}
@@ -75,8 +80,12 @@ input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:v
 
 <!-- 新建容器弹窗 -->
 <div class="modal-bg" id="runModal">
-<div class="modal-box">
-<h3>新建独立容器（普通隔离，验证用）</h3>
+<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="runModalTitle">
+<div class="modal-header">
+  <h3 id="runModalTitle">新建独立容器（普通隔离，验证用）</h3>
+  <button type="button" class="btn" onclick="hideModal('runModal')">关闭</button>
+</div>
+<div class="modal-body">
 <label>镜像（来自镜像管理）</label>
 <select id="runImage"><option value="">加载中…</option></select>
 <label>容器名（留空自动 standalone-镜像名）</label>
@@ -85,7 +94,8 @@ input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:v
 <input type="text" id="runPorts" placeholder="">
 <label>启动命令（可选——路线 B 镜像无 CMD，填 tail -f /dev/null 保活后再 exec）</label>
 <input type="text" id="runCmd" placeholder="tail -f /dev/null">
-<div style="margin-top:14px;text-align:right">
+</div>
+<div class="modal-footer">
   <button class="btn" onclick="hideModal('runModal')">取消</button>
   <button class="btn primary" onclick="doRun()">启动</button>
 </div>
