@@ -4,6 +4,7 @@
 .topology-card{border:1px solid var(--border);border-radius:12px;padding:18px;min-width:0;background:var(--bg2)}
 .topology-card h3{margin:0;overflow-wrap:anywhere}.topology-card p{margin:9px 0}.topology-card small,.data-table-wrap small{display:block}
 .topology-toolbar{margin-bottom:16px}.topology-toolbar .form-field{max-width:550px}.topology-toolbar p{margin:6px 0}
+.resource-page .topology-list-filters{width:min(100%,420px);margin:0}
 .topology-workspace{display:grid;grid-template-columns:190px minmax(0,1fr) 290px;gap:16px;align-items:start;min-width:0}
 .topology-palette,.topology-center,.topology-inspector{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px;min-width:0}
 .topology-palette h3,.topology-inspector h3{margin-top:0}.topology-palette h4{margin:20px 0 7px;color:var(--fg2);font-size:12px}

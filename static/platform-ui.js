@@ -75,7 +75,14 @@ window.Platform = (() => {
     node.value=value??'';return node;
   }
   function checkbox(value,change,label='') {return el('label',{class:'check-field'},el('input',{type:'checkbox',checked:!!value,onchange:event=>change(event.target.checked)}),label);}
-  function table(headers,rows) {return el('div',{class:'data-table-wrap'},el('table',{},el('thead',{},el('tr',{},headers.map(text=>el('th',{},text)))),el('tbody',{},rows.length?rows.map(row=>el('tr',{},row.map(cell=>el('td',{},cell)))):el('tr',{},el('td',{colSpan:headers.length,class:'empty'},'暂无记录')))));}
+  function table(headers, rows, layout = '') {
+    const headings = headers.map(text => el('th', {scope:'col'}, text));
+    const body = rows.length
+      ? rows.map(row => el('tr', {}, row.map(cell => el('td', {}, cell))))
+      : el('tr', {}, el('td', {colSpan:headers.length,class:'empty'}, '暂无记录'));
+    return el('div', {class:'data-table-wrap'}, el('table', {class:layout ? 'data-table-' + layout : ''},
+      el('thead', {}, el('tr', {}, headings)), el('tbody', {}, body)));
+  }
   function notice(text, error=false) {const area=document.getElementById('message');if(area){area.className=error?'notice error':'notice';area.textContent=text;}}
   function localMessage(area,text,error=false){area.className=error?'notice error':'notice';area.textContent=text;}
   function modal(title, body, actions=[], closed=()=>{}) {
@@ -98,21 +105,46 @@ window.Platform = (() => {
     if (value === null || value === undefined) return el('span',{},'—');
     if (typeof value !== 'object') return el('span',{},String(value));
     if (Array.isArray(value)) return value.length?el('div',{class:'field-list'},value.map((item,index)=>el('div',{},el('span',{class:'muted'},String(index+1)+'. '),fields(item)))):el('span',{},'无');
-    return table(['项目','内容'],Object.entries(value).map(([name,item])=>[name,fields(item)]));
+    return table(['项目','内容'],Object.entries(value).map(([name,item])=>[name,fields(item)]),'fields');
   }
   function download(blob,name){const url=URL.createObjectURL(blob),a=el('a',{href:url,download:name});a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   async function downloadConfig(catalog){const response=await fetch('/image-services/export/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({catalog})});if(!response.ok){const data=await response.json();throw Error(errorText(data.detail||data.error));}download(await response.blob(),'image-config.zip');}
   function ports(rows,changed=()=>{}) {
     const area=el('div');
-    function render(){area.replaceChildren(table(['起始端口','结束端口','协议','监听地址','IPv6 独占',''],rows.map((row,index)=>[
-      input(row.port,v=>{row.port=Number(v);changed();},'number'),input(row.end||row.port,v=>{row.end=Number(v);changed();},'number'),
-      select([['tcp','TCP'],['udp','UDP']],row.protocol||'tcp',v=>{row.protocol=v;changed();}),
-      input(row.address||'0.0.0.0',v=>{row.address=v;changed();}),checkbox(row.ipv6_only,v=>{row.ipv6_only=v;changed();}),button('移除',()=>{rows.splice(index,1);render();changed();})
-    ])),button('添加端口',()=>{rows.push({port:80,protocol:'tcp',address:'0.0.0.0'});render();changed();}));}
+    const headers=['起始端口','结束端口','协议','监听地址','IPv6 独占','操作'];
+    function render(){
+      const controls=rows.map((row,index)=>{
+        const cells=[
+          input(row.port,v=>{row.port=Number(v);changed();},'number'),
+          input(row.end||row.port,v=>{row.end=Number(v);changed();},'number'),
+          select([['tcp','TCP'],['udp','UDP']],row.protocol||'tcp',v=>{row.protocol=v;changed();}),
+          input(row.address||'0.0.0.0',v=>{row.address=v;changed();})
+        ];
+        const exclusive=checkbox(row.ipv6_only,v=>{row.ipv6_only=v;changed();});
+        [...cells,exclusive.querySelector('input')].forEach((control,column)=>{
+          control.setAttribute('aria-label',headers[column]+' · 第 '+(index+1)+' 行');
+        });
+        return [...cells,exclusive,button('移除',()=>{rows.splice(index,1);render();changed();})];
+      });
+      area.replaceChildren(table(headers,controls,'ports'),
+        button('添加端口',()=>{rows.push({port:80,protocol:'tcp',address:'0.0.0.0'});render();changed();}));
+    }
     render();return area;
   }
   function keyValues(rows,changed=()=>{}) {
-    const area=el('div');function render(){area.replaceChildren(table(['名称','值',''],rows.map((row,index)=>[input(row.name,v=>{row.name=v;changed();}),input(row.value,v=>{row.value=v;changed();}),button('移除',()=>{rows.splice(index,1);render();changed();})])),button('添加变量',()=>{rows.push({name:'',value:''});render();}));}render();return area;
+    const area=el('div');
+    function render(){
+      const controls=rows.map((row,index)=>{
+        const name=input(row.name,v=>{row.name=v;changed();});
+        const value=input(row.value,v=>{row.value=v;changed();});
+        name.setAttribute('aria-label','变量名称 · 第 '+(index+1)+' 行');
+        value.setAttribute('aria-label','变量值 · 第 '+(index+1)+' 行');
+        return [name,value,button('移除',()=>{rows.splice(index,1);render();changed();})];
+      });
+      area.replaceChildren(table(['名称','值','操作'],controls,'variables'),
+        button('添加变量',()=>{rows.push({name:'',value:''});render();}));
+    }
+    render();return area;
   }
   function navigation(active){const nav=document.querySelector('nav.nav');if(!nav)return;nav.replaceChildren(el('a',{href:'/',class:'nav-home'},'CORE BRIDGE'),...[['target-admin.html','镜像管理'],['containers.html','容器管理'],['instances.html','节点模板'],['topologies.html','拓扑管理'],['monitor.html','数据监测'],['audit.html','审计日志']].map(([page,name])=>el('a',{href:'/static/'+page,class:page===active?'on':''},name)));}
   function describe(value){if(value===null||value===undefined)return '无';if(Array.isArray(value))return value.map(describe).join('；');if(typeof value==='object')return Object.entries(value).map(([key,item])=>key+'：'+describe(item)).join('；');return String(value);}

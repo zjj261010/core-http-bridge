@@ -129,13 +129,12 @@
   }
   function renderList() {
     const entries = cards();
-    const search = input(query, value => { query = value; updateCards(); }); search.placeholder = '搜索拓扑名称';
-    search.setAttribute('aria-label', '搜索拓扑');
+    const search = input(query, value => { query = value; updateCards(); }); search.placeholder = '按名称搜索';
     const choice = select([['all','全部拓扑'],['saved','已保存配置'],['session','未保存的活动会话'],['history','历史拓扑']], filter, value => {filter = value; updateCards();});
     const container = el('div', {class:'topology-cards'});
     app.append(el('section', {class:'surface'}, el('div', {class:'page-heading'}, el('div', {}, el('h2', {}, '拓扑列表'),
       el('p', {class:'muted'}, data.topologies.length + ' 个保存配置 · ' + data.sessions.length + ' 个活动会话 · 状态更新 ' + stamp(data.updated_at))),
-      el('div', {class:'actions'}, search, field('显示范围', choice))), container));
+      el('div', {class:'form-grid topology-list-filters'}, field('搜索拓扑', search), field('显示范围', choice))), container));
     function updateCards() {
       const visible = entries.filter(item => (filter === 'all' || item.kind === filter) && item.name.toLowerCase().includes(query.toLowerCase()));
       container.replaceChildren(...visible.map(item => {
