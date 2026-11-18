@@ -13,10 +13,18 @@
 .topology-inspector .data-table-wrap table{min-width:0}.topology-inspector th,.topology-inspector td{padding:8px 4px;font-size:12px}
 .topology-inspector .data-table-wrap{max-width:100%}.topology-inspector .check-field{margin:6px 0}.topology-inspector details{margin:12px 0}
 .native-service-list{max-height:310px;overflow:auto}.topology-inspector fieldset:disabled{opacity:.8}
-.canvas-hint{font-size:12px;color:var(--fg2);min-height:40px}.topology-stage{position:relative;min-height:480px}
-.topology-canvas{background-color:#f8fafc;background-image:radial-gradient(#cbd5e1 1px,transparent 1px);background-size:18px 18px;max-height:65vh;overflow:auto}
-.topology-canvas svg{pointer-events:none}.topology-canvas svg line{stroke-linecap:round}.topology-canvas svg path{pointer-events:stroke;cursor:pointer}
+.canvas-hint{font-size:12px;color:var(--fg2);min-height:40px}
+.topology-view-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.topology-zoom-label{min-width:4ch;text-align:center;font-variant-numeric:tabular-nums;color:var(--fg2)}
+.topology-view-hint{font-size:12px;margin:0 0 8px}
+.topology-stage{position:absolute;inset:0;transform-origin:0 0;pointer-events:none}
+.topology-canvas{height:clamp(330px,60vh,620px);background-color:#f8fafc;background-image:radial-gradient(#cbd5e1 1px,transparent 1px);overflow:clip;touch-action:none;cursor:grab;user-select:none}
+.topology-canvas.panning,.topology-canvas.panning .canvas-node,.topology-canvas.panning svg path{cursor:grabbing}
+.topology-canvas svg{overflow:visible;pointer-events:none}.topology-canvas svg line{stroke-linecap:round}.topology-canvas svg path{pointer-events:stroke;cursor:pointer}
 .topology-canvas .canvas-node{width:130px;min-height:58px;display:flex;flex-direction:column;align-items:center;justify-content:center;user-select:none;box-shadow:0 2px 5px #0f172a12;padding:8px}
+.topology-canvas .canvas-node{pointer-events:auto}
+.topology-canvas .canvas-node.movable{cursor:grab}
+.topology-canvas .canvas-node.movable:active{cursor:grabbing}
 .topology-canvas .canvas-node strong{font-size:12px;font-weight:600;max-width:100%;overflow-wrap:anywhere}
 .topology-canvas .canvas-node small{font-size:10px;color:var(--fg2)}.topology-canvas .canvas-node.selected{outline:2px solid var(--accent);outline-offset:2px}
 .topology-canvas .canvas-node.endpoint{background:#cffafe;outline:2px dashed var(--accent);outline-offset:4px}

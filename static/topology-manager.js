@@ -9,6 +9,7 @@
   let current = null, definition = null, dirty = false, selected = null, selectedLink = null;
   let view = 'edit', context = null, connect = false, firstEndpoint = null, optionsToken = 0;
   let query = '', filter = 'all', paletteQuery = '', auxiliary = false, opening = 0;
+  const camera = {x:0, y:0, scale:1};
   P.navigation('topologies.html');
   const message = () => el('div', {'aria-live':'polite'});
   const allNodes = () => [...(definition?.nodes || []), ...(definition?.wlans || [])];
@@ -35,12 +36,15 @@
     if (result.format !== 'core-xml') {
       result.nodes ??= []; result.links ??= []; result.wlans ??= [];
       for (const node of [...result.nodes, ...result.wlans]) {
-        node.x ??= node.position?.x ?? 100; node.y ??= node.position?.y ?? 100;
+        const x = Number(node.x ?? node.position?.x ?? 100), y = Number(node.y ?? node.position?.y ?? 100);
+        node.x = Number.isFinite(x) ? x : 100;
+        node.y = Number.isFinite(y) ? y : 100;
       }
     }
     return result;
   }
   function setDefinition(def, record = null, mode = 'edit', runContext = null) {
+    Object.assign(camera, {x:0, y:0, scale:1});
     definition = normalize(def); current = record; view = mode; context = runContext;
     dirty = false; selected = allNodes()[0]?.id ?? null; selectedLink = null;
     connect = false; firstEndpoint = null; auxiliary = false;
@@ -208,7 +212,7 @@
       center.append(el('div', {class:'actions'}, connectButton,
         button(auxiliary ? '收起节点与链路表' : '节点与链路表', () => {auxiliary = !auxiliary; render();})),
         el('p', {class:'canvas-hint', role:'status'}, connect ? firstEndpoint === null ? '连线模式：点击第一个节点，Esc 取消。' : '已选择 ' + nodeName(firstEndpoint) + '，点击另一个节点完成连接。' :
-          editable() ? '拖动节点调整位置；点选节点或链路，在右侧编辑。' : '查看实际节点与链路；修改配置请使用上方编辑按钮。'), canvas());
+          editable() ? '拖动节点调整位置，点击节点或链路编辑属性。' : '点选节点或链路查看属性。'), canvas());
       const inspector = el('aside', {class:'topology-inspector', 'aria-label':'属性面板'});
       if (selectedLink !== null && definition.links[selectedLink]) linkInspector(inspector, definition.links[selectedLink]);
       else if (selected !== null) {
@@ -307,51 +311,168 @@
     connect = false; firstEndpoint = null; changed(); P.notice('链路已添加，可在右侧调整接口地址和参数。'); render();
   }
   function canvas() {
-    const nodes = allNodes(), width = Math.max(660, ...nodes.map(n => n.x + 180)), height = Math.max(480, ...nodes.map(n => n.y + 100));
-    const area = el('div', {class:'topology-canvas', 'aria-label':'拓扑画布'});
-    const stage = el('div', {class:'topology-stage', style:'width:' + width + 'px;height:' + height + 'px'});
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('width', width); svg.setAttribute('height', height); stage.append(svg);
+    const nodes = allNodes();
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    const controls = new Map();
+    const area = el('div', {class:'topology-canvas', role:'region', tabIndex:0,
+      'aria-label':'拓扑画布', 'aria-describedby':'canvas-controls-hint'});
+    const stage = el('div', {class:'topology-stage'});
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '1');
+    svg.setAttribute('height', '1');
+    stage.append(svg);
+
+    const zoomLabel = el('output', {class:'topology-zoom-label', 'aria-label':'缩放比例'});
+    const minZoom = 0.05, maxZoom = 3;
+    function updateCamera() {
+      stage.style.transform = 'translate(' + camera.x + 'px, ' + camera.y + 'px) scale(' + camera.scale + ')';
+      area.style.backgroundPosition = camera.x + 'px ' + camera.y + 'px';
+      const grid = Math.max(6, 18 * camera.scale);
+      area.style.backgroundSize = grid + 'px ' + grid + 'px';
+      zoomLabel.value = Math.round(camera.scale * 100) + '%';
+    }
+    function zoomAt(x, y, scale) {
+      scale = Math.max(minZoom, Math.min(maxZoom, scale));
+      const ratio = scale / camera.scale;
+      camera.x = x - (x - camera.x) * ratio;
+      camera.y = y - (y - camera.y) * ratio;
+      camera.scale = scale;
+      updateCamera();
+    }
+    function zoomBy(factor) {
+      zoomAt(area.clientWidth / 2, area.clientHeight / 2, camera.scale * factor);
+    }
+    function resetCamera() {
+      Object.assign(camera, {x:0, y:0, scale:1});
+      updateCamera();
+    }
+    function fitNodes() {
+      if (!nodes.length) {resetCamera(); return;}
+      const left = Math.min(...nodes.map(node => node.x));
+      const top = Math.min(...nodes.map(node => node.y));
+      const width = Math.max(...nodes.map(node => node.x + controls.get(node.id).offsetWidth)) - left;
+      const height = Math.max(...nodes.map(node => node.y + controls.get(node.id).offsetHeight)) - top;
+      camera.scale = Math.min(1, Math.max(1, area.clientWidth - 48) / width, Math.max(1, area.clientHeight - 48) / height);
+      camera.x = (area.clientWidth - width * camera.scale) / 2 - left * camera.scale;
+      camera.y = (area.clientHeight - height * camera.scale) / 2 - top * camera.scale;
+      updateCamera();
+    }
+    const zoomButton = (label, text, action) => el('button', {type:'button', class:'btn', title:label, 'aria-label':label, onclick:action}, text);
+    const toolbar = el('div', {class:'topology-view-controls', role:'group', 'aria-label':'画布视图'},
+      zoomButton('缩小', '−', () => zoomBy(1 / 1.2)), zoomLabel,
+      zoomButton('放大', '+', () => zoomBy(1.2)),
+      zoomButton('适应画布', '适应画布', fitNodes), zoomButton('重置视图', '重置视图', resetCamera));
+
+    let gesture = null;
+    function beginGesture(event, node = null) {
+      if (gesture || !event.isPrimary) return;
+      const target = event.currentTarget;
+      gesture = {id:event.pointerId, target, x:event.clientX, y:event.clientY, node,
+        offsetX:camera.x, offsetY:camera.y, scale:camera.scale, nodeX:node?.x, nodeY:node?.y, moved:false};
+      target.setPointerCapture(event.pointerId);
+      if (!node) {
+        event.preventDefault();
+        area.focus({preventScroll:true});
+      }
+    }
+    area.addEventListener('pointerdown', event => {
+      if (event.button === 1 || (event.button === 0 && !event.target.closest('.canvas-node, svg path'))) beginGesture(event);
+    });
+    area.addEventListener('pointermove', event => {
+      if (gesture?.id !== event.pointerId) return;
+      const dx = event.clientX - gesture.x, dy = event.clientY - gesture.y;
+      if (!gesture.moved && Math.hypot(dx, dy) < 4) return;
+      gesture.moved = true;
+      if (gesture.node) {
+        const {node, target, nodeX, nodeY, scale} = gesture;
+        node.x = Math.round(nodeX + dx / scale);
+        node.y = Math.round(nodeY + dy / scale);
+        target.style.left = node.x + 'px';
+        target.style.top = node.y + 'px';
+        drawEdges();
+      } else {
+        area.classList.add('panning');
+        camera.x = gesture.offsetX + dx;
+        camera.y = gesture.offsetY + dy;
+        updateCamera();
+      }
+    });
+    function finishGesture(event, cancelled) {
+      if (gesture?.id !== event.pointerId) return;
+      const {node, target, nodeX, nodeY, moved} = gesture;
+      gesture = null;
+      area.classList.remove('panning');
+      if (!node || !moved) return;
+      if (cancelled) {
+        node.x = nodeX; node.y = nodeY;
+        target.style.left = node.x + 'px'; target.style.top = node.y + 'px';
+        drawEdges();
+      } else {
+        if (node.x !== nodeX || node.y !== nodeY) changed();
+        selected = node.id; selectedLink = null; render();
+      }
+    }
+    area.addEventListener('pointerup', event => finishGesture(event, false));
+    area.addEventListener('pointercancel', event => finishGesture(event, true));
+    area.addEventListener('lostpointercapture', event => finishGesture(event, true));
+    area.addEventListener('dragstart', event => event.preventDefault());
+    area.addEventListener('wheel', event => {
+      const mode = event.deltaMode;
+      if (!event.deltaY) return;
+      event.preventDefault();
+      if (gesture) return;
+      const rect = area.getBoundingClientRect();
+      const unit = mode === 1 ? 16 : mode === 2 ? area.clientHeight : 1;
+      const delta = Math.max(-250, Math.min(250, event.deltaY * unit));
+      zoomAt(event.clientX - rect.left - area.clientLeft, event.clientY - rect.top - area.clientTop, camera.scale * Math.exp(-delta / 500));
+    }, {passive:false});
+    area.addEventListener('keydown', event => {
+      if (event.target !== area || gesture) return;
+      const direction = {ArrowLeft:[40,0], ArrowRight:[-40,0], ArrowUp:[0,40], ArrowDown:[0,-40]}[event.key];
+      if (direction) {
+        camera.x += direction[0]; camera.y += direction[1]; updateCamera();
+      } else if (event.key === '+' || event.key === '=') zoomBy(1.2);
+      else if (event.key === '-') zoomBy(1 / 1.2);
+      else if (event.key === '0') resetCamera();
+      else return;
+      event.preventDefault();
+    });
     function drawEdges() {
       svg.replaceChildren();
       definition.links.forEach((link, index) => {
-        const a = nodes.find(n => n.id === link.node1_id), b = nodes.find(n => n.id === link.node2_id); if (!a || !b) return;
+        const a = byId.get(link.node1_id), b = byId.get(link.node2_id);
+        if (!a || !b) return;
+        const ax = a.x + 65, ay = a.y + 29, bx = b.x + 65, by = b.y + 29;
         const line = document.createElementNS(svg.namespaceURI, 'line');
-        for (const [key, value] of Object.entries({x1:a.x + 65, y1:a.y + 28, x2:b.x + 65, y2:b.y + 28, 'stroke-width':selectedLink === index ? 5 : 3, stroke:selectedLink === index ? 'var(--accent)' : '#94a3b8'})) line.setAttribute(key, value);
+        for (const [key, value] of Object.entries({x1:ax, y1:ay, x2:bx, y2:by, 'stroke-width':selectedLink === index ? 5 : 3, stroke:selectedLink === index ? 'var(--accent)' : '#94a3b8'})) line.setAttribute(key, value);
         const hit = document.createElementNS(svg.namespaceURI, 'path');
-        hit.setAttribute('d', 'M' + (a.x + 65) + ',' + (a.y + 28) + ' L' + (b.x + 65) + ',' + (b.y + 28));
+        hit.setAttribute('d', 'M' + ax + ',' + ay + ' L' + bx + ',' + by);
         hit.setAttribute('stroke', 'transparent'); hit.setAttribute('stroke-width', '16'); hit.setAttribute('fill', 'none');
+        hit.setAttribute('vector-effect', 'non-scaling-stroke');
         hit.setAttribute('role', 'button'); hit.setAttribute('tabindex', '0'); hit.setAttribute('aria-label', '链路 ' + a.name + ' — ' + b.name);
         const choose = () => {selectedLink = index; selected = null; connect = false; firstEndpoint = null; render();};
         hit.addEventListener('click', choose); hit.addEventListener('keydown', e => {if (e.key === 'Enter' || e.key === ' ') {e.preventDefault(); choose();}});
         svg.append(line, hit);
       });
     }
-    drawEdges();
     for (const node of nodes) {
-      const control = el('button', {type:'button', class:'canvas-node' + (selected === node.id ? ' selected' : '') + (firstEndpoint === node.id ? ' endpoint' : ''),
+      const movable = editable() && !connect;
+      const control = el('button', {type:'button', class:'canvas-node' + (movable ? ' movable' : '') + (selected === node.id ? ' selected' : '') + (firstEndpoint === node.id ? ' endpoint' : ''),
         'data-node-id':node.id, 'aria-label':'选择节点 ' + node.name, 'aria-pressed':String(selected === node.id), style:'left:' + node.x + 'px;top:' + node.y + 'px'},
         el('strong', {}, node.name), el('small', {}, nodeKind(node)));
-      let origin = null, moved = false;
       control.addEventListener('pointerdown', event => {
-        moved = false; if (!editable() || connect || event.button !== 0) return;
-        origin = {x:event.clientX, y:event.clientY, nx:node.x, ny:node.y}; control.setPointerCapture(event.pointerId);
+        if (movable && event.button === 0) beginGesture(event, node);
       });
-      control.addEventListener('pointermove', event => {
-        if (!origin) return;
-        const dx = event.clientX - origin.x, dy = event.clientY - origin.y;
-        if (!moved && Math.abs(dx) + Math.abs(dy) < 5) return;
-        moved = true; node.x = Math.max(0, Math.round(origin.nx + dx)); node.y = Math.max(0, Math.round(origin.ny + dy));
-        control.style.left = node.x + 'px'; control.style.top = node.y + 'px';
-        const w = Math.max(660, ...nodes.map(n => n.x + 180)), h = Math.max(480, ...nodes.map(n => n.y + 100));
-        stage.style.width = w + 'px'; stage.style.height = h + 'px'; svg.setAttribute('width', w); svg.setAttribute('height', h);
-        changed(); drawEdges();
-      });
-      control.addEventListener('pointerup', () => {origin = null; if (moved) {selected = node.id; selectedLink = null; render();}});
-      control.addEventListener('pointercancel', () => {origin = null; moved = false;});
-      control.addEventListener('click', () => {if (!moved) chooseNode(node.id); moved = false;}); stage.append(control);
+      control.addEventListener('click', () => chooseNode(node.id));
+      controls.set(node.id, control);
+      stage.append(control);
     }
+    drawEdges();
     if (!nodes.length) stage.append(el('p', {class:'canvas-empty'}, '从左侧添加模板、原生主机或网络构件，再点击“连线”连接两个节点。'));
-    area.append(stage); return area;
+    area.append(stage);
+    updateCamera();
+    return el('div', {}, toolbar,
+      el('p', {id:'canvas-controls-hint', class:'muted topology-view-hint'}, '拖动空白处平移，滚轮缩放。聚焦画布后可用方向键、+、− 和 0。'), area);
   }
   function nativeEditor(area, node) {
     const wlan = definition.wlans.includes(node);
