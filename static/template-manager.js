@@ -13,8 +13,8 @@
   async function load() {
     const [templates, registrations] = await Promise.all([api('/instances'), api('/targets/registry')]);
     images = (await api('/targets')).images;
-    native = (await api('/instances/available-services')).system;
     registry = registrations;
+    try {native = await NativeServices.readCatalog();} catch {native = [];}
     const legacy = templates.filter(t => !Object.hasOwn(typeNames, t.runtime_type));
     P.replace(app, el('header', {class:'page-heading'}, el('h1', {}, '节点模板')), templateTabs(templates),
       legacy.length ? el('details', {class:'template-section template-legacy'},
@@ -133,12 +133,21 @@
     async function validate(){if(!target?.catalog)return;const token=++validationToken;try{const result=await api('/image-services/'+(target.catalog.catalog_id||'template')+'/validate','POST',{services:target.catalog.services,selection});if(token!==validationToken||!modal.dialog.open)return;const errors=result.errors||[],warnings=result.warnings||[];P.localMessage(message,(errors.length?errors.join('；'):'启用组合检查通过')+(warnings.length?'。'+warnings.join('；'):''),!!errors.length);}catch(error){if(token===validationToken)P.localMessage(message,error.message,true);}}
 
     function renderServices(){const controls=target.catalog.services.map(service=>{const enabled=!!selection[service.id],mode=select([['','请选择模式'],...service.modes.map(m=>[m.id,m.name])],selection[service.id]||'',value=>{selection[service.id]=value||'__choose__';validate();});mode.disabled=!enabled;return [checkbox(enabled,value=>{if(value)selection[service.id]=service.modes.find(m=>m.default)?.id||'__choose__';else delete selection[service.id];renderServices();validate();}),service.name,mode,'当前镜像'];});servicesArea.replaceChildren(el('h3',{},'模板默认服务'),table(['启用','服务','启动模式','来源'],controls));validate();}
-    function renderNative(){const selected=new Set((work.services || []).map(s=>s.name));servicesArea.replaceChildren(el('h3',{},'CORE 原生服务'),...native.map(name=>checkbox(selected.has(name),checked=>{if(checked)selected.add(name);else selected.delete(name);work.services=[...selected].map(name=>({name}));},name)));}
+    function renderNative() {
+      servicesArea.replaceChildren(el('h3', {}, 'CORE 原生服务'),
+        NativeServices.editor({catalog:native, names:(work.services || []).map(s => s.name), configs:work.service_configs,
+          changed:(names, configs) => {
+            work.services = names.map(name => ({name}));
+            work.service_configs = Object.fromEntries(Object.entries(configs).filter(([,value]) => value));
+            userDirty = true;
+          }}));
+    }
     function render() {
       const name = input(work.name, value => work.name = value);
       name.disabled = !!original;
       const runtime = original ? field('运行时', select(runtimeOptions, Object.hasOwn(typeNames, work.runtime_type) ? work.runtime_type : '', guarded(async value => {
         work.runtime_type = value; selection = {}; work.services = []; version = null;
+        delete work.service_configs;
         render(); await bind();
       }))) : null;
       let configuration = null;

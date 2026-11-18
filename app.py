@@ -36,6 +36,7 @@ from core.api.grpc import wrappers
 from core.api.grpc import client as grpc_client
 
 from bridge import CoreGrpcBridge
+from native_services import ServiceConfig
 from settings import settings, request_file
 
 # ---------------------------------------------------------------------------
@@ -245,6 +246,7 @@ class NodeModel(BaseModel):
     geo: GeoModel | None = None
     instance_version: int | None = None
     service_overrides: dict[str, str | None] | None = None
+    service_configs: dict[str, ServiceConfig | None] | None = None
     instance: str | None = None   # 来源实例名——部署即登记引用（实例锁定扳机, 设计 §5.2）
 
 class StartSessionRequest(BaseModel):
@@ -358,6 +360,7 @@ class TopologyNode(BaseModel):
     instance: str | None = None
     instance_version: int | None = None
     service_overrides: dict[str, str | None] | None = None
+    service_configs: dict[str, ServiceConfig | None] | None = None
     target_name: str | None = None
     target_version: int | None = None
     emane: str | None = None
@@ -426,6 +429,9 @@ def _session_summary_to_dict(s: wrappers.SessionSummary) -> dict:
     return {"id": s.id, "state": _enum_val(s.state), "nodes": s.nodes, "file": s.file, "dir": s.dir}
 
 def _node_to_dict(n: wrappers.Node) -> dict:
+    from native_services import from_core
+
+    overrides, external = from_core(getattr(n, 'service_configs', {}) or {})
     return {
         "id": n.id,
         "name": n.name,
@@ -434,6 +440,8 @@ def _node_to_dict(n: wrappers.Node) -> dict:
         "position": {"x": n.position.x, "y": n.position.y} if n.position else None,
         "geo": {"lat": n.geo.lat, "lon": n.geo.lon, "alt": n.geo.alt} if n.geo else None,
         "services": list(n.services) if n.services else [],
+        **({"service_configs": overrides} if overrides else {}),
+        **({"external_service_files": external} if external else {}),
         "emane": n.emane,
         "icon": n.icon,
         "image": n.image,
@@ -476,6 +484,8 @@ def _config_option_dict_to_dict(d: dict[str, wrappers.ConfigOption]) -> dict[str
     return {k: _config_option_to_dict(v) for k, v in d.items()}
 
 def _wrappers_node(m: NodeModel) -> wrappers.Node:
+    from native_services import to_core
+
     pos = wrappers.Position(x=m.position.x, y=m.position.y) if m.position else wrappers.Position(x=200,y=200)
     geo = wrappers.Geo(lat=m.geo.lat, lon=m.geo.lon, alt=m.geo.alt) if m.geo else None
     return wrappers.Node(
@@ -483,6 +493,7 @@ def _wrappers_node(m: NodeModel) -> wrappers.Node:
         type=wrappers.NodeType(m.type) if m.type is not None else wrappers.NodeType.DEFAULT,
         model=m.model, position=pos, geo=geo,
         services=set(m.services) if m.services else None,
+        service_configs=to_core(bridge, m.service_configs),
         emane=m.emane, icon=m.icon, image=m.image, server=m.server,
     )
 
@@ -701,12 +712,13 @@ def session_alert(session_id: int, body: AlertBody):
 def add_node(session_id: int, body: NodeModel):
     """添加节点 (type: 0=DEFAULT, 1=PHYSICAL, 4=SWITCH, 6=WIRELESS_LAN, 10=EMANE, 15=DOCKER, 17=WIRELESS, 18=PODMAN)。
     body.instance 为来源实例名时自动登记部署引用（实例锁定扳机, 设计 §5.2）"""
-    import topologies, versions
+    import native_services, topologies, versions
     from core_adapter import activate
     with topologies.mutation_lock:
         binding = {}
         if body.instance:
             try:
+                resets = [name for name, value in (body.service_configs or {}).items() if value is None]
                 resolved, dirs = versions.resolve(body.instance,body.instance_version,body.service_overrides)
                 # Incoming resolved fields are compatibility hints, never a second authority.
                 template = __import__('repository').revision('template',body.instance,resolved['instance_version'])
@@ -716,6 +728,13 @@ def add_node(session_id: int, body: NodeModel):
                     raise ValueError('请求服务与模板绑定不一致')
                 if body.type not in (None,0,15 if resolved['type']=='docker' else 0):
                     raise ValueError('节点类型与模板绑定不一致')
+                raw = resolved.pop('service_configs', {})
+                inherited = {name: ServiceConfig.model_validate(value) for name, value in raw.items()}
+                if inherited or body.service_configs:
+                    if resolved['type'] != 'default':
+                        raise ValueError('只有 CORE 原生节点支持服务配置覆盖')
+                    native_services.check_selection(resolved['services'], body.service_configs)
+                    resolved['service_configs'] = native_services.effective_configs(inherited, body.service_configs, resolved['services'])
                 dep = topologies.for_session(session_id)
                 if body.id is None:
                     body.id = max(bridge.get_session(session_id).nodes.keys(),default=0)+1
@@ -725,6 +744,8 @@ def add_node(session_id: int, body: NodeModel):
                     result=activate(bridge,dirs,body.services or [])
                     if result['missing']: raise ValueError('服务未在 daemon 注册: '+', '.join(result['missing']))
                 binding={k:resolved[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in resolved}
+                if resets:
+                    binding['native_service_resets'] = resets
                 binding.update(display_name=display,runtime_name=body.name)
             except ValueError as e:
                 raise HTTPException(400,str(e))
@@ -734,7 +755,14 @@ def add_node(session_id: int, body: NodeModel):
             display=binding.get('display_name') or body.name or f'n{body.id}'
             body=body.model_copy(update={'name':f'n{body.id}'})
             binding.update(display_name=display,runtime_name=body.name)
-        node_id = bridge.add_node(session_id, _wrappers_node(body))
+        try:
+            if body.service_configs:
+                if body.type not in (None,0):
+                    raise ValueError('只有 CORE 原生节点支持服务配置覆盖')
+                native_services.check_selection(body.services or [], body.service_configs)
+            node_id = bridge.add_node(session_id, _wrappers_node(body))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
         if binding:
             import platform_db
             import repository
@@ -1377,6 +1405,8 @@ _NODE_TYPE_MAP = {
 
 def _build_topology(session_id: int, topo: "TopologyInput"):
     """将 TopologyInput 转换为 session 中的节点和链路。"""
+    from native_services import to_core
+
     iface_id_counter: dict[int, int] = {}
 
     def next_iface_id(node_id: int) -> int:
@@ -1399,6 +1429,7 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
             position=wrappers.Position(x=node.x, y=node.y),
             services=set(node.services) if node.services else None,
             icon=node.icon or None, image=node.image, emane=node.emane,
+            service_configs=to_core(bridge, node.service_configs),
         )
         bridge.add_node(session_id, node_obj)
         if node.instance:
@@ -1790,6 +1821,8 @@ from jobs import router as jobs_router
 app.include_router(jobs_router, tags=["导入任务"])
 from image_services import router as image_services_router
 app.include_router(image_services_router, tags=["镜像服务管理"])
+from native_services import router as native_services_router
+app.include_router(native_services_router, tags=["CORE 原生服务"])
 
 if __name__ == "__main__":
     import uvicorn

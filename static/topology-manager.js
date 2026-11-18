@@ -5,7 +5,7 @@
   const app = document.getElementById('app');
   const stateNames = {1:'未启动', 2:'配置中', 3:'启动中', 4:'运行中', 5:'停止中', 6:'已关闭'};
   const historyNames = {defined:'未启动', running:'曾运行', stopped:'已停止', closed:'已结束', interrupted:'已中断', superseded:'已被新运行替代', failed:'启动失败'};
-  let data = {topologies:[], deployments:[], sessions:[], native_models:{}}, templates = [], native = [];
+  let data = {topologies:[], deployments:[], sessions:[], native_models:{}}, templates = [], nativeCatalog = [];
   let current = null, definition = null, dirty = false, selected = null, selectedLink = null;
   let view = 'edit', context = null, connect = false, firstEndpoint = null, optionsToken = 0;
   let query = '', filter = 'all', paletteQuery = '', auxiliary = false, opening = 0;
@@ -98,7 +98,9 @@
     optionsToken++;
     const heading = el('header', {class:'page-heading'}, el('h1', {}, '拓扑管理'),
       el('div', {class:'actions'}, button('刷新状态', async () => {
-        await refresh(false);
+        const [workspace, services] = await Promise.allSettled([refresh(false), NativeServices.readCatalog()]);
+        if (workspace.status === 'rejected') throw workspace.reason;
+        if (services.status === 'fulfilled') nativeCatalog = services.value;
         if (view === 'live' && contextSession()) {
           const def = await api('/topology-workspace/sessions/' + context.sid + '?identity=' + encodeURIComponent(context.identity));
           definition = normalize(def);
@@ -279,7 +281,7 @@
       }
       const nativeControls = [['原生主机',[]],['原生路由器',['IPForward']]]
         .filter(([label]) => matches(label)).map(([label, services]) =>
-          button('添加' + label, () => addNative(label, {type:'default', model:'bare', services:services.filter(s => native.includes(s))})));
+          button('添加' + label, () => addNative(label, {type:'default', model:'bare', services:services.filter(s => nativeCatalog.some(item => item.name === s))})));
       if (nativeControls.length) contents.append(propertyGroup('CORE 原生节点', nativeControls));
       const networkControls = [['switch','交换机'],['hub','集线器'],['wlan','无线网络']]
         .filter(([, label]) => matches(label)).map(([type, label]) =>
@@ -499,31 +501,39 @@
     } else if (['default','router','host','PC'].includes(node.type || 'default')) {
       const model = field('节点型号', select([['bare','裸节点（服务完全按下方选择）'],['PC','PC'],['host','主机'],['router','路由器'],['mdr','无线多播路由器']], node.model || 'bare', value => {
         node.model = value; const defaults = data.native_models[value] || [];
-        node.services = defaults.filter(name => native.includes(name));
-        const missing = defaults.filter(name => !native.includes(name));
+        const available = new Set(nativeCatalog.map(item => item.name));
+        node.services = defaults.filter(name => available.has(name));
+        node.service_configs = Object.fromEntries(Object.entries(node.service_configs || {}).filter(([name]) => node.services.includes(name)));
+        node.external_service_files = Object.fromEntries(Object.entries(node.external_service_files || {}).filter(([name]) => node.services.includes(name)));
+        const missing = defaults.filter(name => !available.has(name));
         changed(); render();
         if (missing.length) P.notice('当前环境未提供这些型号默认服务：' + missing.join('、') + '。已跳过，请检查下方启用项。', true);
       }));
       area.append(propertyGroup('原生节点设置', model));
-      const chosen = new Set(node.services || []);
-      const names = [...new Set([...native, ...chosen])].sort();
-      area.append(propertyGroup('CORE 原生服务', el('p', {class:'muted'}, '需关闭全部服务时请选择“裸节点”型号。'),
-        el('div', {class:'native-service-list'}, names.map(name => checkbox(chosen.has(name), enabled => {
-          if (enabled) chosen.add(name); else chosen.delete(name);
-          node.services = [...chosen]; changed();
-        }, name)))));
+      const services = propertyGroup('CORE 原生服务',
+        editable() ? el('p', {class:'muted'}, '需关闭全部服务时请选择“裸节点”型号。') : null,
+        NativeServices.editor({catalog:nativeCatalog, names:node.services || [], configs:node.service_configs,
+          external:node.external_service_files, editable:editable(), changed:(names, configs) => {
+            node.services = names;
+            node.service_configs = Object.fromEntries(Object.entries(configs).filter(([,value]) => value));
+            if (node.external_service_files) node.external_service_files = Object.fromEntries(
+              Object.entries(node.external_service_files).filter(([name]) => names.includes(name)));
+            changed();
+          }}));
+      (editable() ? area : area.parentElement).append(services);
     } else area.append(propertyGroup('节点类型', el('p', {}, nodeKind(node))));
   }
   async function nodeEditor(area){const token=optionsToken,node=allNodes().find(n=>n.id===selected);if(!node)return;if(!node.instance){nativeEditor(area,node);return;}
     const result=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+node.instance_version);if(token!==optionsToken||!area.isConnected)return;
-    const templatePicker=select(templates.map(t=>[t.name,t.name+' · '+(t.runtime_type==='docker'?'Docker':'原生')]),node.instance,async value=>{try{const template=templates.find(t=>t.name===value);node.instance=value;node.instance_version=template.version;for(const key of ['service_overrides','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();}catch(error){P.notice(error.message,true);}});
+    const templatePicker=select(templates.map(t=>[t.name,t.name+' · '+(t.runtime_type==='docker'?'Docker':'原生')]),node.instance,async value=>{try{const template=templates.find(t=>t.name===value);node.instance=value;node.instance_version=template.version;for(const key of ['service_overrides','service_configs','external_service_files','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();}catch(error){P.notice(error.message,true);}});
     const templateFields = el('div', {}, field('节点模板', templatePicker),
       el('p', {class:'muted'}, '固定修订 ' + node.instance_version + '；模板更新不会自动改变此节点。'));
     area.append(propertyGroup('模板配置', templateFields));
-    const latest=templates.find(t=>t.name===node.instance);if(latest?.version>node.instance_version)templateFields.append(button('查看并采用模板新修订',async()=>{const newer=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+latest.version);const comparison=el('section',{class:'surface'},el('h3',{},'模板更新差异'),P.fields({原默认服务:result.template.services,新默认服务:newer.template.services,节点覆盖将被清除:node.service_overrides!==undefined}),button('取消',()=>comparison.remove()),button('采用新默认',()=>{node.instance_version=latest.version;for(const key of ['service_overrides','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();},true));templateFields.append(comparison);}));
+    const latest=templates.find(t=>t.name===node.instance);if(latest?.version>node.instance_version)templateFields.append(button('查看并采用模板新修订',async()=>{const newer=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+latest.version);const comparison=el('section',{class:'surface'},el('h3',{},'模板更新差异'),P.fields({原默认服务:result.template.services,新默认服务:newer.template.services,节点覆盖将被清除:node.service_overrides!==undefined||node.service_configs!==undefined}),button('取消',()=>comparison.remove()),button('采用新默认',()=>{node.instance_version=latest.version;for(const key of ['service_overrides','service_configs','external_service_files','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();},true));templateFields.append(comparison);}));
+    if (result.catalog?.origin === 'core') {nativeTemplateEditor(area, node, result); return;}
     if(!result.catalog){area.append(el('p',{class:'notice'},'旧模板按原有实现执行。迁移服务清单并保存新模板后可配置节点覆盖。'));return;}
-    const native=result.catalog.origin==='core';let chosen=P.clone(node.service_overrides??result.selection),custom=node.service_overrides!==undefined&&node.service_overrides!==null;const serviceArea=el('div'),checks=message();
-    async function validate(){if(native){P.localMessage(checks,'CORE 原生服务单独选择。');return;}try{const validated=await api('/image-services/node/validate','POST',{services:result.catalog.services,selection:chosen});if(token!==optionsToken||!area.isConnected)return;P.localMessage(checks,[...(validated.errors||[]),...(validated.warnings||[]),...(validated.errors?.length?[]:['启动顺序：'+validated.order.map(id=>result.catalog.services.find(s=>s.id===id)?.name).join(' → ')])].join('；'),!!validated.errors?.length);}catch(error){if(token===optionsToken&&area.isConnected)P.localMessage(checks,error.message,true);}}
+    let chosen=P.clone(node.service_overrides??result.selection),custom=node.service_overrides!==undefined&&node.service_overrides!==null;const serviceArea=el('div'),checks=message();
+    async function validate(){try{const validated=await api('/image-services/node/validate','POST',{services:result.catalog.services,selection:chosen});if(token!==optionsToken||!area.isConnected)return;P.localMessage(checks,[...(validated.errors||[]),...(validated.warnings||[]),...(validated.errors?.length?[]:['启动顺序：'+validated.order.map(id=>result.catalog.services.find(s=>s.id===id)?.name).join(' → ')])].join('；'),!!validated.errors?.length);}catch(error){if(token===optionsToken&&area.isConnected)P.localMessage(checks,error.message,true);}}
     function update(){node.service_overrides=P.clone(chosen);delete node.services;delete node.effective_services;delete node.service_selection;changed();validate();}
     function renderServices(){serviceArea.replaceChildren(table(['启用','服务','有效模式','来源'],result.catalog.services.map(service=>{const mode=select([['','请选择模式'],...service.modes.map(m=>[m.id,m.name])],chosen[service.id]||'',value=>{chosen[service.id]=value||'__choose__';update();});mode.disabled=!custom||!chosen[service.id];const enabled=checkbox(!!chosen[service.id],value=>{chosen[service.id]=value?(service.modes.find(m=>m.default)?.id||'__choose__'):null;update();renderServices();});enabled.querySelector('input').disabled=!custom;return [enabled,service.name,mode,custom?'此节点覆盖':'模板默认'];})));}
     const source = field('配置来源', select([['inherit','使用模板默认'],['custom','自定义此节点']], custom ? 'custom' : 'inherit', value => {
@@ -534,6 +544,32 @@
     const restore = button('恢复模板默认', () => {delete node.service_overrides;delete node.services;changed();render();});
     area.append(propertyGroup('服务与启动模式', source, restore, serviceArea, checks));
     renderServices(); if (view !== 'edit') area.disabled = true; else validate();
+  }
+  function nativeTemplateEditor(area, node, result) {
+    const writable = editable();
+    const templateNames = Object.keys(result.selection);
+    const selection = node.service_overrides ?? result.selection;
+    const inherited = result.template.service_configs || {};
+    const names = !writable && node.services ? node.services :
+      Object.keys(selection).filter(name => selection[name]);
+    const configs = writable ? {...inherited,...node.service_configs} : node.service_configs || {};
+    const editor = NativeServices.editor({catalog:nativeCatalog, names, configs, inherited, external:node.external_service_files,
+      editable:writable, changed:(next, values, service) => {
+        if (next.length === templateNames.length && next.every(name => templateNames.includes(name))) delete node.service_overrides;
+        else node.service_overrides = Object.fromEntries(next.map(name => [name,'native']));
+        delete node.services;
+        const own = {...node.service_configs};
+        if (service && next.includes(service) && Object.hasOwn(values,service)) own[service] = values[service];
+        node.service_configs = Object.fromEntries(Object.entries(own).filter(([name]) => next.includes(name)));
+        if (node.external_service_files) node.external_service_files = Object.fromEntries(
+          Object.entries(node.external_service_files).filter(([name]) => next.includes(name)));
+        changed();
+      }});
+    const restore = writable ? button('恢复模板默认', () => {
+      delete node.service_overrides; delete node.service_configs; delete node.services;
+      changed(); render();
+    }) : null;
+    (writable ? area : area.parentElement).append(propertyGroup('CORE 原生服务', restore, editor));
   }
   function linkInspector(area, link) {
     const form = el('fieldset', {class:'topology-properties', disabled:!editable()});
@@ -700,11 +736,11 @@
   P.guardNavigation(() => dirty, '放弃当前尚未保存的拓扑修改？');
   window.addEventListener('keydown', event => {if (event.key === 'Escape' && connect) {connect = false; firstEndpoint = null; render();}});
   async function load() {
-    const results = await Promise.allSettled([api('/topology-workspace'), api('/instances'), api('/instances/available-services')]);
+    const results = await Promise.allSettled([api('/topology-workspace'), api('/instances'), NativeServices.readCatalog()]);
     if (results[0].status === 'rejected') throw results[0].reason;
     data = results[0].value;
     templates = results[1].status === 'fulfilled' ? results[1].value : [];
-    native = results[2].status === 'fulfilled' ? results[2].value.system : [];
+    nativeCatalog = results[2].status === 'fulfilled' ? results[2].value : [];
     const sid = Number(new URLSearchParams(location.search).get('session'));
     const session = data.sessions.find(s => s.id === sid);
     if (session?.identity) await openSession(session, associated(session)); else render();

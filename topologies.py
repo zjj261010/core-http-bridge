@@ -118,6 +118,7 @@ def workspace_action(sid:int,action:str,body:dict):
 def validate(definition, pin=True):
     import app
     import ipaddress
+    import native_services
     if definition.get('format')=='core-xml':
         import xml.etree.ElementTree as ET
         try: root=ET.fromstring(definition['xml_text'])
@@ -128,6 +129,7 @@ def validate(definition, pin=True):
     ids=[n.id for n in topo.nodes]+[w.id for w in topo.wlans]
     if len(ids)!=len(set(ids)): raise ValueError('节点 ID 重复')
     for node in topo.nodes:
+        resolved = {}
         if node.type.lower() not in app._NODE_TYPE_MAP: raise ValueError('未知节点类型: '+node.type)
         if node.instance:
             resolved,_=versions.resolve(node.instance,node.instance_version,node.service_overrides)
@@ -139,6 +141,14 @@ def validate(definition, pin=True):
                 if set(node.services) not in (set(resolved['services']),canonical):
                     raise ValueError('节点服务与模板版本不一致: '+str(node.id))
             if pin: node.instance_version=resolved['instance_version']
+        if getattr(node, 'external_service_files', None):
+            raise ValueError(node.name + ' 包含 CORE GUI 文件模板，请使用原生 XML 保留该配置')
+        node_type = resolved.get('type', node.type).lower()
+        if node_type in native_services.NATIVE_TYPES:
+            names = resolved.get('services', node.services) or []
+            native_services.check_selection(names, node.service_configs)
+        elif node.service_configs:
+            raise ValueError('只有 CORE 原生节点支持单节点服务参数和文件覆盖')
     for link in topo.links:
         if link.node1_id not in ids or link.node2_id not in ids or link.node1_id==link.node2_id:
             raise ValueError('链路端点不存在或相同')
@@ -256,7 +266,11 @@ def snapshot_session(sid):
     for n in session.nodes.values():
         b=bound.get(str(n.id),{})
         raw=app._node_to_dict(n)
-        raw.update(b)
+        raw.update({key: value for key, value in b.items() if key != 'native_service_resets'})
+        if b.get('native_service_resets'):
+            raw.setdefault('service_configs', {}).update(
+                {name: None for name in b['native_service_resets'] if name not in raw.get('service_configs', {})}
+            )
         raw.update(type=next((k for k,v in app._NODE_TYPE_MAP.items() if v==app._enum_val(n.type)),'default'),x=n.position.x,y=n.position.y)
         raw['name']=b.get('display_name') or n.name
         nodes.append(raw)
@@ -283,7 +297,7 @@ def _signature(definition):
     import delivery_state
     nodes=[]
     for node in definition.get('nodes',[]):
-        nodes.append({k:node.get(k) for k in ('id','name','type','model','image','instance','instance_version','target_name','target_version','service_overrides','service_selection','effective_services')})
+        nodes.append({k:node.get(k) for k in ('id','name','type','model','image','instance','instance_version','target_name','target_version','service_overrides','service_selection','effective_services','service_configs','external_service_files')})
         nodes[-1]['services']=sorted(node.get('services') or [])
     links=copy.deepcopy(definition.get('links') or [])
     for link in links:
@@ -341,6 +355,7 @@ def capture(sid:int):
 
 def deploy_definition(definition,topology_id=None,revision=None,start=False):
     import app
+    import native_services
     from core_adapter import activate
     normalized=validate(definition)
     if normalized.get('format')=='core-xml':
@@ -354,16 +369,34 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
     resolved=copy.deepcopy(normalized)
     deployment_id=repo.identifier('deploy')
     directories=set();required=set();bound={}
+    registered = None
     for node in resolved['nodes']:
         display=node['name']
+        overrides = node.pop('service_configs', None)
+        inherited = None
         if node.get('instance'):
             fields,dirs=versions.resolve(node['instance'],node.get('instance_version'),node.get('service_overrides'))
+            inherited = fields.pop('service_configs', None)
             node.update(fields);directories.update(dirs)
         if node['type']=='docker': node['name']=f'chb-{deployment_id[-12:]}-{node["id"]}'
         elif node['type'].lower() in ('default','router','host','pc'):
             # vnoded builds Unix socket/command paths from this value. Keep the user label in bindings.
             node['name']=f'n{node["id"]}'
+            names = node.get('services') or []
+            configs = native_services.effective_configs(inherited, overrides, names)
+            if configs:
+                node['service_configs'] = configs
+            if names:
+                if registered is None:
+                    registered = native_services.catalog(app.bridge)
+                try:
+                    native_services.check_selection(names, configs, registered=registered, check_dependencies=True)
+                except ValueError as error:
+                    raise ValueError(display + '：' + str(error)) from error
         bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in node}
+        resets = [name for name, value in (overrides or {}).items() if value is None]
+        if node.get('instance') and resets:
+            bound[str(node['id'])]['native_service_resets'] = resets
         bound[str(node['id'])].update(display_name=display,runtime_name=node['name'])
         required.update(node.get('services') or [])
     import target_admin,shlex

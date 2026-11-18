@@ -788,6 +788,26 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
         return _err("NETNS_NO_IMAGE", "netns 型共享宿主 rootfs，不绑定镜像")
     if rt == 'netns' and not inst.get('services') and inst.get('model','PC') in ('PC','host','router','mdr'):
         return _err('CORE_DEFAULT_SERVICES', 'CORE 会为该型号回填默认服务；请至少明确选择一项服务，或选无默认服务的型号')
+    if rt == 'netns':
+        from native_services import ServiceConfig, check_selection
+        from pydantic import TypeAdapter
+
+        names = []
+        for service in inst.get('services') or []:
+            if not isinstance(service, dict) or not isinstance(service.get('name'), str) or service.get('mode'):
+                return _err('SERVICE_INVALID', '请选择已注册的 CORE 原生服务')
+            names.append(service['name'])
+        if len(names) != len(set(names)):
+            return _err('SERVICE_DUPLICATE', '重复声明原生服务')
+        try:
+            raw = inst.get('service_configs')
+            parsed = TypeAdapter(dict[str, ServiceConfig]).validate_python({} if raw is None else raw)
+            check_selection(names, parsed)
+        except ValueError as error:
+            return _err('SERVICE_INVALID', str(error))
+        return None
+    if inst.get('service_configs'):
+        return _err('SERVICE_INVALID', 'Docker 模板的配置请在镜像服务模式中管理')
     available={k:list(v) for k,v in available.items()}
     manifest_ok=None
     if rt=='docker':

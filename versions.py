@@ -116,13 +116,16 @@ def resolve(name,version=None,service_overrides=None):
     out={'instance':name,'instance_version':t['version'],'model':t.get('model') or ('target' if t['runtime_type']=='docker' else 'bare'),'type':'docker' if t['runtime_type']=='docker' else 'default','services':services}
     dirs=[]
     if t['runtime_type']=='netns' and service_overrides is not None:
-        allowed=set(ta._available_services()['system'])
-        if any(name not in allowed or value not in (None,'','native') for name,value in service_overrides.items()):
+        import native_services
+        if any(value not in (None,'','native') for value in service_overrides.values()):
             raise ValueError('原生节点只能选择 CORE 原生服务')
         services=[name for name,value in service_overrides.items() if value]
+        native_services.check_selection(services)
         if not services and out['model'] in ('PC','host','router','mdr'):
             raise ValueError('该原生型号会回填默认服务，不能关闭全部服务；请使用裸节点模板')
         out.update(services=services,service_overrides=copy.deepcopy(service_overrides),effective_services=[{'name':n,'origin':'core','mode_id':'native'} for n in services])
+    if t['runtime_type']=='netns' and t.get('service_configs'):
+        out['service_configs']=copy.deepcopy(t['service_configs'])
     if t['runtime_type']=='docker':
         target_revision=repo.revision('target',t['target_name'],t['target_version'])
         if not target_revision: raise ValueError('绑定的靶标版本不存在')
