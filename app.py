@@ -25,12 +25,12 @@ import threading
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.api.grpc import wrappers
 from core.api.grpc import client as grpc_client
@@ -385,6 +385,14 @@ class TopologyLink(BaseModel):
     loss: float | None = None
     jitter: int | None = None
     dup: int | None = None
+
+class NativeServicePreviewRequest(BaseModel):
+    node_id: int = Field(default=1, ge=1)
+    model: str = 'bare'
+    links: list[TopologyLink] = Field(default_factory=list)
+    peer_types: dict[int, Literal['switch', 'hub', 'wlan']] = Field(default_factory=dict)
+    config: dict[str, str] = Field(default_factory=dict)
+
 
 class TopologyWlan(BaseModel):
     model_config = {'extra': 'allow'}
@@ -1065,6 +1073,17 @@ def get_service_rendered(session_id: int, node_id: int, name: str):
     """获取服务渲染后的文件内容"""
     return {"rendered": bridge.get_service_rendered(session_id, node_id, name)}
 
+
+@app.post("/native-services/{name}/preview")
+def preview_native_service(name: str, body: NativeServicePreviewRequest):
+    from native_services import render_preview
+
+    links = [link for link in _topology_links(body.links)
+             if body.node_id in (link.node1_id, link.node2_id) and link.node1_id != link.node2_id]
+    return {'ok': True, 'data': {'files': render_preview(
+        bridge, name, body.node_id, body.model, links, body.peer_types, body.config
+    )}}
+
 @app.post("/api/sessions/{session_id}/services/action")
 def service_action(session_id: int, body: ServiceActionRequest):
     """服务动作: START/STOP/RESTART/VALIDATE"""
@@ -1418,14 +1437,6 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
     """将 TopologyInput 转换为 session 中的节点和链路。"""
     from native_services import to_core
 
-    iface_id_counter: dict[int, int] = {}
-
-    def next_iface_id(node_id: int) -> int:
-        iface_id_counter.setdefault(node_id, 0)
-        nid = iface_id_counter[node_id]
-        iface_id_counter[node_id] += 1
-        return nid
-
     if topo.options:
         session=bridge.get_session(session_id)
         session.set_options(topo.options)
@@ -1461,9 +1472,21 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
             "delay": wlan.delay, "jitter": wlan.jitter, "error": wlan.error,
         })
 
-    # 3. Create links with auto-generated interfaces
+    for link in _topology_links(topo.links):
+        bridge.add_link(session_id, link)
+
+
+def _topology_links(links: list[TopologyLink]):
+    """Use the same interface allocation for previews and deployments."""
+    iface_id_counter: dict[int, int] = {}
+
+    def next_iface_id(node_id: int) -> int:
+        value = iface_id_counter.get(node_id, 0)
+        iface_id_counter[node_id] = value + 1
+        return value
+
     helper = grpc_client.InterfaceHelper(ip4_prefix="10.0.0.0/24")
-    for link in topo.links:
+    for link in links:
         opts = None
         if any([link.bandwidth, link.delay, link.loss, link.jitter, link.dup]):
             opts = wrappers.LinkOptions(
@@ -1494,10 +1517,10 @@ def _build_topology(session_id: int, topo: "TopologyInput"):
             )
         else:
             iface2 = helper.create_iface(link.node2_id, next_iface_id(link.node2_id))
-        bridge.add_link(session_id, wrappers.Link(
+        yield wrappers.Link(
             node1_id=link.node1_id, node2_id=link.node2_id,
             iface1=_wrappers_iface(link.iface1) if link.iface1 else iface1, iface2=_wrappers_iface(link.iface2) if link.iface2 else iface2, options=opts,
-        ))
+        )
 
 
 def _parse_xml_topology(xml_str: str) -> "TopologyInput":

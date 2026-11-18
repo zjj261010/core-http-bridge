@@ -136,6 +136,7 @@
     function renderNative() {
       servicesArea.replaceChildren(el('h3', {}, 'CORE 原生服务'),
         NativeServices.editor({catalog:native, names:(work.services || []).map(s => s.name), configs:work.service_configs,
+          previewContext:() => ({model:work.model || 'bare'}),
           changed:(names, configs) => {
             work.services = names.map(name => ({name}));
             work.service_configs = Object.fromEntries(Object.entries(configs).filter(([,value]) => value));

@@ -11,7 +11,8 @@ const NativeServices = (() => {
     }
   }
 
-  function editor({catalog, names, configs = {}, inherited = {}, external = {}, editable = true, changed}) {
+  function editor({catalog, names, configs = {}, inherited = {}, external = {}, editable = true,
+    previewContext = () => ({}), changed}) {
     let selected = [...names], overrides = P.clone(configs);
     const list = el('div');
     const registered = new Map(catalog.map(item => [item.name,item]));
@@ -27,7 +28,7 @@ const NativeServices = (() => {
           if (data === undefined) delete overrides[name]; else overrides[name] = data;
           changed(selected, overrides, name);
           update();
-        })));
+        }, previewContext)));
         if (!editable && (override || unsupported)) actions.append(button('查看', () => viewConfig(name, override, unsupported)));
         if (editable) actions.append(button('移除', () => {
           const dependent = selected.filter(other => registered.get(other)?.dependencies.includes(name));
@@ -80,12 +81,13 @@ const NativeServices = (() => {
     search.focus();
   }
 
-  async function configure(name, original, save) {
-    const defaults = await api('/native-services/' + encodeURIComponent(name) + '/defaults');
+  async function configure(name, original, save, previewContext) {
+    const url = '/native-services/' + encodeURIComponent(name);
+    const defaults = await api(url + '/defaults');
     const work = P.clone(original || {config:{},files:{}});
     const settings = el('div'), files = el('div');
     const modal = P.modal('配置服务 · ' + name, el('div', {}, settings, files));
-    let dirty = false, restored = false;
+    let dirty = false, restored = false, cachedPreview;
     modal.guard(() => dirty, '放弃当前服务尚未保存的配置？');
 
     function renderSettings() {
@@ -115,13 +117,25 @@ const NativeServices = (() => {
     function renderFiles() {
       const rows = defaults.files.map(path => {
         const overridden = Object.hasOwn(work.files, path);
-        const actions = el('div', {class:'actions'}, button(overridden ? '编辑文件' : '替换文件', () => editFile(path, work.files[path], text => {
-          work.files[path] = text; dirty = true; renderFiles();
+        const actions = el('div', {class:'actions'}, button('查看与编辑', () => editFile(path, {
+          value:overridden ? work.files[path] : undefined,
+          source:defaults.templates?.[path],
+          generate:async () => {
+            const request = {...previewContext(), config:work.config};
+            const key = JSON.stringify(request);
+            if (cachedPreview?.key !== key) {
+              const data = await api(url + '/preview', 'POST', request);
+              cachedPreview = {key, files:data.files};
+            }
+            if (!Object.hasOwn(cachedPreview.files, path)) throw Error('CORE 未生成该文件');
+            return cachedPreview.files[path];
+          },
+          save:text => {work.files[path] = text; dirty = true; renderFiles();}
         })));
         if (overridden) actions.append(button('导出', () => downloadFile(path, work.files[path])), button('恢复默认', () => {
           delete work.files[path]; dirty = true; renderFiles();
         }));
-        return [path, overridden ? '已替换' : '使用 CORE 默认', actions];
+        return [path, overridden ? '已覆盖' : '使用 CORE 默认', actions];
       });
       files.replaceChildren(el('section', {class:'native-service-block'}, el('h3', {}, '配置文件'),
         rows.length ? table(['文件','来源','操作'], rows) : el('p', {class:'muted'}, '此服务没有可替换文件')));
@@ -139,19 +153,51 @@ const NativeServices = (() => {
     renderFiles();
   }
 
-  function editFile(path, value, save) {
-    const text = el('textarea', {value:value ?? '', rows:10});
+  async function editFile(path, {value, source, generate, save}) {
+    const overridden = value !== undefined;
+    const text = el('textarea', {value:value ?? '', rows:15, wrap:'off', spellcheck:false, class:'native-script-text'});
     const upload = el('input', {type:'file', accept:'text/*,.conf,.cfg,.txt,.sh,.ini,.yaml,.yml'});
     const feedback = el('div', {role:'status'});
+    const sourceBlock = source === undefined ? null : el('details', {class:'native-service-block native-script-source'},
+      el('summary', {}, 'CORE 源模板'), el('pre', {tabIndex:0}, source));
+    const method = el('p', {class:'muted'}, overridden ? '当前使用已保存的文件覆盖。' : '当前使用 CORE 生成的文件。');
     const dialog = P.modal('配置文件 · ' + path, el('div', {},
-      field('导入文本文件', upload), feedback, field('替换内容', text)));
-    dialog.guard(() => text.value !== (value ?? ''), '放弃当前文件的修改？');
+      el('section', {class:'native-service-block'}, method, feedback, field('脚本内容', text), field('导入文本文件', upload)),
+      sourceBlock));
+    let baseline = text.value;
+    dialog.guard(() => text.value !== baseline, '放弃当前文件的修改？');
     upload.addEventListener('change', async () => {
-      if (!upload.files.length) return;
-      try {text.value = await upload.files[0].text();}
-      catch (error) {P.localMessage(feedback,error.message,true);}
+      const file = upload.files[0];
+      if (!file) return;
+      try {
+        const imported = await file.text();
+        if (dialog.dialog.open && upload.files[0] === file) text.value = imported;
+      } catch (error) {
+        if (dialog.dialog.open) P.localMessage(feedback,error.message,true);
+      }
     });
-    dialog.footer.append(button('取消',dialog.close), button('确定', () => {save(text.value); dialog.finish();}, true));
+    const download = button('导出当前内容', () => downloadFile(path, text.value));
+    const apply = button('确定', () => {
+      if (text.value !== baseline) save(text.value);
+      dialog.finish();
+    }, true);
+    dialog.footer.append(download, button('取消',dialog.close), apply);
+    if (overridden) return;
+    text.disabled = upload.disabled = download.disabled = apply.disabled = true;
+    feedback.textContent = '正在读取 CORE 生成的脚本…';
+    try {
+      const generated = await generate();
+      if (!dialog.dialog.open) return;
+      text.value = generated;
+      baseline = text.value;
+      feedback.textContent = '';
+    } catch (error) {
+      if (!dialog.dialog.open) return;
+      method.textContent = '可查看 CORE 源模板，或导入完整的脚本内容。';
+      P.localMessage(feedback, error.message, true);
+    } finally {
+      if (dialog.dialog.open) text.disabled = upload.disabled = download.disabled = apply.disabled = false;
+    }
   }
 
   function downloadFile(path, text) {
@@ -163,7 +209,10 @@ const NativeServices = (() => {
     const files = Object.entries(data?.files || {});
     P.modal('服务配置 · ' + name, el('div', {},
       config.length ? table(['参数','生效值'], config) : null,
-      files.length ? table(['文件','操作'], files.map(([path,text]) => [path,button('导出', () => downloadFile(path,text))])) : null,
+      files.length ? table(['文件','操作'], files.map(([path,text]) => [path,el('div', {class:'actions'},
+        button('查看内容', () => P.modal('配置文件 · ' + path, field('脚本内容',
+          el('textarea', {value:text, readOnly:true, rows:15, wrap:'off', class:'native-script-text'})))),
+        button('导出', () => downloadFile(path,text)))])) : null,
       external?.length ? el('p', {class:'notice'}, 'CORE GUI 文件模板随原生 XML 导出：' + external.join('、')) : null));
   }
 

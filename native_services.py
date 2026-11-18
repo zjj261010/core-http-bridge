@@ -170,6 +170,37 @@ def from_core(configs):
     return overrides, external
 
 
+def render_preview(bridge, name, node_id, model, links, peer_types, values):
+    """Render installed templates with the draft's adjacent links and parameters."""
+    from core.api.grpc import wrappers
+
+    if name not in catalog(bridge):
+        raise HTTPException(404, '该服务未注册或不能用于原生节点')
+    with definition_node(bridge, [name]) as (sid, preview_id):
+        defaults = bridge.get_service_defaults(sid, preview_id, name)
+        try:
+            config = complete_config(values, defaults.config) if values else {}
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        session = bridge.get_session(sid)
+        session.nodes = {
+            node_id: wrappers.Node(id=node_id, name=f'n{node_id}', model=model,
+                                   services={name}, service_configs={name: wrappers.ServiceData(config=config)})
+        }
+        network_types = {'switch': wrappers.NodeType.SWITCH, 'hub': wrappers.NodeType.HUB,
+                         'wlan': wrappers.NodeType.WIRELESS_LAN}
+        for link in links:
+            peer_id = link.node2_id if link.node1_id == node_id else link.node1_id
+            if peer_id not in session.nodes:
+                peer_type = network_types.get(peer_types.get(peer_id), wrappers.NodeType.DEFAULT)
+                session.nodes[peer_id] = wrappers.Node(id=peer_id, name=f'n{peer_id}', type=peer_type, model='bare')
+        session.links = links
+        ready, _ = bridge.start_session(session, definition=True)
+        if not ready:
+            raise HTTPException(422, 'CORE 无法根据当前节点和接口定义生成脚本')
+        return bridge.get_service_rendered(sid, node_id, name)
+
+
 @router.get('/native-services')
 def list_native_services():
     import app
@@ -187,5 +218,6 @@ def service_defaults(name: str):
     return {'ok': True, 'data': {
         'config': app._config_option_dict_to_dict(defaults.config),
         'files': sorted(defaults.templates),
+        'templates': defaults.templates,
         'modes': defaults.modes,
     }}

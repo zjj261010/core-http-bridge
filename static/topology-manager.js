@@ -544,7 +544,8 @@
       const services = propertyGroup('CORE 原生服务',
         editable() ? el('p', {class:'muted'}, '需关闭全部服务时请选择“裸节点”型号。') : null,
         NativeServices.editor({catalog:nativeCatalog, names:node.services || [], configs:node.service_configs,
-          external:node.external_service_files, editable:editable(), changed:(names, configs) => {
+          external:node.external_service_files, editable:editable(), previewContext:() => nativePreviewContext(node,node.model),
+          changed:(names, configs) => {
             node.services = names;
             node.service_configs = Object.fromEntries(Object.entries(configs).filter(([,value]) => value));
             if (node.external_service_files) node.external_service_files = Object.fromEntries(
@@ -553,6 +554,11 @@
           }}));
       (editable() ? area : area.parentElement).append(services);
     } else area.append(propertyGroup('节点类型', el('p', {}, nodeKind(node))));
+  }
+  function nativePreviewContext(node, model) {
+    const peerTypes = Object.fromEntries(allNodes().filter(peer => ['switch','hub','wlan'].includes(peer.type))
+      .map(peer => [peer.id, peer.type]));
+    return {node_id:node.id, model:model || 'bare', links:definition.links, peer_types:peerTypes};
   }
   async function nodeEditor(area){const token=optionsToken,node=allNodes().find(n=>n.id===selected);if(!node)return;if(!node.instance){nativeEditor(area,node);return;}
     const result=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+node.instance_version);if(token!==optionsToken||!area.isConnected)return;
@@ -585,7 +591,8 @@
       Object.keys(selection).filter(name => selection[name]);
     const configs = writable ? {...inherited,...node.service_configs} : node.service_configs || {};
     const editor = NativeServices.editor({catalog:nativeCatalog, names, configs, inherited, external:node.external_service_files,
-      editable:writable, changed:(next, values, service) => {
+      editable:writable, previewContext:() => nativePreviewContext(node,result.template.model),
+      changed:(next, values, service) => {
         if (next.length === templateNames.length && next.every(name => templateNames.includes(name))) delete node.service_overrides;
         else node.service_overrides = Object.fromEntries(next.map(name => [name,'native']));
         delete node.services;
