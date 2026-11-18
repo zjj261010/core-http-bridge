@@ -53,7 +53,7 @@ async function closeDirty(page,parent){await parent.getByRole('button',{name:'�
     const after=await json(page,'/image-services/detail?ref='+encodeURIComponent(C.legacy_ref));assert.equal(after.revision,baseline.revision);assert.deepEqual(after.services,baseline.services);return {sourceModes:baseline.imports[0].catalog.services.length};
   });
   await scenario('通过实际模板表格选择服务并检查依赖',async page=>{
-    await page.goto(base+'/static/instances.html');await page.getByRole('button',{name:'新建模板',exact:true}).click();const dialog=page.locator('dialog[open]');
+    await page.goto(base+'/static/instances.html');await page.getByRole('button',{name:'新建 Docker 模板',exact:true}).click();const dialog=page.locator('dialog[open]');
     await dialog.getByLabel('模板名称',{exact:true}).fill('browser-'+C.template);
     await dialog.getByLabel('镜像',{exact:true}).selectOption(C.ref);
     const http=dialog.getByRole('row').filter({hasText:'HTTP 服务'});await http.getByRole('checkbox').check();await dialog.getByText(/缺少依赖/).waitFor();

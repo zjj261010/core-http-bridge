@@ -43,11 +43,11 @@ async function openImage(){await nav('images');await f().getByRole('row').filter
   await answer(()=>d.getByRole('button',{name:'关闭',exact:true}).click(),false);assert.equal(await d.getByLabel('用途说明',{exact:true}).inputValue(),'未暂存的说明');
   await d.getByRole('button',{name:'暂存此服务',exact:true}).click();await answer(()=>page.locator('.side-tab[data-tab="instances"]').click(),false);await d.getByRole('row').filter({hasText:'未暂存的说明'}).waitFor();assert(page.url().endsWith('#images'));
   await answer(()=>{page.reload({waitUntil:'domcontentloaded',timeout:5000}).catch(()=>{});},false);await d.getByRole('row').filter({hasText:'未暂存的说明'}).waitFor();
-  await answer(()=>page.locator('.side-tab[data-tab="instances"]').click(),true);await f().getByRole('button',{name:'新建模板',exact:true}).waitFor();
+  await answer(()=>page.locator('.side-tab[data-tab="instances"]').click(),true);await f().getByRole('button',{name:'新建 Docker 模板',exact:true}).waitFor();
   await nav('images');await f().getByRole('row').filter({hasText:fixture.image}).getByRole('button',{name:'详情',exact:true}).click();const reopened=f().getByRole('dialog',{name:'镜像详情',exact:true});assert(!(await reopened.innerText()).includes('未暂存的说明'));await reopened.getByRole('button',{name:'关闭',exact:true}).click();return {close:true,navigation:true,reload:true};
  });
  await scenario('R3：模板编辑取消离开保留内容，完成真实模板创建',async()=>{
-  need(readyImage,'镜像配置');await nav('instances');await f().getByRole('button',{name:'新建模板',exact:true}).click();const d=f().getByRole('dialog',{name:'新建模板',exact:true});await d.getByLabel('模板名称',{exact:true}).fill('网页模板');await d.getByLabel('镜像',{exact:true}).selectOption(fixture.image);await d.getByRole('row').filter({hasText:'HTTP 页面服务'}).getByRole('checkbox').check();
+  need(readyImage,'镜像配置');await nav('instances');await f().getByRole('button',{name:'新建 Docker 模板',exact:true}).click();const d=f().getByRole('dialog',{name:'新建 Docker 模板',exact:true});await d.getByLabel('模板名称',{exact:true}).fill('网页模板');await d.getByLabel('镜像',{exact:true}).selectOption(fixture.image);await d.getByRole('row').filter({hasText:'HTTP 页面服务'}).getByRole('checkbox').check();
   await answer(()=>page.locator('.side-tab[data-tab="topologies"]').click(),false);assert.equal(await d.getByLabel('模板名称',{exact:true}).inputValue(),'网页模板');
   await d.getByRole('button',{name:'保存模板',exact:true}).click();await d.waitFor({state:'detached'});await f().getByRole('row').filter({hasText:'网页模板'}).waitFor();readyTemplate=true;return {template:'网页模板'};
  });
