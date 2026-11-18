@@ -3,7 +3,7 @@
   const P=Platform,{el,button,field,input,select,checkbox,table,api}=P;
   const app=document.getElementById('app');let images=[],manifests={},jobTimer;
   P.navigation('target-admin.html');
-  const uid=prefix=>prefix+'-'+crypto.randomUUID();
+  const uid=prefix=>prefix+'-'+(crypto.randomUUID?crypto.randomUUID():[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join(''));  // randomUUID 仅安全上下文(HTTPS/localhost)可用, HTTP+IP 访问走 getRandomValues 回退
   const stateName=value=>({applied:'已生效',pending:'已保存待生效',unconfigured:'未配置服务',incomplete:'已保存待完善',failed:'生效失败'})[value]||value;
   const guarded=(message,fn)=>async()=>{try{await fn();}catch(error){P.localMessage(message,error.message,true);}};
   const noticeArea=()=>el('div',{'aria-live':'polite'});
