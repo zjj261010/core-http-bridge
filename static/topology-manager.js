@@ -195,6 +195,8 @@
         setDefinition(def, null, 'edit', capture); changed(); P.notice('已转为可编辑配置。保存后出现在拓扑列表，原会话不变。');
       }, true));
       if (current) actions.append(button('编辑下次运行配置', () => open(current)));
+      if ((run || context?.deployment_id) && definition.network_activity) actions.append(
+        button('网络任务与 Snort 告警', () => NetworkActivity.show(run?.deployment_id || context.deployment_id)));
       if (session?.state === 1) actions.append(button(run?.status === 'stopped' ? '再次运行' : '启动会话', resume, true));
       if (session?.state === 4) actions.append(button('检查联通', async () => {
         const result = await sessionAction('connectivity');
@@ -226,7 +228,11 @@
       const connectButton = button(connect ? '退出连线' : '连线', () => {connect = !connect; firstEndpoint = null; render();}, connect);
       connectButton.setAttribute('aria-pressed', String(connect));
       if (!editable() || allNodes().length < 2) disabled(connectButton, editable() ? '至少添加两个节点后可连线' : '实际运行与历史配置为只读，请编辑下次运行配置');
-      center.append(panelHeader('拓扑画布', el('div', {class:'actions'}, connectButton,
+      const networkActions = editable() ? [
+        button('背景流量', () => editNetwork('traffic')),
+        button('Snort 监测点', () => editNetwork('probes'))
+      ] : [];
+      center.append(panelHeader('拓扑画布', el('div', {class:'actions'}, connectButton, networkActions,
         button(auxiliary ? '收起节点与链路表' : '节点与链路表', () => {auxiliary = !auxiliary; render();}))),
         el('div', {class:'topology-panel-body'}, el('p', {class:'canvas-hint', role:'status'}, connect ? firstEndpoint === null ? '连线模式：点击第一个节点，Esc 取消。' : '已选择 ' + nodeName(firstEndpoint) + '，点击另一个节点完成连接。' :
           editable() ? '拖动节点调整位置，点击节点或链路编辑属性。' : '点选节点或链路查看属性。'), canvas()));
@@ -305,9 +311,33 @@
     selected = id; selectedLink = null; changed(); render();
   }
   function removeNode(id) {
+    const plan = definition.network_activity;
+    if (plan && !removeNetworkReferences(
+      flow => flow.source_id === id || flow.target_id === id || flow.target_link.includes(id),
+      probe => probe.node_id === id || probe.link.includes(id))) return;
     definition.nodes = definition.nodes.filter(n => n.id !== id); definition.wlans = definition.wlans.filter(n => n.id !== id);
     definition.links = definition.links.filter(l => l.node1_id !== id && l.node2_id !== id);
     selected = null; selectedLink = null; firstEndpoint = null; changed(); render();
+  }
+  function editNetwork(kind, link) {
+    const nodes = definition.nodes.map(node => {
+      const template = templates.find(item => item.name === node.instance);
+      const type = template ? template.runtime_type === 'docker' ? 'docker' : 'default' : (node.type || 'default').toLowerCase();
+      return {...node,type};
+    });
+    NetworkActivity.editor(kind, definition, nodes, () => {changed(); render();}, link);
+  }
+  function removeNetworkReferences(traffic, probes) {
+    const plan = definition.network_activity;
+    if (!plan) return true;
+    const next = {
+      traffic:(plan.traffic || []).filter(flow => !traffic(flow)),
+      probes:(plan.probes || []).filter(probe => !probes(probe))
+    };
+    if (next.traffic.length === (plan.traffic || []).length && next.probes.length === (plan.probes || []).length) return true;
+    if (!confirm('同时移除依赖该节点或链路的背景流量与 Snort 监测点？')) return false;
+    definition.network_activity = next;
+    return true;
   }
   function chooseNode(id) {
     if (!connect || !editable()) {selected = id; selectedLink = null; render(); return;}
@@ -477,7 +507,8 @@
       const movable = editable() && !connect;
       const control = el('button', {type:'button', class:'canvas-node' + (movable ? ' movable' : '') + (selected === node.id ? ' selected' : '') + (firstEndpoint === node.id ? ' endpoint' : ''),
         'data-node-id':node.id, 'aria-label':'选择节点 ' + node.name, 'aria-pressed':String(selected === node.id), style:'left:' + node.x + 'px;top:' + node.y + 'px'},
-        el('strong', {}, node.name), el('small', {}, nodeKind(node)));
+        el('strong', {}, node.name), el('small', {}, nodeKind(node) +
+          (definition.network_activity?.probes?.some(probe => probe.node_id === node.id) ? ' · Snort' : '')));
       control.addEventListener('pointerdown', event => {
         if (movable && event.button === 0) beginGesture(event, node);
       });
@@ -602,9 +633,14 @@
       if (key === 'delay' || key === 'bandwidth') parameters.push(control); else advanced.append(control);
     }
     form.append(propertyGroup('链路参数', parameters, advanced)); area.append(form);
-    if (editable()) area.append(el('div', {class:'topology-property-actions'}, button('删除链路', () => {
-      definition.links.splice(selectedLink, 1); selectedLink = null; changed(); render();
-    })));
+    const probes = (definition.network_activity?.probes || []).filter(probe => NetworkActivity.sameLink(probe.link,link));
+    if (probes.length) area.append(propertyGroup('Snort 监测点', probes.map(probe => el('p',{},probe.name + ' · ' + nodeName(probe.node_id)))));
+    if (editable()) area.append(el('div', {class:'topology-property-actions actions'},
+      button('监测此链路', () => editNetwork('probes',[link.node1_id,link.node2_id])),
+      button('删除链路', () => {
+        if (!removeNetworkReferences(flow => NetworkActivity.sameLink(flow.target_link,link), probe => NetworkActivity.sameLink(probe.link,link))) return;
+        definition.links.splice(selectedLink, 1); selectedLink = null; changed(); render();
+      })));
   }
   function auxiliaryTables() {
     const nodes = table(['节点','类型','模板','操作'], allNodes().map(node => [node.name, nodeKind(node), node.instance || '无需模板',
@@ -620,6 +656,8 @@
       const session = run.live && data.sessions.find(s => s.id === run.core_sid && s.drill_id === run.drill_id);
       const actions = el('div', {class:'actions'}, button('查看本次配置', () => openHistory(run)));
       if (session) actions.append(button('查看会话', () => openSession(session, run)));
+      if ((run.execution_definition || run.source || run.snapshot)?.network_activity)
+        actions.append(button('网络任务与告警', () => NetworkActivity.show(run.deployment_id)));
       return [runName(run), stamp(run.created_at),
         el('div', {}, run.current_status, el('small', {class:'muted'}, session ? '会话 ' + session.id : '最后记录：' + (historyNames[run.status] || run.status)),
           run.error ? el('p', {class:'notice error'}, run.error.length > 180 ? run.error.slice(0,180) + '…' : run.error) : null,

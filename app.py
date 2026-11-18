@@ -37,6 +37,7 @@ from core.api.grpc import client as grpc_client
 
 from bridge import CoreGrpcBridge
 from native_services import ServiceConfig
+from network_activity import Plan
 from settings import settings, request_file
 
 # ---------------------------------------------------------------------------
@@ -144,6 +145,7 @@ async def lifespan(_app: FastAPI):
         import jobs
         jobs.recover()
         __import__('image_services').recover()
+        __import__('network_activity').recover()
         platform_db.start_sampler()   # reconciler + 事件落库 + 指标采样（5s）
         logger.info("platform db sampler started")
     except Exception:
@@ -151,6 +153,7 @@ async def lifespan(_app: FastAPI):
     yield
     await asyncio.to_thread(__import__("jobs").shutdown)
     __import__('image_services').shutdown()
+    await asyncio.to_thread(__import__('network_activity').shutdown)
     bridge.close()
     logger.info("bridge closed")
 
@@ -405,6 +408,7 @@ class TopologyInput(BaseModel):
     nodes: list[TopologyNode] = []
     links: list[TopologyLink] = []
     wlans: list[TopologyWlan] = []
+    network_activity: Plan | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -610,6 +614,7 @@ def delete_session(session_id: int):
     """删除会话（演练身份正常关闭; 该会话的 metrics/events 保留供复盘, audit 永久保留）。
     stop 是异步收尾: 会话仍在 RUNTIME/DATACOLLECT 时先补 stop 并等状态退出（实测立即 delete 会失败）"""
     import time as _t
+    __import__('network_activity').stop(session_id)
     try:
         s = bridge.get_session(session_id)
         st = getattr(s.state, "value", s.state)
@@ -659,6 +664,11 @@ def start_session(session_id: int, body: StartSessionRequest):
         import topologies
         topologies.for_session(session_id)
         topologies.state(session_id,'defined' if body.definition else 'running')
+        if not body.definition:
+            try:
+                __import__('network_activity').start(topologies.for_session(session_id), bridge)
+            except Exception:
+                logger.exception('network activity could not start for session %s', session_id)
     return {"result": result, "exceptions": exceptions}
 
 @app.post("/api/sessions/{session_id}/stop")
@@ -668,6 +678,7 @@ def stop_session(session_id: int):
     try:
         # 1. 保存拓扑定义（在 stop 之前获取，因为 stop 会销毁会话）
         session_data = bridge.get_session(session_id)
+        __import__('network_activity').stop(session_id)
         # 2. 停止（销毁运行时资源）
         bridge.stop_session(session_id)
         # 3. 从保存的定义中恢复拓扑（节点/链路仍保留）
@@ -1823,6 +1834,8 @@ from image_services import router as image_services_router
 app.include_router(image_services_router, tags=["镜像服务管理"])
 from native_services import router as native_services_router
 app.include_router(native_services_router, tags=["CORE 原生服务"])
+from network_activity import router as network_activity_router
+app.include_router(network_activity_router, tags=["背景流量与 Snort"])
 
 if __name__ == "__main__":
     import uvicorn

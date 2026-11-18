@@ -119,6 +119,7 @@ def validate(definition, pin=True):
     import app
     import ipaddress
     import native_services
+    import network_activity
     if definition.get('format')=='core-xml':
         import xml.etree.ElementTree as ET
         try: root=ET.fromstring(definition['xml_text'])
@@ -128,6 +129,7 @@ def validate(definition, pin=True):
     topo=app.TopologyInput.model_validate(definition)
     ids=[n.id for n in topo.nodes]+[w.id for w in topo.wlans]
     if len(ids)!=len(set(ids)): raise ValueError('节点 ID 重复')
+    kinds = {}
     for node in topo.nodes:
         resolved = {}
         if node.type.lower() not in app._NODE_TYPE_MAP: raise ValueError('未知节点类型: '+node.type)
@@ -144,6 +146,7 @@ def validate(definition, pin=True):
         if getattr(node, 'external_service_files', None):
             raise ValueError(node.name + ' 包含 CORE GUI 文件模板，请使用原生 XML 保留该配置')
         node_type = resolved.get('type', node.type).lower()
+        kinds[node.id] = node_type
         if node_type in native_services.NATIVE_TYPES:
             names = resolved.get('services', node.services) or []
             native_services.check_selection(names, node.service_configs)
@@ -176,7 +179,12 @@ def validate(definition, pin=True):
             for key in ('loss','dup'):
                 value=getattr(link.options,key)
                 if value is not None and not 0<=value<=100: raise ValueError(f'链路参数 {key} 须为 0–100')
-    return topo.model_dump(exclude_none=True)
+    normalized = topo.model_dump(exclude_none=True)
+    if topo.network_activity and (topo.network_activity.traffic or topo.network_activity.probes):
+        network_activity.validate(topo.network_activity, normalized, kinds)
+    else:
+        normalized.pop('network_activity', None)
+    return normalized
 
 
 def save(body, topology_id=None):
@@ -278,7 +286,11 @@ def snapshot_session(sid):
     drill=platform_db.get_active_drill(sid)
     run=next((r for r in repo.read('deployments').values() if r.get('drill_id')==drill and r.get('status') in ('defined','running','stopped')),None) if drill else None
     name=display_name(run) if run else f'session-{sid}'
-    return {'schema_version':2,'name':name,'nodes':nodes,'links':links,'options':{k:getattr(v,'value',str(v)) for k,v in (getattr(session,'options',{}) or {}).items()}}
+    result = {'schema_version':2,'name':name,'nodes':nodes,'links':links,'options':{k:getattr(v,'value',str(v)) for k,v in (getattr(session,'options',{}) or {}).items()}}
+    plan = ((run.get('source') or {}).get('network_activity') if run else None)
+    if plan:
+        result['network_activity'] = copy.deepcopy(plan)
+    return result
 
 
 def state(sid,status):
@@ -303,7 +315,7 @@ def _signature(definition):
     for link in links:
         for key in ('iface1','iface2'):
             if link.get(key): link[key].pop('name',None)
-    return delivery_state.digest({'nodes':sorted(nodes,key=lambda n:n['id']),'links':sorted(links,key=lambda l:(l['node1_id'],l['node2_id'])),'options':definition.get('options') or {}})
+    return delivery_state.digest({'nodes':sorted(nodes,key=lambda n:n['id']),'links':sorted(links,key=lambda l:(l['node1_id'],l['node2_id'])),'options':definition.get('options') or {},'network_activity':definition.get('network_activity') or {}})
 
 
 def prepare_start(sid):

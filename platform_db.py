@@ -296,11 +296,13 @@ def record_event(core_sid: int, detail: dict, drill_id: str | None = None) -> No
     c.close()
 
 
-def query_events(drill_id=None,limit=200,core_sid=None,before_id=None,after_id=None):
+def query_events(drill_id=None,limit=200,core_sid=None,before_id=None,after_id=None,event_type=None,detail_run_id=None):
     init()
     if core_sid is not None: drill_id=ensure_drill(core_sid)
     sql='SELECT id,ts,drill_id,core_sid,type,action,detail FROM events WHERE 1=1';args=[]
     if drill_id: sql+=' AND drill_id=?';args.append(drill_id)
+    if event_type: sql+=' AND type=?';args.append(event_type)
+    if detail_run_id: sql+=" AND json_extract(detail,'$.run_id')=?";args.append(detail_run_id)
     if before_id is not None: sql+=' AND id<=?';args.append(before_id)
     if after_id is not None: sql+=' AND id>?';args.append(after_id)
     sql+=' ORDER BY id '+('ASC' if after_id is not None else 'DESC')+' LIMIT ?';args.append(max(1,min(int(limit),2000)))
@@ -560,6 +562,7 @@ def _tick() -> None:
     # 2) 旁路创建的会话补登记
     for sid in sessions:
         ensure_drill(sid,tokens.get(str(sid)))
+    __import__('network_activity').reconcile(sessions)
 
     # 3) 事件订阅兜底（创建时已同步订阅; 这里只补漏, 数据只从这里落库）
     for sid in sessions:

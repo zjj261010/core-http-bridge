@@ -28,6 +28,10 @@ body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"S
 .section{background:var(--bg2);border:1px solid var(--bg3);border-radius:8px;padding:14px}
 .section h3{font-size:14px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
 .section h3 .hint{font-size:11px;color:var(--fg2);font-weight:400}
+#networkRuntime .data-table-wrap{overflow-x:auto;margin:10px 0 16px}
+#networkRuntime table{min-width:620px}
+#networkRuntime .form-field{display:grid;gap:6px;max-width:340px;margin:10px 0}
+#networkRuntime small{display:block;color:var(--fg2)}
 table{width:100%;border-collapse:collapse}
 th{background:var(--bg3);padding:8px 10px;text-align:left;font-size:11.5px;color:var(--fg2);font-weight:600;white-space:nowrap}
 td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
@@ -47,6 +51,7 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
 <script>if(window.self!==window.top)document.documentElement.classList.add('embedded');</script>
 <script src="/static/platform-ui.js?v=20261118-3"></script>
 <script src="/static/monitor-context.js?v=20261118-3"></script>
+<script src="/static/network-activity.js?v=20261118-1"></script>
 <script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
 <body class="bridge-page">
@@ -69,6 +74,13 @@ td{padding:8px 10px;border-top:1px solid var(--bg3);font-size:12.5px}
     <div class="card"><h4>内存</h4><div class="big" id="memPct">—</div><div class="bar"><i id="memBar" style="width:0%"></i></div><div class="sub" id="memSub">—</div></div>
     <div class="card" id="diskCard0"><h4>磁盘 /</h4><div class="big" id="disk0Pct">—</div><div class="bar"><i id="disk0Bar" style="width:0%"></i></div><div class="sub" id="disk0Sub">—</div></div>
     <div class="card" id="diskCard1" style="display:none"><h4>磁盘 /opt</h4><div class="big" id="disk1Pct">—</div><div class="bar"><i id="disk1Bar" style="width:0%"></i></div><div class="sub" id="disk1Sub">—</div></div>
+  </div>
+
+  <div class="section">
+    <h3>背景流量与 Snort 告警</h3>
+    <label for="networkDeployment">拓扑运行</label>
+    <select id="networkDeployment"><option value="">选择运行记录…</option></select>
+    <div id="networkRuntime"></div>
   </div>
 
   <!-- CORE 实时流 -->
@@ -111,6 +123,7 @@ var PAUSED = false;
 var lastTicks = null;
 var esCpu = null, esTp = null, esEv = null;
 var streamGeneration=0;
+let stopNetworkRuntime = () => {};
 
 function fmtBps(v) {
   // CORE throughput 单位 bit/s(收+发合计) → 可读单位
@@ -127,6 +140,7 @@ function evDesc(d, drill) {
   if (d.type === 'node') return '节点[' + MonitorContext.nodeName(drill,d.node.id,d.node.name) + '] ' + act + ' (id=' + d.node.id + ')';
   if (d.type === 'link') return '链路 ' + act + ' ' + MonitorContext.nodeName(drill,d.link.node1_id) + ' ↔ ' + MonitorContext.nodeName(drill,d.link.node2_id);
   if (d.type === 'alert') return '⚠ 告警 节点=' + MonitorContext.nodeName(drill,d.node_id) + ' [' + d.level + '] ' + d.source + ': ' + d.text;
+  if (d.type === 'snort') return 'Snort 规则命中 · ' + (d.msg || d.rule) + ' · ' + (d.src_ap || '—') + ' → ' + (d.dst_ap || '—');
   if (d.type === 'session') return '会话事件 ' + (d.name || '') + ' ' + (d.data || '');
   return Platform.describe(d).slice(0, 120);
 }
@@ -256,9 +270,25 @@ async function loadSessions() {
 }
 async function refreshWorkspace(inherit=false){
   try{
-    await MonitorContext.refresh();await Promise.all([loadSessions(),loadDrillOptions()]);
+    const workspace=await MonitorContext.refresh();await Promise.all([loadSessions(),loadDrillOptions()]);
     if(inherit){const current=MonitorContext.inherit();if(current){$('sessSel').value=String(current.id);if(current.drill_id)$('histDrill').value=current.drill_id;$('contextMessage').textContent='当前拓扑：'+current.display_name;}}
+    const network = $('networkDeployment');
+    const previous = network.value;
+    const runs = workspace.deployments.filter(run => (run.execution_definition || run.source || run.snapshot)?.network_activity);
+    const current = MonitorContext.run(MonitorContext.selected?.drill_id)?.deployment_id;
+    network.replaceChildren(new Option('选择运行记录…',''), ...runs.slice().reverse().map(run =>
+      new Option(run.display_name + ' · ' + run.current_status + ' · ' + run.created_at, run.deployment_id)));
+    network.value = runs.some(run => run.deployment_id === previous) ? previous :
+      runs.some(run => run.deployment_id === current) ? current : '';
+    if (previous !== network.value || inherit === true) openNetworkRuntime();
   }catch(error){$('contextMessage').textContent='暂时无法读取会话状态：'+error.message;}
+}
+function openNetworkRuntime() {
+  stopNetworkRuntime();
+  const area = $('networkRuntime');
+  area.replaceChildren();
+  const deployment = $('networkDeployment').value;
+  if (deployment) stopNetworkRuntime = NetworkActivity.runtime(area,deployment);
 }
 function closeStreams() {
   streamGeneration++;
@@ -337,7 +367,9 @@ function toggleStreams() {
 }
 
 $('sessSel').addEventListener('change',()=>{MonitorContext.select($('sessSel').value);const current=MonitorContext.session($('sessSel').value);$('contextMessage').textContent=current?'当前拓扑：'+current.display_name:'';closeStreams();['evLog','tpLog','cpuLog'].forEach(id=>$(id).textContent='未订阅');});
+$('networkDeployment').addEventListener('change',openNetworkRuntime);
 window.addEventListener('pagehide',closeStreams);
+window.addEventListener('pagehide',() => stopNetworkRuntime());
 function tick() { pollHost(); pollContainers(); }
 refreshWorkspace(true);
 tick();

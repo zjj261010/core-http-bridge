@@ -67,6 +67,14 @@ curl http://localhost:8080/health
 # {"status":"ok","sessions":0}
 ```
 
+## 拓扑背景流量和 Snort
+
+在拓扑画布上打开「背景流量」或「Snort 监测点」。HTTP 从 CORE 原生源节点访问拓扑内的私有 IPv4 接口，TCP/UDP 使用两个原生节点和独立的 iperf3 接收端口。Snort 在所选原生节点的链路接口上被动监听。保存并启动后，在「网络任务与 Snort 告警」查看状态、指标和历史。
+
+HTTP 发流使用 Bridge 的 Python 运行时。TCP/UDP 需要支持 `--json-stream` 的 iperf3。Snort 需要 Snort 3 和 LibDAQ（pcap 模块）。宿主默认工具根目录为 `/opt/core-network-tools`，可通过 `CORE_BRIDGE_NETWORK_ROOT` 指定其他持久路径。对应文件为 `iperf/bin/iperf3`、`snort/bin/snort`、`snort/etc/snort/snort.lua` 和 `daq/lib/daq`。
+
+额外的 Snort 规则集放在业务数据目录的 `snort-rules/` 下，使用 `.rules` 文件。内置「无害功能验收」规则可用发往拓扑内 HTTP 服务的普通请求验证，路径可填写 `/?probe=BRIDGE_IDS_CHECK`。每次运行记录规则文件的校验值。
+
 ---
 
 # 完整 API 接口说明
