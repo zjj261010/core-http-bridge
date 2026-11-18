@@ -3,8 +3,11 @@
   const P = Platform, {el, api, button, field, input, select, checkbox, table} = P;
   const app = document.getElementById('app');
   const typeNames = {docker:'Docker 节点模板', netns:'CORE 原生节点模板'};
+  const createNames = {docker:'新建 Docker 模板', netns:'新建原生模板'};
   const nodeModels = [['bare','裸节点'],['PC','PC'],['host','主机'],['router','路由器'],['mdr','无线多播路由器']];
   let images = [], registry = [], native = [];
+  let activeType = 'docker';
+  const queries = {docker:'', netns:''};
   P.navigation('instances.html');
 
   async function load() {
@@ -12,23 +15,69 @@
     images = (await api('/targets')).images;
     native = (await api('/instances/available-services')).system;
     registry = registrations;
-    const docker = templates.filter(t => t.runtime_type === 'docker');
-    const core = templates.filter(t => t.runtime_type === 'netns');
-    const legacy = templates.filter(t => t.runtime_type !== 'docker' && t.runtime_type !== 'netns');
-    app.replaceChildren(
-      el('header', {class:'page-heading'}, el('h1', {}, '节点模板')),
-      templateSection('docker', typeNames.docker, '镜像', docker, t => t.image_tag || '—', '新建 Docker 模板'),
-      templateSection('netns', typeNames.netns, '节点型号', core, t => {
-        const model = t.model || 'bare';
-        return nodeModels.find(([id]) => id === model)?.[1] || model;
-      }, '新建原生模板'),
-      ...(legacy.length ? [templateSection('legacy', '待修正的旧模板', '运行时', legacy, t => t.runtime_type || '未声明')] : [])
-    );
+    const legacy = templates.filter(t => !Object.hasOwn(typeNames, t.runtime_type));
+    P.replace(app, el('header', {class:'page-heading'}, el('h1', {}, '节点模板')), templateTabs(templates),
+      legacy.length ? el('details', {class:'template-section template-legacy'},
+        el('summary', {}, '待修正的旧模板（' + legacy.length + '）'),
+        el('div', {class:'template-section-body'}, templateTable(legacy, '运行时', t => t.runtime_type || '未声明'))) : null);
   }
 
-  function templateSection(type, title, configLabel, templates, configSummary, createLabel) {
-    const headingId = type + '-templates';
-    const create = createLabel ? button(createLabel, () => edit(null, type), true) : null;
+  function templateTabs(templates) {
+    const types = Object.keys(typeNames);
+    const panels = types.map(type => el('section', {
+      class:'template-section', id:type + '-templates', role:'tabpanel', 'aria-labelledby':type + '-template-tab'
+    }));
+    const tabs = types.map((type, index) => el('button', {
+      class:'template-tab', id:type + '-template-tab', type:'button', role:'tab', 'aria-controls':panels[index].id,
+      onclick:() => activate(index),
+      onkeydown:event => {
+        const next = {ArrowLeft:(index + types.length - 1) % types.length, ArrowRight:(index + 1) % types.length, Home:0, End:types.length - 1}[event.key];
+        if (next === undefined) return;
+        event.preventDefault();
+        activate(next);
+        tabs[next].focus();
+      }
+    }, typeNames[type]));
+    function activate(index) {
+      activeType = types[index];
+      tabs.forEach((tab, i) => {
+        const selected = i === index;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+        panels[i].hidden = !selected;
+      });
+      const panel = panels[index];
+      if (!panel.hasChildNodes()) renderTemplatePanel(panel, activeType, templates.filter(t => t.runtime_type === activeType));
+    }
+    activate(types.indexOf(activeType));
+    return [el('div', {class:'template-tabs', role:'tablist', 'aria-label':'节点模板类型'}, tabs), panels];
+  }
+
+  function renderTemplatePanel(panel, type, templates) {
+    const body = el('div', {class:'template-section-body'});
+    const status = el('p', {class:'muted template-result-count', role:'status'});
+    const search = input(queries[type], value => {queries[type] = value; updateResults();}, 'search');
+    search.placeholder = '按模板名称搜索';
+    search.setAttribute('aria-label', '搜索模板');
+    panel.append(el('div', {class:'template-toolbar'},
+      el('div', {class:'template-search'}, search, status),
+      button(createNames[type], () => edit(null, type), true)), body);
+    const configLabel = type === 'docker' ? '镜像' : '节点型号';
+    const configSummary = type === 'docker' ? t => t.image_tag || '—' : t => {
+      const model = t.model || 'bare';
+      return nodeModels.find(([id]) => id === model)?.[1] || model;
+    };
+    function updateResults() {
+      const keyword = queries[type].trim().toLowerCase();
+      const matches = keyword ? templates.filter(t => t.name.toLowerCase().includes(keyword)) : templates;
+      status.textContent = keyword ? matches.length + ' 条匹配 / 共 ' + templates.length + ' 个模板' : templates.length + ' 个模板';
+      body.replaceChildren(matches.length ? templateTable(matches, configLabel, configSummary)
+        : el('p', {class:'muted template-empty'}, keyword ? '没有匹配的模板' : '暂无' + typeNames[type]));
+    }
+    updateResults();
+  }
+
+  function templateTable(templates, configLabel, configSummary) {
     const rows = templates.map(t => {
       const url = '/instances/' + encodeURIComponent(t.name);
       const actions = el('div', {class:'actions'},
@@ -43,11 +92,7 @@
         .map(s => el('div', {}, s.service_name || s.name, s.mode_name ? ' / ' + s.mode_name : ''));
       return [name, configSummary(t), services.length ? el('div', {}, services) : '—', String(t.version || '未迁移'), actions];
     });
-    return el('section', {class:'template-section', 'aria-labelledby':headingId},
-      el('header', {}, el('h2', {id:headingId}, title), create),
-      el('div', {class:'template-section-body'}, rows.length
-        ? table(['模板', configLabel, '默认服务', '固定修订', '操作'], rows)
-        : el('p', {class:'muted template-empty'}, '暂无' + title)));
+    return table(['模板', configLabel, '默认服务', '固定修订', '操作'], rows);
   }
 
   async function edit(original, type) {
@@ -56,7 +101,7 @@
     let target = null, selection = P.clone(work.service_selection || {}), version = work.target_version, bindToken = 0, validationToken = 0;
     const runtimeOptions = [['docker','Docker 镜像节点'],['netns','CORE 原生节点']];
     if (!Object.hasOwn(typeNames, work.runtime_type)) runtimeOptions.unshift(['','请选择运行时']);
-    const title = original ? '编辑模板' : type === 'docker' ? '新建 Docker 模板' : '新建原生模板';
+    const title = original ? '编辑模板' : createNames[type];
     const modal = P.modal(title, el('div', {}, message, content, bound, servicesArea));
     let userDirty=false;modal.dialog.addEventListener('input',()=>userDirty=true);modal.dialog.addEventListener('change',()=>userDirty=true);modal.guard(()=>userDirty,'放弃当前模板尚未保存的修改？');
     const guarded = fn => async (...args) => {try {await fn(...args);} catch (error) {P.localMessage(message, error.message, true);}};
