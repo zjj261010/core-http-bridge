@@ -18,6 +18,17 @@
   const editable = () => !!definition && view === 'edit';
   const stateLabel = session => stateNames[session.state] || '未知状态';
   const stamp = text => text ? new Date(text).toLocaleString('zh-CN', {hour12:false}) : '—';
+  function panelHeader(title, actions) {
+    return el('header', {class:'topology-panel-header'}, el('h2', {}, title), actions);
+  }
+  function propertyGroup(title, ...contents) {
+    return el('section', {class:'topology-group'}, el('h3', {}, title),
+      el('div', {class:'topology-group-body'}, ...contents));
+  }
+  function historyPanel(title, runs) {
+    return el('details', {class:'topology-panel topology-history'}, el('summary', {}, title),
+      el('div', {class:'topology-panel-body'}, runTable(runs)));
+  }
   function changed() {
     dirty = true;
     const marker = document.getElementById('saveState');
@@ -85,8 +96,7 @@
   }
   function render() {
     optionsToken++;
-    const heading = el('header', {class:'page-heading'}, el('div', {}, el('h1', {}, '拓扑管理'),
-      el('p', {class:'muted'}, '添加节点、连接链路、配置服务，在同一个工作区保存和运行。')),
+    const heading = el('header', {class:'page-heading'}, el('h1', {}, '拓扑管理'),
       el('div', {class:'actions'}, button('刷新状态', async () => {
         await refresh(false);
         if (view === 'live' && contextSession()) {
@@ -132,9 +142,12 @@
     const search = input(query, value => { query = value; updateCards(); }); search.placeholder = '按名称搜索';
     const choice = select([['all','全部拓扑'],['saved','已保存配置'],['session','未保存的活动会话'],['history','历史拓扑']], filter, value => {filter = value; updateCards();});
     const container = el('div', {class:'topology-cards'});
-    app.append(el('section', {class:'surface'}, el('div', {class:'page-heading'}, el('div', {}, el('h2', {}, '拓扑列表'),
-      el('p', {class:'muted'}, data.topologies.length + ' 个保存配置 · ' + data.sessions.length + ' 个活动会话 · 状态更新 ' + stamp(data.updated_at))),
-      el('div', {class:'form-grid topology-list-filters'}, field('搜索拓扑', search), field('显示范围', choice))), container));
+    app.append(el('section', {class:'topology-panel'},
+      panelHeader('拓扑列表', el('span', {class:'muted'}, data.topologies.length + ' 个保存配置 · ' + data.sessions.length + ' 个活动会话')),
+      el('div', {class:'topology-list-controls'},
+        el('div', {class:'form-grid topology-list-filters'}, field('搜索拓扑', search), field('显示范围', choice)),
+        el('small', {class:'muted'}, '状态更新 ' + stamp(data.updated_at))),
+      el('div', {class:'topology-panel-body'}, container)));
     function updateCards() {
       const visible = entries.filter(item => (filter === 'all' || item.kind === filter) && item.name.toLowerCase().includes(query.toLowerCase()));
       container.replaceChildren(...visible.map(item => {
@@ -152,17 +165,17 @@
       if (!visible.length) container.append(el('div', {class:'empty'}, entries.length ? '没有匹配的拓扑，请调整筛选。' : '还没有拓扑。点击“新建拓扑”添加节点，或导入已有文件。'));
     }
     updateCards();
-    const history = el('details', {class:'surface'}, el('summary', {}, '全部运行历史（' + data.deployments.length + '）'));
-    history.append(runTable(data.deployments)); app.append(history);
+    app.append(historyPanel('全部运行历史（' + data.deployments.length + '）', data.deployments));
   }
   function renderWorkspace() {
     const session = contextSession(), run = session ? associated(session) : null;
     if(view === 'live' && !session)P.workspaceContext(null);
     const status = view === 'edit' ? (dirty ? '有未保存修改' : current ? '已保存 · 修订 ' + current.revision : '尚未保存') :
       view === 'history' ? '历史运行 · 只读' : session ? (run?.current_status || stateLabel(session)) + ' · 实际配置' : '会话已结束或被替换 · 当前保留最后查看的配置';
-    const actions = el('div', {class:'actions'}, button('返回列表', () => {
+    const back = button('返回列表', () => {
       if (!discard()) return; opening++; definition = null; current = null; context = null; dirty = false; render();
-    }));
+    });
+    const actions = el('div', {class:'actions'});
     if (view === 'edit') {
       actions.append(button('保存', save, true), button('导出', exportFile),
         allNodes().length || definition.format === 'core-xml' ? button('启动', start) : disabled(button('启动', start), '请先添加节点'));
@@ -195,42 +208,45 @@
         await sessionAction('delete'); await refresh(); P.notice('会话已删除，当前保留最后查看的配置。');
       }));
     }
-    app.append(el('section', {class:'surface topology-toolbar'}, actions,
-      view === 'edit' ? field('拓扑名称', input(definition.name, value => {definition.name = value; changed();})) : el('h2', {}, definition.name || current?.name),
-      el('p', {id:'saveState', class:'muted', role:'status'}, status),
-      view === 'edit' ? el('p', {class:'muted'}, '保存不会改变正在运行的会话；启动时创建一次新的运行。') : null));
+    app.append(el('section', {class:'topology-panel topology-toolbar'},
+      el('div', {class:'topology-titlebar'},
+        view === 'edit' ? field('拓扑名称', input(definition.name, value => {definition.name = value; changed();})) : el('h2', {}, definition.name || current?.name),
+        el('div', {class:'topology-view-state'},
+          el('span', {class:'tag ' + (view === 'edit' ? 'dk' : 'lock')}, {edit:'编辑配置', live:'会话视图', history:'历史配置'}[view]),
+          el('span', {id:'saveState', class:'muted', role:'status'}, status))),
+      el('div', {class:'topology-actionbar'}, back, actions)));
     if (definition.format === 'core-xml') {
       app.append(el('section', {class:'surface'}, el('h2', {}, '原生 XML 拓扑'), el('p', {class:'notice'},
         '原始 XML 配置完整保留，可导出、保存并启动。启动后在此查看实际节点和链路。修改原始 XML 请使用外部编辑器后重新导入。')));
     } else {
       const palette = nodePalette();
-      const center = el('section', {class:'topology-center'});
+      const center = el('section', {class:'topology-panel topology-center'});
       const connectButton = button(connect ? '退出连线' : '连线', () => {connect = !connect; firstEndpoint = null; render();}, connect);
       connectButton.setAttribute('aria-pressed', String(connect));
       if (!editable() || allNodes().length < 2) disabled(connectButton, editable() ? '至少添加两个节点后可连线' : '实际运行与历史配置为只读，请编辑下次运行配置');
-      center.append(el('div', {class:'actions'}, connectButton,
-        button(auxiliary ? '收起节点与链路表' : '节点与链路表', () => {auxiliary = !auxiliary; render();})),
-        el('p', {class:'canvas-hint', role:'status'}, connect ? firstEndpoint === null ? '连线模式：点击第一个节点，Esc 取消。' : '已选择 ' + nodeName(firstEndpoint) + '，点击另一个节点完成连接。' :
-          editable() ? '拖动节点调整位置，点击节点或链路编辑属性。' : '点选节点或链路查看属性。'), canvas());
-      const inspector = el('aside', {class:'topology-inspector', 'aria-label':'属性面板'});
-      if (selectedLink !== null && definition.links[selectedLink]) linkInspector(inspector, definition.links[selectedLink]);
-      else if (selected !== null) {
-        const node = allNodes().find(n => n.id === selected);
-        if (node) {
-          inspector.append(el('h3', {}, '节点属性'));
-          const basics = el('fieldset', {disabled:!editable()}, field('节点名称', input(node.name, value => {node.name = value; changed(); updateNodeLabel(node);})));
-          inspector.append(basics);
-          const details = el('fieldset', {disabled:!editable()}); inspector.append(details);
-          nodeEditor(details).catch(error => {if (details.isConnected) P.localMessage(details, error.message, true);});
-          if (editable()) inspector.append(button('删除节点', () => removeNode(node.id)));
-          else if (view === 'live' && session?.state === 4 && ['default','router','host','PC','pc','docker','podman'].includes(node.type)) inspector.append(nodeOperations(node, session));
-        }
-      } else inspector.append(el('h3', {}, '属性'), el('p', {class:'muted'}, '点击节点或链路查看属性。'));
+      center.append(panelHeader('拓扑画布', el('div', {class:'actions'}, connectButton,
+        button(auxiliary ? '收起节点与链路表' : '节点与链路表', () => {auxiliary = !auxiliary; render();}))),
+        el('div', {class:'topology-panel-body'}, el('p', {class:'canvas-hint', role:'status'}, connect ? firstEndpoint === null ? '连线模式：点击第一个节点，Esc 取消。' : '已选择 ' + nodeName(firstEndpoint) + '，点击另一个节点完成连接。' :
+          editable() ? '拖动节点调整位置，点击节点或链路编辑属性。' : '点选节点或链路查看属性。'), canvas()));
+      const link = selectedLink === null ? null : definition.links[selectedLink];
+      const node = allNodes().find(n => n.id === selected);
+      const properties = el('div', {class:'topology-panel-body topology-properties'});
+      const inspector = el('aside', {class:'topology-panel topology-inspector', 'aria-label':'属性面板'},
+        panelHeader(link ? '链路属性' : node ? '节点属性' : '属性'), properties);
+      if (link) linkInspector(properties, link);
+      else if (node) {
+        const name = field('节点名称', input(node.name, value => {node.name = value; changed(); updateNodeLabel(node);}));
+        const details = el('fieldset', {class:'topology-properties', disabled:!editable()}, propertyGroup('基本信息', name));
+        properties.append(details);
+        nodeEditor(details).catch(error => {if (details.isConnected) P.localMessage(details, error.message, true);});
+        if (editable()) properties.append(el('div', {class:'topology-property-actions'}, button('删除节点', () => removeNode(node.id))));
+        else if (view === 'live' && session?.state === 4 && ['default','router','host','PC','pc','docker','podman'].includes(node.type)) properties.append(nodeOperations(node, session));
+      } else properties.append(el('p', {class:'muted'}, '点击节点或链路查看属性。'));
       app.append(el('div', {class:'topology-workspace'}, palette, center, inspector));
       if (auxiliary) app.append(auxiliaryTables());
     }
-    const history = el('details', {class:'surface'}, el('summary', {}, '当前拓扑的运行记录（' + relatedRuns().length + '）'));
-    history.append(runTable(relatedRuns())); app.append(history);
+    const runs = relatedRuns();
+    app.append(historyPanel('当前拓扑的运行记录（' + runs.length + '）', runs));
   }
   function nodeName(id) { return allNodes().find(n => n.id === id)?.name || '#' + id; }
   function updateNodeLabel(node) {
@@ -243,31 +259,32 @@
     return {switch:'交换机', hub:'集线器', wlan:'无线网络', default:'原生节点', router:'原生路由器', host:'原生主机', docker:'Docker 节点'}[node.type] || '原生节点';
   }
   function nodePalette() {
-    const area = el('aside', {class:'topology-palette', 'aria-label':'节点库'}, el('h3', {}, '节点库'));
-    if (!editable()) {area.append(el('p', {class:'muted'}, '当前为只读视图。编辑配置后可添加节点。')); return area;}
-    const contents = el('div');
+    const body = el('div', {class:'topology-panel-body'});
+    const area = el('aside', {class:'topology-panel topology-palette', 'aria-label':'节点库'}, panelHeader('节点库'), body);
+    if (!editable()) {body.append(el('p', {class:'muted'}, '当前为只读视图。编辑配置后可添加节点。')); return area;}
+    const contents = el('div', {class:'topology-palette-groups'});
     const search = input(paletteQuery, value => {paletteQuery = value; fill();}); search.placeholder = '搜索模板或节点'; search.setAttribute('aria-label', '搜索节点库');
-    area.append(search, contents);
+    body.append(search, contents);
     function fill() {
       contents.replaceChildren();
       const matches = name => name.toLowerCase().includes(paletteQuery.toLowerCase());
       for (const [kind, label] of [['docker','Docker 模板'],['netns','原生模板']]) {
         const items = templates.filter(t => t.runtime_type === kind && matches(t.name));
-        contents.append(el('h4', {}, label + '（' + items.length + '）'));
-        for (const template of items) {
+        const controls = items.map(template => {
           const control = button(template.name, () => addNode(template)); control.setAttribute('aria-label', '添加模板 ' + template.name);
-          contents.append(control, el('small', {class:'muted'}, '修订 ' + template.version + (template.image_tag ? ' · ' + template.image_tag : '')));
-        }
-        if (!items.length) contents.append(el('p', {class:'muted'}, templates.some(t => t.runtime_type === kind) ? '没有匹配模板' : '暂无此类模板'));
+          return el('div', {}, control, el('small', {class:'muted'}, '修订 ' + template.version + (template.image_tag ? ' · ' + template.image_tag : '')));
+        });
+        if (!controls.length) controls.push(el('p', {class:'muted'}, templates.some(t => t.runtime_type === kind) ? '没有匹配模板' : '暂无此类模板'));
+        contents.append(propertyGroup(label + '（' + items.length + '）', controls));
       }
-      contents.append(el('h4', {}, '原生节点 · 无需模板'));
-      for (const [label, model, services] of [['原生主机','bare',[]],['原生路由器','bare',['IPForward']]]) {
-        if (matches(label)) contents.append(button('添加' + label, () => addNative(label, {type:'default', model, services:services.filter(s => native.includes(s))})));
-      }
-      contents.append(el('h4', {}, '网络构件'));
-      for (const [type, label] of [['switch','交换机'],['hub','集线器'],['wlan','无线网络']]) {
-        if (matches(label)) contents.append(button('添加' + label, () => addNative(label, {type, model:'bare', ...(type === 'wlan' ? {range:'275', bandwidth:'54000000', delay:'5000', jitter:'0', error:'0'} : {})})));
-      }
+      const nativeControls = [['原生主机',[]],['原生路由器',['IPForward']]]
+        .filter(([label]) => matches(label)).map(([label, services]) =>
+          button('添加' + label, () => addNative(label, {type:'default', model:'bare', services:services.filter(s => native.includes(s))})));
+      if (nativeControls.length) contents.append(propertyGroup('CORE 原生节点', nativeControls));
+      const networkControls = [['switch','交换机'],['hub','集线器'],['wlan','无线网络']]
+        .filter(([, label]) => matches(label)).map(([type, label]) =>
+          button('添加' + label, () => addNative(label, {type, model:'bare', ...(type === 'wlan' ? {range:'275', bandwidth:'54000000', delay:'5000', jitter:'0', error:'0'} : {})})));
+      if (networkControls.length) contents.append(propertyGroup('网络构件', networkControls));
     }
     fill(); return area;
   }
@@ -475,45 +492,53 @@
   }
   function nativeEditor(area, node) {
     const wlan = definition.wlans.includes(node);
-    area.append(el('p', {class:'muted'}, nodeKind(node) + ' · 不依赖节点模板'));
     if (wlan) {
-      for (const [key, label] of [['range','无线范围 m'],['bandwidth','无线带宽 bps'],['delay','无线时延 µs'],['jitter','无线抖动 µs'],['error','无线错误率 %']]) {
-        area.append(field(label, input(node[key], value => {node[key] = value; changed();}, 'number')));
-      }
+      const fields = [['range','无线范围 m'],['bandwidth','无线带宽 bps'],['delay','无线时延 µs'],['jitter','无线抖动 µs'],['error','无线错误率 %']]
+        .map(([key, label]) => field(label, input(node[key], value => {node[key] = value; changed();}, 'number')));
+      area.append(propertyGroup('无线设置', fields));
     } else if (['default','router','host','PC'].includes(node.type || 'default')) {
-      area.append(field('节点型号', select([['bare','裸节点（服务完全按下方选择）'],['PC','PC'],['host','主机'],['router','路由器'],['mdr','无线多播路由器']], node.model || 'bare', value => {
+      const model = field('节点型号', select([['bare','裸节点（服务完全按下方选择）'],['PC','PC'],['host','主机'],['router','路由器'],['mdr','无线多播路由器']], node.model || 'bare', value => {
         node.model = value; const defaults = data.native_models[value] || [];
         node.services = defaults.filter(name => native.includes(name));
         const missing = defaults.filter(name => !native.includes(name));
         changed(); render();
         if (missing.length) P.notice('当前环境未提供这些型号默认服务：' + missing.join('、') + '。已跳过，请检查下方启用项。', true);
-      })), el('h4', {}, 'CORE 原生服务'));
+      }));
+      area.append(propertyGroup('原生节点设置', model));
       const chosen = new Set(node.services || []);
       const names = [...new Set([...native, ...chosen])].sort();
-      area.append(el('p', {class:'muted'}, '仅显示 CORE 原生服务。需关闭全部服务时请选择“裸节点”型号。'),
+      area.append(propertyGroup('CORE 原生服务', el('p', {class:'muted'}, '需关闭全部服务时请选择“裸节点”型号。'),
         el('div', {class:'native-service-list'}, names.map(name => checkbox(chosen.has(name), enabled => {
           if (enabled) chosen.add(name); else chosen.delete(name);
           node.services = [...chosen]; changed();
-        }, name))));
-    } else area.append(el('p', {class:'muted'}, '网络构件不使用镜像服务或主机服务。'));
+        }, name)))));
+    } else area.append(propertyGroup('节点类型', el('p', {}, nodeKind(node))));
   }
-  async function nodeEditor(area){const token=optionsToken,node=allNodes().find(n=>n.id===selected);if(!node)return;area.append(el('h3',{},node.name+' · 参数'));if(!node.instance){nativeEditor(area,node);return;}
+  async function nodeEditor(area){const token=optionsToken,node=allNodes().find(n=>n.id===selected);if(!node)return;if(!node.instance){nativeEditor(area,node);return;}
     const result=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+node.instance_version);if(token!==optionsToken||!area.isConnected)return;
     const templatePicker=select(templates.map(t=>[t.name,t.name+' · '+(t.runtime_type==='docker'?'Docker':'原生')]),node.instance,async value=>{try{const template=templates.find(t=>t.name===value);node.instance=value;node.instance_version=template.version;for(const key of ['service_overrides','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();}catch(error){P.notice(error.message,true);}});
-    area.append(field('节点模板',templatePicker),el('p',{class:'muted'},'固定修订 '+node.instance_version+'；模板更新不会自动改变此节点。'));
-    const latest=templates.find(t=>t.name===node.instance);if(latest?.version>node.instance_version)area.append(button('查看并采用模板新修订',async()=>{const newer=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+latest.version);const comparison=el('section',{class:'surface'},el('h3',{},'模板更新差异'),P.fields({原默认服务:result.template.services,新默认服务:newer.template.services,节点覆盖将被清除:node.service_overrides!==undefined}),button('取消',()=>comparison.remove()),button('采用新默认',()=>{node.instance_version=latest.version;for(const key of ['service_overrides','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();},true));area.append(comparison);}));
+    const templateFields = el('div', {}, field('节点模板', templatePicker),
+      el('p', {class:'muted'}, '固定修订 ' + node.instance_version + '；模板更新不会自动改变此节点。'));
+    area.append(propertyGroup('模板配置', templateFields));
+    const latest=templates.find(t=>t.name===node.instance);if(latest?.version>node.instance_version)templateFields.append(button('查看并采用模板新修订',async()=>{const newer=await api('/instances/'+encodeURIComponent(node.instance)+'/service-options?version='+latest.version);const comparison=el('section',{class:'surface'},el('h3',{},'模板更新差异'),P.fields({原默认服务:result.template.services,新默认服务:newer.template.services,节点覆盖将被清除:node.service_overrides!==undefined}),button('取消',()=>comparison.remove()),button('采用新默认',()=>{node.instance_version=latest.version;for(const key of ['service_overrides','services','image','image_ref','target_name','target_version','effective_services','service_selection','model','type'])delete node[key];changed();render();},true));templateFields.append(comparison);}));
     if(!result.catalog){area.append(el('p',{class:'notice'},'旧模板按原有实现执行。迁移服务清单并保存新模板后可配置节点覆盖。'));return;}
     const native=result.catalog.origin==='core';let chosen=P.clone(node.service_overrides??result.selection),custom=node.service_overrides!==undefined&&node.service_overrides!==null;const serviceArea=el('div'),checks=message();
     async function validate(){if(native){P.localMessage(checks,'CORE 原生服务单独选择。');return;}try{const validated=await api('/image-services/node/validate','POST',{services:result.catalog.services,selection:chosen});if(token!==optionsToken||!area.isConnected)return;P.localMessage(checks,[...(validated.errors||[]),...(validated.warnings||[]),...(validated.errors?.length?[]:['启动顺序：'+validated.order.map(id=>result.catalog.services.find(s=>s.id===id)?.name).join(' → ')])].join('；'),!!validated.errors?.length);}catch(error){if(token===optionsToken&&area.isConnected)P.localMessage(checks,error.message,true);}}
     function update(){node.service_overrides=P.clone(chosen);delete node.services;delete node.effective_services;delete node.service_selection;changed();validate();}
     function renderServices(){serviceArea.replaceChildren(table(['启用','服务','有效模式','来源'],result.catalog.services.map(service=>{const mode=select([['','请选择模式'],...service.modes.map(m=>[m.id,m.name])],chosen[service.id]||'',value=>{chosen[service.id]=value||'__choose__';update();});mode.disabled=!custom||!chosen[service.id];const enabled=checkbox(!!chosen[service.id],value=>{chosen[service.id]=value?(service.modes.find(m=>m.default)?.id||'__choose__'):null;update();renderServices();});enabled.querySelector('input').disabled=!custom;return [enabled,service.name,mode,custom?'此节点覆盖':'模板默认'];})));}
-    area.append(field('配置来源',select([['inherit','使用模板默认'],['custom','自定义此节点']],custom?'custom':'inherit',value=>{custom=value==='custom';chosen=P.clone(result.selection);if(custom)node.service_overrides=P.clone(chosen);else delete node.service_overrides;delete node.services;changed();renderServices();validate();})),button('恢复模板默认',()=>{delete node.service_overrides;delete node.services;changed();render();}),serviceArea,checks);renderServices();if(view!=='edit')area.disabled=true;else validate();
+    const source = field('配置来源', select([['inherit','使用模板默认'],['custom','自定义此节点']], custom ? 'custom' : 'inherit', value => {
+      custom = value === 'custom'; chosen = P.clone(result.selection);
+      if (custom) node.service_overrides = P.clone(chosen); else delete node.service_overrides;
+      delete node.services; changed(); renderServices(); validate();
+    }));
+    const restore = button('恢复模板默认', () => {delete node.service_overrides;delete node.services;changed();render();});
+    area.append(propertyGroup('服务与启动模式', source, restore, serviceArea, checks));
+    renderServices(); if (view !== 'edit') area.disabled = true; else validate();
   }
   function linkInspector(area, link) {
-    area.append(el('h3', {}, '链路属性'), el('p', {class:'muted'}, nodeName(link.node1_id) + ' ↔ ' + nodeName(link.node2_id)));
-    const form = el('fieldset', {disabled:!editable()});
-    for (const [key, endpoint] of [['iface1','node1_id'],['iface2','node2_id']]) {
-      form.append(el('h4', {}, nodeName(link[endpoint]) + ' · 接口'));
+    const form = el('fieldset', {class:'topology-properties', disabled:!editable()});
+    for (const [key, label, endpoint] of [['iface1','端点 A','node1_id'],['iface2','端点 B','node2_id']]) {
+      const name = nodeName(link[endpoint]);
       // Rendering imported data must not introduce empty overrides or erase automatic IP assignment.
       const legacy = property => link[key]?.[property] ?? link[key + '_' + property];
       function write(property, value) {
@@ -522,34 +547,36 @@
       }
       const ip4 = input(legacy('ip4') || '', value => write('ip4', value.trim() || null));
       ip4.placeholder = '留空使用自动分配';
-      form.append(field('IPv4 · ' + nodeName(link[endpoint]), ip4),
-        field('IPv4 掩码位 · ' + nodeName(link[endpoint]), input(legacy('ip4_mask') ?? 24, value => write('ip4_mask', Number(value)), 'number')),
-        field('IPv6 · ' + nodeName(link[endpoint]), input(link[key]?.ip6 || '', value => write('ip6', value.trim() || null))),
-        field('IPv6 掩码位 · ' + nodeName(link[endpoint]), input(link[key]?.ip6_mask ?? 64, value => write('ip6_mask', Number(value)), 'number')));
+      const fields = [field('IPv4 · ' + name, ip4),
+        field('IPv4 掩码位 · ' + name, input(legacy('ip4_mask') ?? 24, value => write('ip4_mask', Number(value)), 'number')),
+        field('IPv6 · ' + name, input(link[key]?.ip6 || '', value => write('ip6', value.trim() || null))),
+        field('IPv6 掩码位 · ' + name, input(link[key]?.ip6_mask ?? 64, value => write('ip6_mask', Number(value)), 'number'))];
       const extra = el('details', {}, el('summary', {}, '接口高级参数'));
       for (const [property, label, type] of [['id','接口 ID','number'],['name','接口名称','text'],['mac','MAC 地址','text'],['mtu','MTU（留空自动）','number']]) {
-        extra.append(field(label + ' · ' + nodeName(link[endpoint]), input(property === 'mtu' && !link[key]?.mtu ? '' : link[key]?.[property] ?? '', value => write(property, value === '' ? null : type === 'number' ? Number(value) : value), type)));
+        extra.append(field(label + ' · ' + name, input(property === 'mtu' && !link[key]?.mtu ? '' : link[key]?.[property] ?? '', value => write(property, value === '' ? null : type === 'number' ? Number(value) : value), type)));
       }
-      form.append(extra);
+      form.append(propertyGroup(label + ' · ' + name, fields, extra));
     }
+    const parameters = [];
     const advanced = el('details', {}, el('summary', {}, '更多链路参数'));
     for (const [key, label] of [['delay','时延 µs'],['bandwidth','带宽 bps'],['loss','丢包率 %'],['jitter','抖动 µs'],['dup','重复率 %'],['buffer','缓冲队列'],['burst','突发大小']]) {
       const control = field(label, input(link.options?.[key] ?? link[key] ?? 0, value => {
         link.options ??= {}; link.options[key] = Number(value); delete link[key]; changed();
       }, 'number'));
-      (['delay','bandwidth'].includes(key) ? form : advanced).append(control);
+      if (key === 'delay' || key === 'bandwidth') parameters.push(control); else advanced.append(control);
     }
-    form.append(advanced); area.append(form);
-    if (editable()) area.append(button('删除链路', () => {
+    form.append(propertyGroup('链路参数', parameters, advanced)); area.append(form);
+    if (editable()) area.append(el('div', {class:'topology-property-actions'}, button('删除链路', () => {
       definition.links.splice(selectedLink, 1); selectedLink = null; changed(); render();
-    }));
+    })));
   }
   function auxiliaryTables() {
-    return el('section', {class:'surface'}, el('h3', {}, '节点与链路表'),
-      table(['节点','类型','模板','操作'], allNodes().map(node => [node.name, nodeKind(node), node.instance || '无需模板',
-        button('选择节点', () => {selected = node.id; selectedLink = null; render();})])),
-      table(['端点 A','端点 B','操作'], definition.links.map((link, index) => [nodeName(link.node1_id), nodeName(link.node2_id),
-        button('选择链路', () => {selectedLink = index; selected = null; render();})])));
+    const nodes = table(['节点','类型','模板','操作'], allNodes().map(node => [node.name, nodeKind(node), node.instance || '无需模板',
+      button('选择节点', () => {selected = node.id; selectedLink = null; render();})]));
+    const links = table(['端点 A','端点 B','操作'], definition.links.map((link, index) => [nodeName(link.node1_id), nodeName(link.node2_id),
+      button('选择链路', () => {selectedLink = index; selected = null; render();})]));
+    return el('section', {class:'topology-panel topology-auxiliary'}, panelHeader('节点与链路表'),
+      el('div', {class:'topology-panel-body topology-properties'}, propertyGroup('节点', nodes), propertyGroup('链路', links)));
   }
   function runTable(runs) {
     return table(['拓扑','运行时间','状态','操作'], runs.slice().reverse().map(run => {
@@ -580,7 +607,7 @@
     const expected = {sid:session.id, identity:session.identity};
     const terminalUrl = '/static/term.html?' + new URLSearchParams({sid:session.id,nid:node.id,name:node.name,identity:session.identity});
     const terminal = el('a', {href:terminalUrl,target:'_blank',rel:'noopener',class:'btn'}, '终端');
-    return el('section', {class:'node-operations'}, el('h4', {}, '节点操作'),
+    return propertyGroup('节点操作',
       el('div', {class:'actions'}, terminal, button('执行命令', () => commandDialog(node, expected))));
   }
   function commandDialog(node, expected) {
