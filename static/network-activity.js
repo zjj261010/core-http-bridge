@@ -5,8 +5,8 @@ const NetworkActivity = (() => {
   const active = new Set(['pending','waiting','starting','running']);
   const states = {pending:'待启动',waiting:'等待计划',starting:'启动或等目标就绪',running:'运行中',
     completed:'已完成',stopped:'已停止',failed:'失败',interrupted:'已中断'};
-  const native = new Set(['default','pc','host','router']);
-  const supported = new Set([...native, 'docker','podman']);
+  const local = new Set(['default','pc','host','router','docker']);
+  const httpTargets = new Set([...local, 'podman']);
   const sameLink = (pair, link) => pair.includes(link.node1_id) && pair.includes(link.node2_id);
 
   function editor(kind, definition, nodes, changed, initialLink) {
@@ -33,7 +33,7 @@ const NetworkActivity = (() => {
     }
     async function editItem(existing) {
       const known = await api('/network-activity/capabilities');
-      const source = nodes.filter(node => native.has(node.type));
+      const source = nodes.filter(node => local.has(node.type));
       const defaults = kind === 'traffic' ?
         {name:'背景流量 ' + (list().length + 1),protocol:'http',port:80,path:'/',rate:5,delay:1,duration:30,
           source_id:source[0]?.id} :
@@ -65,7 +65,7 @@ const NetworkActivity = (() => {
         const fields = [string('名称','name')];
         if (kind === 'traffic') {
           const http = item.protocol === 'http';
-          const targets = nodes.filter(node => node.id !== item.source_id && (http ? supported : native).has(node.type));
+          const targets = nodes.filter(node => node.id !== item.source_id && (http ? httpTargets : local).has(node.type));
           if (!targets.some(node => node.id === item.target_id)) item.target_id = undefined;
           fields.push(field('流量协议',select([['http','HTTP'],['tcp','TCP'],['udp','UDP']],item.protocol,value => {
             item.protocol = value;

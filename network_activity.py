@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import ipaddress
@@ -18,6 +19,7 @@ import threading
 import time
 from typing import Annotated, Literal
 
+from core.api.grpc.wrappers import NodeType
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +31,7 @@ from settings import request_file, settings
 router = APIRouter()
 logger = logging.getLogger(__name__)
 NATIVE_TYPES = {'default', 'host', 'router', 'pc'}
+LOCAL_NODE_TYPES = NATIVE_TYPES | {'docker'}
 ACTIVE = {'pending', 'waiting', 'starting', 'running'}
 Key = Annotated[str, Field(pattern=r'^[a-zA-Z0-9_-]{1,48}$')]
 ItemName = Annotated[str, Field(min_length=1, max_length=80)]
@@ -123,13 +126,11 @@ def validate(plan, definition, kinds):
             raise ValueError('流量任务或探针 ID 重复')
         seen.add(item.id)
         if isinstance(item, Traffic):
-            if item.source_id == item.target_id or kinds.get(item.source_id) not in NATIVE_TYPES:
-                raise ValueError(item.name + '：请选择不同的源与目标，源必须为 CORE 原生节点')
+            if item.source_id == item.target_id or kinds.get(item.source_id) not in LOCAL_NODE_TYPES:
+                raise ValueError(item.name + '：请选择不同的源与目标，源须为 CORE 原生节点或 Docker 节点')
             target = kinds.get(item.target_id)
-            if target not in NATIVE_TYPES | {'docker', 'podman'}:
-                raise ValueError(item.name + '：请选择有 IP 接口的业务节点')
-            if item.protocol != 'http' and target not in NATIVE_TYPES:
-                raise ValueError(item.name + '：iperf3 接收端须为 CORE 原生节点')
+            if target not in LOCAL_NODE_TYPES and (item.protocol != 'http' or target != 'podman'):
+                raise ValueError(item.name + '：请选择受支持的目标节点及 IP 接口')
             link = _link(definition, item.target_link)
             if not link or item.target_id not in item.target_link:
                 raise ValueError(item.name + '：请选择目标节点所连的接口')
@@ -143,8 +144,8 @@ def validate(plan, definition, kinds):
                     raise ValueError(item.name + '：同一节点的 iperf3 接收端口须各不相同')
                 listeners.add(listener)
         else:
-            if kinds.get(item.node_id) not in NATIVE_TYPES or item.node_id not in item.link or not _link(definition, item.link):
-                raise ValueError(item.name + '：请选择 CORE 原生节点对应的链路接口')
+            if kinds.get(item.node_id) not in LOCAL_NODE_TYPES or item.node_id not in item.link or not _link(definition, item.link):
+                raise ValueError(item.name + '：请选择 CORE 原生节点或 Docker 节点的链路接口')
             if item.ruleset not in catalog:
                 raise ValueError(item.name + '：Snort 规则集不存在')
             capture = (item.node_id, frozenset(item.link))
@@ -261,10 +262,10 @@ def preflight(plan, definition):
     return errors
 
 
-def _namespace(session, node_id):
+def _native_namespace(session, node_id):
     """Bind to the local vnoded process opened by CORE, then pin its namespace FD."""
     node = session.nodes.get(node_id)
-    if node is None or node.server or node.type.value != 0 or not re.fullmatch(r'n\d+', node.name or ''):
+    if node is None or node.server or node.type != NodeType.DEFAULT or not re.fullmatch(r'n\d+', node.name or ''):
         raise ValueError('该任务需要本机部署的 CORE 原生节点')
     channel = Path(session.dir) / node.name
     pid = int(channel.with_suffix('.pid').read_text().strip())
@@ -273,6 +274,99 @@ def _namespace(session, node_id):
     if not argv or Path(os.fsdecode(argv[0])).name != 'vnoded' or os.fsencode(channel) not in argv:
         raise ValueError('CORE 节点进程已退出或被替换')
     return os.open(process / 'ns/net', os.O_RDONLY | os.O_CLOEXEC)
+
+
+def _process_start(pid):
+    fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+    if fields[0] in ('Z', 'X'):
+        raise ValueError('容器进程已退出')
+    return fields[19]
+
+
+def _identity(stat):
+    return stat.st_dev, stat.st_ino
+
+
+@dataclass(frozen=True)
+class DockerNamespace:
+    """Identify a specific local CORE container incarnation."""
+    pid: int
+    start_time: str
+    identity: tuple[int, int]
+
+    @property
+    def path(self):
+        return Path('/proc') / str(self.pid) / 'ns/net'
+
+    def verify(self):
+        try:
+            if _process_start(self.pid) == self.start_time and _identity(self.path.stat()) == self.identity:
+                return
+        except (OSError, ValueError, IndexError):
+            pass
+        raise ValueError('Docker 节点已退出或重建，请通过拓扑重新启动网络任务')
+
+    def open(self):
+        self.verify()
+        fd = os.open(self.path, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            if _identity(os.fstat(fd)) != self.identity:
+                raise ValueError('Docker 节点的网络命名空间已变化')
+            self.verify()
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+
+def _bind_docker_namespace(name, process):
+    pid = process['pid']
+    if process['name'] != name or pid <= 0:
+        raise ValueError('CORE 与 Docker 节点的运行身份不一致')
+    start_time = _process_start(pid)
+    fmt = ('{"pid":{{json .State.Pid}},"running":{{json .State.Running}},'
+           '"sandbox":{{json .NetworkSettings.SandboxKey}},"mode":{{json .HostConfig.NetworkMode}}}')
+    container = json.loads(_tool_output(['docker', 'inspect', '--type', 'container', '--format', fmt, name]))
+    if not container['running'] or container['pid'] != pid or _process_start(pid) != start_time:
+        raise ValueError('CORE 与 Docker 节点的运行进程不一致')
+    if container['mode'] == 'host' or container['mode'].startswith('container:') or not container['sandbox']:
+        raise ValueError('Docker 节点需要独立的网络命名空间')
+    identity = _identity((Path('/proc') / str(pid) / 'ns/net').stat())
+    if identity == _identity(Path('/proc/self/ns/net').stat()) or identity != _identity(Path(container['sandbox']).stat()):
+        raise ValueError('Docker 节点网络命名空间与容器运行身份不一致')
+    namespace = DockerNamespace(pid, start_time, identity)
+    namespace.verify()
+    return namespace
+
+
+def _participants(spec):
+    return (spec.source_id, spec.target_id) if isinstance(spec, Traffic) else (spec.node_id,)
+
+
+def _docker_namespaces(record, session, bridge, specs):
+    import core_adapter
+
+    node_ids = {nid for spec in specs for nid in _participants(spec)
+                if nid in session.nodes and session.nodes[nid].type == NodeType.DOCKER}
+    if not node_ids:
+        return {}, {}
+    try:
+        processes = core_adapter.docker_node_processes(bridge, session.id, node_ids)
+    except Exception:
+        logger.exception('could not read CORE Docker processes for session %s', session.id)
+        return {}, {nid: '无法读取 CORE 管理的 Docker 进程' for nid in node_ids}
+    namespaces, errors = {}, {}
+    for nid in sorted(node_ids):
+        name = record.get('bindings', {}).get(str(nid), {}).get('runtime_name')
+        process = processes.get(str(nid))
+        if not name or name != session.nodes[nid].name or not process:
+            errors[nid] = '无法确认当前拓扑的本机 Docker 节点'
+            continue
+        try:
+            namespaces[nid] = _bind_docker_namespace(name, process)
+        except (OSError, ValueError, TypeError, IndexError, KeyError, subprocess.TimeoutExpired) as error:
+            errors[nid] = str(error)[:250]
+    return namespaces, errors
 
 
 def _resolve_interface(bridge, sid, definition, endpoints, node_id):
@@ -316,6 +410,7 @@ class Worker:
         self.run = run
         self.spec = spec
         self.cancelled = threading.Event()
+        self.cancel_error = None
         self.processes = []
         self.lock = threading.Lock()
         self.finished = threading.Event()
@@ -328,7 +423,8 @@ class Worker:
         with self.lock:
             if self.cancelled.is_set():
                 raise InterruptedError()
-            fd = _namespace(self.run.session, node_id)
+            docker = self.run.docker.get(node_id)
+            fd = docker.open() if docker else _native_namespace(self.run.session, node_id)
             try:
                 proc = subprocess.Popen(
                     [str(_tools()['nsenter']), '--net=/proc/self/fd/' + str(fd), '--', *map(str, args)],
@@ -341,8 +437,11 @@ class Worker:
             self.processes.append(proc)
             return proc
 
-    def terminate(self):
+    def terminate(self, error=None):
         with self.lock:
+            if self.finished.is_set() or self.cancelled.is_set():
+                return
+            self.cancel_error = error
             self.cancelled.set()
             for proc in self.processes:
                 _kill(proc, signal.SIGTERM)
@@ -403,6 +502,7 @@ class Worker:
         self.update(status='waiting')
         if self.cancelled.wait(max(0, self.run.started + spec.delay - time.monotonic())):
             raise InterruptedError()
+        self.verify_docker()
         iface = _resolve_interface(self.run.bridge, self.run.sid, self.run.definition, spec.target_link, spec.target_id)
         address = _target_address(iface.ip4)
         self.update(status='starting', endpoint=address)
@@ -512,14 +612,31 @@ class Worker:
             result = {'status': 'failed', 'error': str(error)[:350]}
             logger.info('network activity %s/%s: %s', self.run.id, self.spec.id, error)
         finally:
+            cleanup_failed = False
             try:
+                self.cleanup()
+            except Exception as error:
+                cleanup_failed = True
+                result = {'status': 'failed', 'error': ('清理任务进程失败：' + str(error))[:350]}
+            with self.lock:
                 try:
-                    self.cleanup()
-                except (OSError, subprocess.TimeoutExpired) as error:
-                    result = {'status': 'failed', 'error': ('清理任务进程失败：' + str(error))[:350]}
-                self.update(**({'status': 'stopped'} if self.cancelled.is_set() else result), ended_at=repo.now())
-            finally:
-                self.finished.set()
+                    if self.cancel_error:
+                        result = {'status': 'failed', 'error': self.cancel_error}
+                    elif self.cancelled.is_set() and not cleanup_failed:
+                        result = {'status': 'stopped'}
+                    elif result['status'] == 'completed':
+                        try:
+                            self.verify_docker()
+                        except ValueError as error:
+                            result = {'status': 'failed', 'error': str(error)}
+                    self.update(**result, ended_at=repo.now())
+                finally:
+                    self.finished.set()
+
+    def verify_docker(self):
+        for nid in _participants(self.spec):
+            if namespace := self.run.docker.get(nid):
+                namespace.verify()
 
 
 def _json_line(line):
@@ -542,6 +659,17 @@ class Run:
         self.lock = threading.Lock()
         self.path = settings.data_dir / 'network-activity' / self.id
         specs = [*plan.traffic, *plan.probes]
+        self.docker = {}
+        errors = errors.copy()
+        if session is not None:
+            candidates = [spec for spec in specs if spec.id not in errors]
+            self.docker, unavailable = _docker_namespaces(record, session, bridge, candidates)
+            names = {node['id']:node['name'] for node in self.definition.get('nodes', [])}
+            for spec in candidates:
+                issue = next((f"{names.get(nid, nid)}：{unavailable[nid]}" for nid in _participants(spec)
+                              if nid in unavailable), None)
+                if issue:
+                    errors[spec.id] = issue
         self.workers = {spec.id: Worker(self, spec) for spec in specs if spec.id not in errors}
         self.data = {
             'run_id': self.id, 'deployment_id': record['deployment_id'], 'drill_id': self.drill,
@@ -581,6 +709,17 @@ class Run:
         for worker in self.workers.values():
             worker.finished.wait(max(0, until - time.monotonic()))
 
+    def reconcile_docker(self):
+        if not self.docker:
+            return
+        for worker in self.workers.values():
+            if worker.finished.is_set() or worker.cancelled.is_set():
+                continue
+            try:
+                worker.verify_docker()
+            except ValueError as error:
+                worker.terminate(str(error))
+
 
 _lock = threading.RLock()
 _runs = {}
@@ -617,6 +756,8 @@ def reconcile(sessions):
             session = sessions.get(sid)
             if not session or session.state.value != 4 or platform_db.get_active_drill(sid) != run.drill:
                 stop(sid, run.drill)
+            else:
+                run.reconcile_docker()
 
 
 def shutdown():

@@ -1,3 +1,8 @@
+from types import SimpleNamespace
+
+import pytest
+from core.api.grpc.wrappers import NodeType
+
 import network_activity as network
 import repository as repo
 
@@ -92,3 +97,49 @@ def test_batches_and_alert_pages_scope_queries_and_export_only_matching_records(
     assert [row['提示'] for row in csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff')))] == [
         "'=tracked formula", 'tracked B', 'tracked A',
     ]
+
+
+@pytest.mark.parametrize('protocol', ['http', 'tcp', 'udp'])
+def test_validation_accepts_docker_for_traffic_and_snort(protocol):
+    plan = network.Plan.model_validate({
+        'traffic': [{'id':'flow','name':'流量','protocol':protocol,'source_id':1,'target_id':2,
+                     'target_link':[1,2],'port':8080,'rate':5,'duration':1}],
+        'probes': [{'id':'probe','name':'探针','node_id':2,'link':[1,2]}],
+    })
+    definition = {'links':[{'node1_id':1,'node2_id':2}]}
+    network.validate(plan, definition, {1:'docker', 2:'docker'})
+
+
+def test_docker_namespace_checks_topology_binding_and_reports_per_node(monkeypatch, mock_bridge):
+    nodes = {index:SimpleNamespace(type=NodeType.DOCKER, name=f'node{index}') for index in (1, 2)}
+    session = SimpleNamespace(id=41, nodes=nodes)
+    plan = network.Plan.model_validate({'probes':[
+        {'id':'probe','name':'探针','node_id':1,'link':[1,2]},
+        {'id':'other','name':'其他探针','node_id':2,'link':[1,2]},
+    ]})
+    record = {'bindings':{'1':{'runtime_name':'node1'},'2':{'runtime_name':'claimed-name'}}}
+    known = {'1':{'name':'node1','pid':20}}
+    monkeypatch.setattr('core_adapter.docker_node_processes', lambda bridge, sid, ids: known)
+    reference = object()
+    monkeypatch.setattr(network, '_bind_docker_namespace', lambda name, process: reference)
+    namespaces, errors = network._docker_namespaces(record, session, mock_bridge, plan.probes)
+    assert namespaces == {1:reference}
+    assert set(errors) == {2}
+
+
+def test_docker_namespace_never_opens_when_process_identity_has_changed(monkeypatch):
+    opened = []
+    monkeypatch.setattr(network, '_process_start', lambda pid: 'new-process')
+    monkeypatch.setattr(network.os, 'open', lambda *args: opened.append(args))
+    namespace = network.DockerNamespace(123, 'old-process', (3, 4))
+    with pytest.raises(ValueError, match='已退出或重建'):
+        namespace.open()
+    assert not opened
+
+
+def test_docker_namespace_rejects_a_host_network_container(monkeypatch):
+    monkeypatch.setattr(network, '_process_start', lambda pid: 'start')
+    monkeypatch.setattr(network, '_tool_output', lambda args:
+                        '{"pid":42,"running":true,"sandbox":"/proc/42/ns/net","mode":"host"}')
+    with pytest.raises(ValueError, match='独立的网络命名空间'):
+        network._bind_docker_namespace('node1', {'name':'node1','pid':42})

@@ -26,6 +26,19 @@ for sid, session in list(coreemu.sessions.items()):
 ''')
 
 
+def docker_node_processes(bridge, sid, node_ids):
+    """Read the daemon's own names and processes for local CORE Docker nodes."""
+    return call(bridge, f'''from core.nodes.docker import DockerNode
+session = coreemu.sessions.get({int(sid)})
+result = {{}}
+if session is not None:
+    for nid in {sorted(int(node_id) for node_id in node_ids)!r}:
+        node = session.nodes.get(nid)
+        if isinstance(node, DockerNode) and node.server is None and node.up and node.pid:
+            result[str(nid)] = {{'name': node.name, 'pid': int(node.pid)}}
+''')
+
+
 def activate(bridge, directories, required):
     return call(bridge, '''for directory in '''+repr(directories)+''':
     coreemu.service_manager.load(Path(directory))

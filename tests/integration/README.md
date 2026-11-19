@@ -47,3 +47,7 @@ python3 scripts/dev-tools.py python tests/integration/cleanup_environment.py --r
 上述命令是维护入口，不因文档更新自动执行。每批仅运行授权范围，失败先分析并定向修复，不能覆盖旧失败报告。`tests/test_user_workflow_repairs.py` 是CORE默认MTU、历史名称及镜像旧size字段兼容回归；`tests/e2e/monitor_context_unit.cjs` 是身份/演练范围的名称映射检查。
 
 `topology_navigation_smoke.cjs` 用于部署后读取真实页面并验证临时编辑的取消/放弃。它不保存、不启动资源，结果要求HTTP写请求为0，必须使用独立浏览器上下文和持久证据目录，不能作为常驻任务自动运行。
+
+## 全 Docker 拓扑的背景流量和 Snort
+
+使用新建的隔离环境和 `python:3.10-slim`。先运行 `topology_flow_fixture.py` 准备 HTTP 镜像配置，再用 `scripts/dev-tools.py browser --run-dir <目录> --url http://127.0.0.1:18080 tests/e2e/docker_network_activity.cjs` 进行一次验收。用例从页面添加并连接两个 Docker 节点，配置 HTTP、TCP、UDP 和 Snort，验证统计、无害规则命中、停止清理和容器退出后的任务状态。结束后运行 `cleanup_environment.py`。
