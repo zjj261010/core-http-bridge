@@ -112,13 +112,17 @@
       message.replaceChildren(); bound.replaceChildren(); servicesArea.replaceChildren();
       if (work.runtime_type === 'netns') {renderNative(); return;}
       if (work.runtime_type !== 'docker' || !work.image_tag) return;
-      const matches = registry.filter(item => item.image_ref === work.image_tag);
+      const image = images.find(item => item.ref === work.image_tag);
+      const matchesImage = item => image?.image_digest && item.image_digest ?
+        item.image_digest === image.image_digest : item.image_ref === work.image_tag;
+      const matches = registry.filter(matchesImage);
       const candidate = matches.find(item => item.name === work.target_name) || matches[0];
       if (!candidate) {
         servicesArea.append(el('p', {class:'notice'}, '请先在镜像管理里确认服务清单并生效。空服务清单也可确认。'));
         return;
       }
-      const versions = (await api('/versions/target/' + encodeURIComponent(candidate.name))).filter(v => v.activation_state !== 'pending');
+      const versions = (await api('/versions/target/' + encodeURIComponent(candidate.name))).filter(v =>
+        v.activation_state !== 'pending' && matchesImage(v));
       if (token !== bindToken) return;
       if (!versions.length) throw Error('镜像配置尚未生效');
       target = versions.find(v => v.version === Number(version || candidate.version)) || versions[0];

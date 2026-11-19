@@ -70,21 +70,38 @@ def materialize(name,published):
     return mapping,str(dst)
 
 
+def matches_image(published, ref):
+    if not published.get('catalog'):
+        return published['image_ref'] == ref
+    from image_services import inspect_image
+
+    digest = published.get('image_digest')
+    if not digest:
+        return False
+    try:
+        return inspect_image(ref).get('Id') == digest
+    except (ValueError, OSError):
+        return False
+
+
 def template_body(name,body):
     import target_admin as ta
     if not isinstance(body,dict) or body.get('runtime_type') not in ('docker','netns'):
         raise ValueError('旧模板缺少有效运行时类型，请先修正')
     body=copy.deepcopy(body)
     if body.get('runtime_type') == 'docker':
-        m=ta._manifest_index().get(body.get('image_tag'))
-        if not m: raise ValueError('模板绑定的镜像缺少能力清单')
-        requested=body.get('target_version') or m.get('target_revision')
-        target_name=body.get('target_name') or m['name']
+        target_name, requested = body.get('target_name'), body.get('target_version')
+        manifest = None
+        if not (target_name and requested):
+            manifest = ta._manifest_index().get(body.get('image_tag'))
+            if not manifest: raise ValueError('模板绑定的镜像缺少能力清单')
+            requested = requested or manifest.get('target_revision')
+            target_name = target_name or manifest['name']
         t=repo.revision('target',target_name,requested)
-        if not t and not requested and target_name==m['name']: t=target(target_name,m)
+        if not t and not requested and manifest and target_name==manifest['name']: t=target(target_name,manifest)
         if not t: raise ValueError('靶标版本不存在')
         if not t.get('image_digest'): raise ValueError('此靶标版本未固定本地镜像 ID，请先导入镜像再发布靶标版本')
-        if t['image_ref'] != body['image_tag']: raise ValueError('靶标版本与镜像不一致')
+        if not matches_image(t, body['image_tag']): raise ValueError('靶标版本与镜像不一致')
         body.update(target_name=target_name,target_version=t['version'])
         if t.get('catalog'):
             import image_services
@@ -134,7 +151,7 @@ def resolve(name,version=None,service_overrides=None, *, prepare_files=True):
             import image_services
             selection=copy.deepcopy(t.get('service_selection') or {}) if service_overrides is None else copy.deepcopy(service_overrides)
             chosen,directory=image_services.execution(target_revision,selection,prepare_files=prepare_files)
-            out.update(image=target_revision['image_digest'],image_ref=target_revision['image_ref'],target_name=t['target_name'],target_version=t['target_version'],
+            out.update(image=target_revision['image_digest'],image_ref=t['image_tag'],target_name=t['target_name'],target_version=t['target_version'],
                        service_overrides=copy.deepcopy(service_overrides),effective_services=chosen,service_selection=selection,
                        services=[s['execution_name'] for s in chosen])
             return out,[directory]

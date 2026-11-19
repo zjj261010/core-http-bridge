@@ -97,7 +97,9 @@ def _save_store(path: str, data: dict):
                             repository.put('publication_drafts',previous_draft,old)
                 _dirty_packages.discard(name)
         elif collection == 'instances':
+            existing = repository.read(collection)
             for name,body in data.items():
+                if body == existing.get(name): continue
                 if not isinstance(body,dict) or body.get('runtime_type') not in ('docker','netns'): continue
                 published=versions.template(name,body)
                 body.update(published)
@@ -364,9 +366,10 @@ def targets_list():
                     item=json.loads(line)
                     if not isinstance(item,dict): continue
                     size=item.get('Size')
-                    if not isinstance(size,int) or size<0: continue
                     for ref in item.get('RepoTags') or []:
-                        if ref in by_id: by_id[ref]['size_bytes']=size
+                        if ref not in by_id: continue
+                        by_id[ref]['image_digest'] = item.get('Id')
+                        if isinstance(size,int) and size>=0: by_id[ref]['size_bytes']=size
                 except (ValueError,TypeError): continue
     # 规则（用户定稿）: 镜像必须导入（列表行存在的前提）; 服务定义/清单可缺, 进详情补录。
     # 纯 manifest 的孤儿条目不进列表（镜像未导入则整个靶标条目不存在）。
@@ -560,7 +563,7 @@ def targets_image_detail(body: dict):
     if body.get('target_name') or body.get('target_version'):
         name=body.get('target_name') or (pc.get('manifest_data') or {}).get('name')
         t=repository.revision('target',name,body.get('target_version'))
-        if not t or t['image_ref']!=ref: return _err('TARGET_INVALID','靶标版本与镜像不一致')
+        if not t or not versions.matches_image(t,ref): return _err('TARGET_INVALID','靶标版本与镜像不一致')
         pc['manifest_data']=t['manifest'];pc['manifest']=True
         pc['service_pairs']=t['manifest']['services']
         selected={'name':name,'version':t['version']}
@@ -601,13 +604,26 @@ def targets_image_delete(body: dict):
     ref = (body.get("ref") or "").strip()
     if not ref:
         return _err("NO_REF", "缺少 ref")
+    from image_services import inspect_image
+
+    try:
+        digest = inspect_image(ref).get('Id')
+    except (ValueError, OSError):
+        digest = None
     affected=[]
     for name,manifest in _load_manifests().items():
         for version in repository.history('target',name):
-            if version.get('image_ref')==ref:
-                refs=repository.references('target',name,version['version'])
-                consumers=[r for r in refs['documents'] if r['collection']!='manifests']
-                if consumers or refs['revisions']: affected.append({'name':name,'version':version['version'],'documents':consumers,'templates':refs['revisions']})
+            exact = version.get('image_ref') == ref
+            if not exact and (not digest or not version.get('catalog') or version.get('image_digest') != digest):
+                continue
+            refs = repository.references('target',name,version['version'])
+            consumers = [r for r in refs['documents'] if exact and r['collection'] != 'manifests']
+            templates = refs['revisions']
+            if not exact:
+                templates = [r for r in templates if r['owner_kind'] == 'template' and
+                             (repository.revision('template',r['owner_name'],r['owner_version']) or {}).get('image_tag') == ref]
+            if consumers or templates:
+                affected.append({'name':name,'version':version['version'],'documents':consumers,'templates':templates})
     if affected: return _err('IMAGE_VERSION_REFERENCED','镜像仍被模板版本、草稿或历史部署引用，未删除',status=409,references=affected)
     out, _c = _docker("ps -a --filter ancestor='" + ref + "' --format '{{.Names}}'", 30)
     used = [x for x in out.splitlines() if x.strip()]
@@ -814,14 +830,30 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
     available={k:list(v) for k,v in available.items()}
     manifest_ok=None
     if rt=='docker':
-        man=_manifest_index().get(img)
-        if inst.get('target_version'):
-            target=repository.revision('target',inst.get('target_name') or (man or {}).get('name',''),inst['target_version'])
-            if not target or target['image_ref']!=img:
+        from image_services import catalog_for
+
+        name, version = inst.get('target_name'), inst.get('target_version')
+        man = None
+        if not (name and version):
+            man = _manifest_index().get(img)
+            if man:
+                name = name or man['name']
+                version = version or man.get('target_revision')
+            else:
+                try:
+                    catalog = catalog_for(img)
+                except (ValueError, OSError):
+                    catalog = {}
+                name = name or catalog.get('target_name')
+                version = version or catalog.get('applied_target_version')
+        target = repository.revision('target',name,version) if name and (version or man) else None
+        if target:
+            if not versions.matches_image(target,img):
                 return _err('TARGET_INVALID','靶标版本不存在或与镜像不一致')
-            man=target['manifest']
+            man = target['manifest']
+        elif version:
+            return _err('TARGET_INVALID','靶标版本不存在或与镜像不一致')
         if not man: return _err('MANIFEST_REQUIRED','docker 模板须绑定已编目的靶标版本')
-        target=repository.revision('target',inst.get('target_name') or man['name'],inst.get('target_version') or man.get('target_revision'))
         if target and target.get('catalog'):
             import image_services
             try:
@@ -830,7 +862,7 @@ def _validate_instance(inst: dict, available: dict) -> JSONResponse | None:
                     declared={s['name'] for s in inst.get('services',[])}
                     selection={s['id']:mode['id'] for s in target['catalog']['services'] for mode in s['modes'] if image_services.mode_name(s,mode) in declared}
                 chosen,_=image_services.selection_for(target['catalog'],selection)
-                inst.update(service_selection=selection,services=chosen,target_name=inst.get('target_name') or man['name'],target_version=target['version'])
+                inst.update(service_selection=selection,services=chosen,target_name=name,target_version=target['version'])
                 return None
             except (ValueError,KeyError,TypeError) as e:
                 return _err('SERVICE_COMBINATION_INVALID',str(e))

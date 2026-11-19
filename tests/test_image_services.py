@@ -2,6 +2,7 @@
 import copy
 import io
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -47,6 +48,66 @@ def test_staging_and_confirmation_preserve_optimistic_revision(image_api):
     repeated=save(client,staged,[service()],'apply',request_id='one-confirmation').json()['data']
     assert repeated['revision']==applied['revision'] and len(calls)==1
     assert client.get('/targets/registry').json()['data'][0]['version']==applied['applied_target_version']
+
+
+def test_image_alias_shares_revision_and_validates_current_digest(image_api, monkeypatch):
+    client, catalog, calls, bridge = image_api
+    primary, alias, unrelated = 'test-image:v1', 'second-tag:v1', 'other-image:v1'
+    tags = {primary: 'sha256:'+'a'*64, alias: 'sha256:'+'a'*64, unrelated: 'sha256:'+'b'*64}
+
+    def docker(command, timeout=120):
+        if command.startswith('images '):
+            return '\n'.join(json.dumps(dict(zip(('Repository','Tag'), ref.split(':')))) for ref in tags), 0
+        args = shlex.split(command)
+        if args[:2] == ['image','inspect']:
+            def info(ref):
+                digest = tags[ref]
+                return {'Id': digest, 'Size': 1024, 'RepoTags': [r for r in tags if tags[r] == digest]}
+            if '--format' in args:
+                return '\n'.join(json.dumps(info(ref)) for ref in args[4:]), 0
+            return json.dumps([info(args[-1])]), 0
+        raise AssertionError(command)
+
+    monkeypatch.setattr(ta, '_docker', docker)
+    applied = save(client,catalog,[service()],'apply',request_id='first').json()['data']
+    version = applied['applied_target_version']
+    alias_catalog = client.get('/image-services/detail',params={'ref':alias}).json()['data']
+    assert alias_catalog['state'] == 'applied' and alias_catalog['catalog_id'] == catalog['catalog_id']
+    confirmed = save(client,alias_catalog,[service()],'apply',request_id='second').json()['data']
+    assert confirmed['image_ref'] == alias and confirmed['applied_target_version'] == version
+    registry = client.get('/targets/registry').json()['data']
+    assert registry[0]['image_ref'] == primary and registry[0]['image_digest'] == tags[alias]
+    inventory = {row['ref']: row['image_digest'] for row in client.get('/targets').json()['data']['images']}
+    assert inventory == tags
+
+    instance = {'name':'alias-template','runtime_type':'docker','image_tag':alias,'service_selection':{'web':'web-normal'}}
+    created = client.post('/instances',json=instance)
+    assert created.status_code == 200, created.text
+    pin = repo.revision('template',instance['name'])
+    assert pin['target_version'] == version
+    resolved,_ = versions.resolve(instance['name'], prepare_files=False)
+    assert resolved['image'] == tags[alias] and resolved['image_ref'] == alias
+    deleted = client.post('/targets/image/delete',json={'ref':alias})
+    assert deleted.status_code == 409 and deleted.json()['error']['code'] == 'IMAGE_VERSION_REFERENCED'
+
+    invalid_target = {'target_name':pin['target_name'],'target_version':version}
+    tags[alias] = tags[unrelated]
+    for ref in (alias,unrelated):
+        invalid = client.post('/instances',json={**instance,**invalid_target,'name':'wrong-image','image_tag':ref})
+        assert invalid.status_code == 400 and invalid.json()['error']['code'] == 'TARGET_INVALID'
+    assert versions.resolve(instance['name'], prepare_files=False)[0]['image'] == tags[primary]
+
+
+def test_native_template_writes_preserve_unrelated_docker_records(client):
+    old = {'runtime_type':'docker','image_tag':'missing:v1','services':[]}
+    repo.put('instances','unbound-docker-template',old)
+    native = {'name':'native','runtime_type':'netns','model':'bare','services':[]}
+    assert client.post('/instances',json=native).status_code == 200
+    assert client.post('/instances/native',json={**native,'notes':'new notes','base_version':1}).status_code == 200
+    assert client.post('/instances/native/clone',json={}).status_code == 200
+    assert client.delete('/instances/native-copy').status_code == 200
+    assert repo.read('instances','unbound-docker-template') == old
+    assert repo.revision('template','native')['notes'] == 'new notes'
 
 
 def test_existing_sessions_and_incomplete_modes_are_saved_not_activated(image_api):

@@ -143,6 +143,7 @@ async function main() {
     execFileSync('docker',['stop','--time','1',destination],{timeout:12000});
     await row('持续 HTTP').getByText(/Docker 节点已退出或重建/).waitFor({timeout:20000});
     assert.match(await row('持续 HTTP').innerText(), /失败/);
+    await row(captured.name).getByText(/Docker 节点已退出或重建/).waitFor({timeout:20000});
     const interrupted = (await api('GET',restartedUrl + '/batches')).run;
     const failedProbe = interrupted.items[captured.id];
     assert.equal(failedProbe.status,'failed');

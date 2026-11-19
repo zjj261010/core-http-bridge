@@ -496,6 +496,11 @@ def commit(cid, body):
             record['stage'] = 'materializing'
             repo.put('image_catalogs', cid, record)
             ref = record['image_ref']
+            previous_version = record.get('pending_target_version') or record.get('applied_target_version')
+            previous = repo.revision('target', record['target_name'], previous_version) if previous_version else None
+            if (previous and previous.get('image_digest') == record['image_id']
+                    and previous['image_ref'] in current['info']['tags']):
+                ref = previous['image_ref']
             name, tag = ref.rsplit(':', 1) if ':' in ref.rsplit('/', 1)[-1] else (ref, 'latest')
             manifest = {**record.get('legacy_manifest',{}),'schema_version': 3, 'name': record['target_name'], 'image': {**record.get('legacy_manifest',{}).get('image',{}),'name': name, 'tag': tag},
                         'services': flattened(record), 'catalog': {'services': services}, 'origin': 'image'}
@@ -503,7 +508,8 @@ def commit(cid, body):
                        'catalog': copy.deepcopy(record), 'sources': compile_sources(record), 'templates': templates}
             payload['catalog'].pop('request_id', None)
             payload['catalog'].pop('stage', None)
-            published = repo.revision('target',record['target_name'],record['pending_target_version']) if record.get('pending_target_version') else repo.publish('target', record['target_name'], payload)
+            pending = record.get('pending_target_version')
+            published = previous if previous and previous['version'] == pending and previous['image_ref'] == ref else repo.publish('target', record['target_name'], payload)
             mapping, directory = __import__('versions').materialize(record['target_name'], published)
             required = [mapping[s['name']] for s in manifest['services']]
             record.update(stage='registering', pending_target_version=published['version'])
@@ -519,7 +525,7 @@ def commit(cid, body):
                 repo.put('manifests', record['target_name'], manifest)
                 repo.put('image_catalogs', cid, record)
             ta._svc_cache['loaded'] = False
-            ta._audit('image.services.apply', ref=ref, revision=record['revision'])
+            ta._audit('image.services.apply', ref=record['image_ref'], revision=record['revision'])
         except Exception as error:
             record.update(state='failed', failed_stage=record['stage'], message='配置已保存，生效失败：' + str(error))
             repo.put('image_catalogs', cid, record)
