@@ -10,3 +10,4 @@ build/
 env/
 *.log
 /tmp/*
+/handover-extract/

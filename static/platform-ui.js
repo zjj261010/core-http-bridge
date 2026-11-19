@@ -142,11 +142,11 @@ window.Platform = (() => {
         return [name,value,button('移除',()=>{rows.splice(index,1);render();changed();})];
       });
       area.replaceChildren(table(['名称','值','操作'],controls,'variables'),
-        button('添加变量',()=>{rows.push({name:'',value:''});render();}));
+        button('添加变量',()=>{rows.push({name:'',value:''});render();changed();}));
     }
     render();return area;
   }
-  function navigation(active){const nav=document.querySelector('nav.nav');if(!nav)return;nav.replaceChildren(el('a',{href:'/',class:'nav-home'},'CORE BRIDGE'),...[['target-admin.html','镜像管理'],['containers.html','容器管理'],['instances.html','节点模板'],['topologies.html','拓扑管理'],['monitor.html','数据监测'],['audit.html','审计日志']].map(([page,name])=>el('a',{href:'/static/'+page,class:page===active?'on':''},name)));}
+  function navigation(active){const nav=document.querySelector('nav.nav');if(!nav)return;nav.replaceChildren(el('a',{href:'/',class:'nav-home'},'CORE BRIDGE'),...[['overview.html','概览'],['target-admin.html','镜像管理'],['containers.html','容器管理'],['instances.html','节点模板'],['topologies.html','拓扑管理'],['monitor.html','数据监测'],['audit.html','审计日志']].map(([page,name])=>el('a',{href:'/static/'+page,class:page===active?'on':'','aria-current':page===active?'page':null},name)));}
   function describe(value){if(value===null||value===undefined)return '无';if(Array.isArray(value))return value.map(describe).join('；');if(typeof value==='object')return Object.entries(value).map(([key,item])=>key+'：'+describe(item)).join('；');return String(value);}
   function describeText(text){try{return describe(JSON.parse(text));}catch{return String(text);}}
   return {clone,el,api,button,field,input,select,checkbox,table,notice,localMessage,modal,fields,download,downloadConfig,ports,keyValues,navigation,errorText,describe,describeText,guardNavigation,workspaceContext,replace,bytes};

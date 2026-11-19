@@ -1,6 +1,7 @@
 """Bounded traffic generation and passive Snort sensing in local CORE namespaces."""
 from __future__ import annotations
 
+import base64
 import csv
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,14 +16,16 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Annotated, Literal
 
 from core.api.grpc.wrappers import NodeType
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 import platform_db
 import repository as repo
@@ -46,7 +49,11 @@ SNORT_LUA = (
 )
 TOOL_ROOT = Path(os.environ.get('CORE_BRIDGE_NETWORK_ROOT', '/opt/core-network-tools'))
 RUN_COLLECTION = 'network_activity'
+RULE_COLLECTION = 'snort_rulesets'
 RULE_MAX_BYTES = 8 * 1024 * 1024
+RULE_ACTIONS = {'alert', 'block', 'drop', 'log', 'pass', 'react', 'reject', 'rewrite', 'file_id'}
+RULE_TOKEN = re.compile(r'/\*|[#"()]|[^\s#"()/]+|/')
+RULE_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
 MAX_INTERVAL_SECONDS = 3
 
 
@@ -85,22 +92,75 @@ def rulesets():
     root = settings.data_dir / 'snort-rules'
     for path in sorted(root.glob('*.rules')):
         if path.is_file() and re.fullmatch(r'[a-zA-Z0-9_-]{1,48}', path.stem) and path.stem != 'verification':
-            result[path.stem] = path
-    result['verification'] = None
+            result[path.stem] = {'id': path.stem, 'name': path.stem, 'path': path}
+    result['verification'] = {'id': 'verification', 'name': '无害功能验收', 'path': None}
+    for identifier, record in repo.read(RULE_COLLECTION).items():
+        result[identifier] = {**record, 'path': _rule_blob(record['sha256'])}
     return result
 
 
+def _rule_blob(digest):
+    if not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise ValueError('规则摘要无效')
+    return settings.data_dir / 'snort-rules' / 'imported' / (digest + '.rules')
+
+
 def _ruleset(name):
-    path = rulesets().get(name)
+    entry = rulesets().get(name)
+    if entry is None:
+        raise ValueError('Snort 规则集不存在：' + name)
+    path = entry['path']
     if path is None:
-        if name != 'verification':
-            raise ValueError('Snort 规则集不存在：' + name)
-        return VERIFY_RULE.encode()
-    with path.open('rb') as stream:
-        data = stream.read(RULE_MAX_BYTES + 1)
+        return entry, VERIFY_RULE.encode()
+    try:
+        with path.open('rb') as stream:
+            data = stream.read(RULE_MAX_BYTES + 1)
+    except FileNotFoundError as error:
+        raise ValueError('Snort 规则文件缺失：' + entry['name']) from error
     if len(data) > RULE_MAX_BYTES:
         raise ValueError('Snort 规则集超过大小限制')
-    return data
+    if entry.get('sha256') and hashlib.sha256(data).hexdigest() != entry['sha256']:
+        raise ValueError('规则文件内容与导入版本不一致：' + entry['name'])
+    return entry, data
+
+
+def _check_rule_file(data):
+    try:
+        source = data.decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise ValueError('规则文件须为 UTF-8 文本') from error
+    if '\x00' in source:
+        raise ValueError('规则文件包含无效字符')
+
+    offset, inside, started, found = 0, 0, False, False
+    while match := RULE_TOKEN.search(source, offset):
+        offset = match.end()
+        token = match.group()
+        if token in ('#', '/*'):
+            end = source.find('\n' if token == '#' else '*/', offset)
+            if end < 0 and token == '/*':
+                raise ValueError('规则文件的块注释未结束')
+            offset = len(source) if end < 0 else end + (2 if token == '/*' else 1)
+            continue
+        if not started:
+            if token not in RULE_ACTIONS:
+                line = source.count('\n', 0, match.start()) + 1
+                raise ValueError(f'第 {line} 行须为 Snort 规则声明，导入文件应包含完整规则')
+            started, found = True, True
+        elif token == '"':
+            quoted = RULE_STRING.match(source, match.start())
+            if not quoted:
+                raise ValueError('规则文件的引号未关闭')
+            offset = quoted.end()
+        elif token == '(':
+            inside += 1
+        elif token == ')' and inside:
+            inside -= 1
+            started = inside > 0
+    if not found:
+        raise ValueError('规则文件没有可导入的规则')
+    if started:
+        raise ValueError('规则声明不完整，请检查规则头和括号')
 
 
 def _interface(link, node_id):
@@ -120,7 +180,7 @@ def _link(definition, endpoints):
 def validate(plan, definition, kinds):
     """Resolve topology references at save time. Resolve real addresses at runtime."""
     seen, listeners, captures = set(), set(), set()
-    catalog = rulesets()
+    catalog = rulesets() if plan.probes else {}
     for item in [*plan.traffic, *plan.probes]:
         if item.id in seen:
             raise ValueError('流量任务或探针 ID 重复')
@@ -184,8 +244,8 @@ def _missing_tools(kind, tools):
 def capabilities():
     tools = _tools()
     return {'ok': True, 'data': {
-        'rulesets': [{'id': name, 'name': '无害功能验收' if name == 'verification' else name}
-                     for name in rulesets()],
+        'rulesets': [{key: value for key, value in entry.items() if key != 'path'}
+                     for entry in rulesets().values()],
         **{kind: not _missing_tools(kind, tools) for kind in ('http', 'iperf3', 'snort')},
     }}
 
@@ -212,6 +272,90 @@ def _snort_args(tools, rules):
             '--daq', 'pcap', '--daq-mode', 'passive', '-A', 'alert_json', '--lua', SNORT_LUA]
 
 
+def _validate_snort_rules(data, tools):
+    env = _snort_env(tools)
+    version = _tool_output([tools['snort'], '-V'], env=env)
+    if not re.search(r'\bVersion\s+3\.', version, re.IGNORECASE):
+        raise ValueError('需要 Snort 3')
+    with request_file('.rules') as rules:
+        rules.write_bytes(data)
+        try:
+            _tool_output([*_snort_args(tools, rules), '-T'], env=env)
+        except ValueError as error:
+            raise ValueError(str(error).replace(str(rules), '规则文件')) from error
+
+
+def _store_rule_blob(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with path.open('rb') as stream:
+            if stream.read(RULE_MAX_BYTES + 1) == data:
+                return
+    except FileNotFoundError:
+        pass
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.import-', delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.close()
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _import_ruleset(name, data):
+    if not name.lower().endswith('.rules') or not name[:-6].strip() or re.search(r'[/\\\x00-\x1f\x7f]', name):
+        raise ValueError('请选择文件名有效的 .rules 文件')
+    _check_rule_file(data)
+    tools = _tools()
+    validation = 'pending'
+    if not _missing_tools('snort', tools):
+        _validate_snort_rules(data, tools)
+        validation = 'validated'
+
+    checksum = hashlib.sha256(data).digest()
+    digest = checksum.hex()
+    identifier = 'imp-' + base64.urlsafe_b64encode(checksum).decode().rstrip('=')
+    with repo.transaction():
+        records = repo.read(RULE_COLLECTION)
+        existing = records.get(identifier)
+        if existing:
+            entry = {**existing}
+            if validation == 'validated':
+                entry['validation'] = validation
+        else:
+            version = max((rule['version'] for rule in records.values()
+                           if rule['file_name'].casefold() == name.casefold()), default=0) + 1
+            label = name if version == 1 else f'{name} · v{version}'
+            entry = {'id': identifier, 'name': label, 'file_name': name, 'version': version,
+                     'sha256': digest, 'validation': validation, 'size': len(data)}
+        _store_rule_blob(_rule_blob(digest), data)
+        if entry != existing:
+            repo.put(RULE_COLLECTION, identifier, entry)
+    return {'ruleset': entry, 'reused': existing is not None}
+
+
+@router.post('/network-activity/rulesets/import')
+async def import_ruleset(request: Request, name: Annotated[str, Query(min_length=1, max_length=180)]):
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > RULE_MAX_BYTES:
+            raise HTTPException(413, 'Snort 规则文件不能超过 8 MiB')
+        content.extend(chunk)
+    try:
+        result = await run_in_threadpool(_import_ruleset, name, bytes(content))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except subprocess.TimeoutExpired as error:
+        raise HTTPException(504, 'Snort 校验超时，请检查宿主 Snort 配置和规则文件') from error
+    except OSError as error:
+        logger.exception('Unable to import Snort rules')
+        raise HTTPException(500, '无法校验或保存规则文件，请检查宿主运行日志') from error
+    return {'ok': True, 'data': result}
+
+
 def _preflight_tool(kind, tools, ruleset):
     if missing := _missing_tools(kind, tools):
         raise ValueError(missing)
@@ -220,12 +364,11 @@ def _preflight_tool(kind, tools, ruleset):
         if '--json-stream' not in _tool_output([tools['iperf3'], '--help']):
             raise ValueError((version[0] if version else 'iperf3') + ' 缺少 --json-stream')
     elif kind == 'snort':
-        version = _tool_output([tools['snort'], '-V'], env=_snort_env(tools))
-        if not re.search(r'\bVersion\s+3\.', version, re.IGNORECASE):
-            raise ValueError('需要 Snort 3')
-        with request_file('.rules') as rules:
-            rules.write_bytes(_ruleset(ruleset))
-            _tool_output([*_snort_args(tools, rules), '-T'], env=_snort_env(tools))
+        entry, data = _ruleset(ruleset)
+        _validate_snort_rules(data, tools)
+        if entry.get('validation') == 'pending':
+            entry.pop('path')
+            repo.put(RULE_COLLECTION, ruleset, {**entry, 'validation': 'validated'})
 
 
 def preflight(plan, definition):
@@ -556,17 +699,17 @@ class Worker:
     def probe(self):
         spec = self.spec
         tools = _tools()
-        if not capabilities()['data']['snort']:
-            raise ValueError('宿主未准备 Snort 3 和 LibDAQ')
+        if missing := _missing_tools('snort', tools):
+            raise ValueError(missing)
         self.update(status='starting', metrics={'packets': 0, 'drops': 0, 'alerts': 0})
         iface = _resolve_interface(self.run.bridge, self.run.sid, self.run.definition, spec.link, spec.node_id)
         if not iface.name or not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,15}', iface.name):
             raise ValueError('CORE 没有返回有效的监测接口')
-        rules = _ruleset(spec.ruleset)
+        entry, rules = _ruleset(spec.ruleset)
         rule_path = self.path / 'loaded.rules'
         rule_path.write_bytes(rules)
         version = hashlib.sha256(rules).hexdigest()
-        self.update(interface=iface.name, rules_sha256=version)
+        self.update(interface=iface.name, ruleset_name=entry['name'], rules_sha256=version)
         proc = self.spawn(spec.node_id, [*_snort_args(tools, rule_path), '-i', iface.name], env=_snort_env(tools))
         columns, packets, drops, alerts = [], 0, 0, 0
 
@@ -586,7 +729,7 @@ class Worker:
                 platform_db.record_event(self.run.sid, {
                     'type': 'snort', 'action': 'detect', 'node_id': spec.node_id, 'probe_id': spec.id,
                     'probe': spec.name, 'interface': iface.name, 'run_id': self.run.id,
-                    'rules_sha256': version,
+                    'ruleset_name': entry['name'], 'rules_sha256': version,
                     **{key: match.get(key) for key in ('timestamp','proto','src_ap','dst_ap','rule','msg','class')},
                 }, self.run.drill)
             elif 'packet processing' not in line.lower():
@@ -671,12 +814,15 @@ class Run:
                 if issue:
                     errors[spec.id] = issue
         self.workers = {spec.id: Worker(self, spec) for spec in specs if spec.id not in errors}
+        catalog = rulesets() if plan.probes else {}
         self.data = {
             'run_id': self.id, 'deployment_id': record['deployment_id'], 'drill_id': self.drill,
             'core_sid': self.sid, 'created_at': repo.now(), 'started_ns': time.time_ns(),
             'node_names': {str(node['id']): node['name'] for node in self.definition.get('nodes', [])},
             'items': {spec.id: {**spec.model_dump(mode='json'),
                                 'kind': 'traffic' if isinstance(spec, Traffic) else 'probe',
+                                **({'ruleset_name': catalog.get(spec.ruleset, {}).get('name', spec.ruleset)}
+                                   if isinstance(spec, Probe) else {}),
                                 **({'status': 'failed', 'error': errors[spec.id], 'ended_at': repo.now()}
                                    if spec.id in errors else {'status': 'pending'})}
                       for spec in specs},

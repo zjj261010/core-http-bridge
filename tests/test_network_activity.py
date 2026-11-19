@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,67 @@ from core.api.grpc.wrappers import NodeType
 
 import network_activity as network
 import repository as repo
+
+
+RULE_IMPORT = '/network-activity/rulesets/import'
+TEST_RULE = b'# fixture\nalert tcp any any -> any any (\nmsg:"Marker # /* ( )"; sid:1000091; rev:1;\n)\n'
+
+
+def test_import_keeps_independent_versions_and_legacy_rules(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(network, '_missing_tools', lambda *args: '')
+    monkeypatch.setattr(network, '_validate_snort_rules', lambda data, tools: None)
+    manual = tmp_path / 'snort-rules' / 'manual.rules'
+    manual.parent.mkdir()
+    manual.write_bytes(TEST_RULE)
+
+    first = client.post(RULE_IMPORT, params={'name': '流量.rules'}, content=TEST_RULE)
+    second_data = TEST_RULE.replace(b'rev:1', b'rev:2')
+    duplicate = client.post(RULE_IMPORT, params={'name': '重命名.rules'}, content=TEST_RULE)
+    updated = client.post(RULE_IMPORT, params={'name': '流量.rules'}, content=second_data)
+    assert first.status_code == duplicate.status_code == updated.status_code == 200
+    original = first.json()['data']['ruleset']
+    latest = updated.json()['data']['ruleset']
+    assert original['name'] == '流量.rules' and original['validation'] == 'validated'
+    assert duplicate.json()['data'] == {'ruleset': original, 'reused': True}
+    assert latest['name'] == '流量.rules · v2' and latest['id'] != original['id']
+    assert network._ruleset(original['id'])[1] == TEST_RULE
+    assert network._ruleset(latest['id'])[1] == second_data
+    assert original['sha256'] == hashlib.sha256(TEST_RULE).hexdigest()
+    catalog = client.get('/network-activity/capabilities').json()['data']['rulesets']
+    assert {rule['id'] for rule in catalog} == {'verification', 'manual', original['id'], latest['id']}
+    assert all('path' not in rule for rule in catalog)
+
+
+def test_invalid_import_does_not_add_to_library(client, monkeypatch):
+    monkeypatch.setattr(network, '_missing_tools', lambda *args: '')
+
+    def fail(data, tools):
+        raise ValueError('规则文件:3: unknown rule option')
+
+    monkeypatch.setattr(network, '_validate_snort_rules', fail)
+    bad = client.post(RULE_IMPORT, params={'name': 'bad.rules'}, content=TEST_RULE)
+    assert bad.status_code == 400 and '规则文件:3' in bad.json()['detail']
+    for content in (b'', b'\x00\x01', b'include external.rules\n' + TEST_RULE):
+        assert client.post(RULE_IMPORT, params={'name': 'bad.rules'}, content=content).status_code == 400
+    assert client.post(RULE_IMPORT, params={'name': '../bad.rules'}, content=TEST_RULE).status_code == 400
+    large = client.post(RULE_IMPORT, params={'name': 'large.rules'}, content=b'a' * (network.RULE_MAX_BYTES + 1))
+    assert large.status_code == 413
+    assert not repo.read(network.RULE_COLLECTION)
+
+
+def test_pending_import_validates_at_start_and_detects_changes(client, monkeypatch):
+    monkeypatch.setattr(network, '_missing_tools', lambda *args: '未安装 Snort')
+    result = client.post(RULE_IMPORT, params={'name': 'pending.rules'}, content=TEST_RULE).json()['data']['ruleset']
+    assert result['validation'] == 'pending'
+    checked = []
+    monkeypatch.setattr(network, '_missing_tools', lambda *args: '')
+    monkeypatch.setattr(network, '_validate_snort_rules', lambda data, tools: checked.append(data))
+    network._preflight_tool('snort', {}, result['id'])
+    assert checked == [TEST_RULE]
+    assert repo.read(network.RULE_COLLECTION, result['id'])['validation'] == 'validated'
+    network._rule_blob(result['sha256']).write_bytes(b'tampered')
+    with pytest.raises(ValueError, match='与导入版本不一致'):
+        network._preflight_tool('snort', {}, result['id'])
 
 
 def test_preflight_records_each_failed_item_without_starting_workers(client, mock_bridge, monkeypatch):

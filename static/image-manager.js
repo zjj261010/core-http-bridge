@@ -192,22 +192,23 @@
       }
     }
     function moveEditor(){const candidates=catalog.services.filter(s=>s.id!==service.id).flatMap(s=>s.modes.filter(m=>!moved.some(item=>item.serviceId===s.id&&item.modeId===m.id)).map(m=>({service:s,mode:m})));if(!candidates.length)return null;const chooser=select(candidates.map((item,index)=>[String(index),item.service.name+' / '+item.mode.name]),'0',()=>{});return imageSection('将旧模式合并到此服务',[field('来源服务 / 模式',chooser),el('p',{class:'muted'},'确定后移入模式；来源服务没有剩余模式时移除其空声明。取消本弹窗不会影响来源服务。旧模板和运行记录保持原修订。'),button('暂存移入',()=>{const item=candidates[Number(chooser.value)];const mode=P.clone(item.mode);mode.default=false;work.modes.push(mode);moved.push({serviceId:item.service.id,modeId:item.mode.id});render();})]);}
-    function editor(mode){const fileArea=el('div');
+    function editor(mode){const fileArea=el('div'),environment=mode.env??[];
       function files(){fileArea.replaceChildren(table(['用途','文件','摘要','操作'],mode.files.map((item,index)=>[({startup:'启动',shutdown:'停止',validate:'就绪检查'})[item.role],item.name,item.sha256.slice(0,12),el('div',{class:'actions'},el('a',{href:'/image-services/attachments/'+item.sha256+'?name='+encodeURIComponent(item.name),download:item.name},'导出'),button('上移',()=>{if(index){[mode.files[index-1],mode.files[index]]=[mode.files[index],mode.files[index-1]];files();}}),button('移除',()=>{mode.files.splice(index,1);files();validateLocal();}))])));}
       files();const role=select([['startup','启动'],['shutdown','停止'],['validate','就绪检查']],'startup',()=>{});const upload=el('input',{type:'file',multiple:true,onchange:async event=>{try{for(const file of event.target.files){const attachment=await api('/image-services/attachments?name='+encodeURIComponent(file.name)+'&role='+role.value,'POST',file,true);const index=mode.files.findIndex(f=>f.name===attachment.name&&f.role===attachment.role);if(index<0)mode.files.push(attachment);else mode.files[index]=attachment;}files();validateLocal();}catch(error){P.localMessage(message,error.message,true);}}});
       const override=el('div');
       const effectivePorts=el('div');
       function summarizePorts(){
         const rows=mode.ports??service.ports;
-        P.replace(effectivePorts,el('p',{class:'muted'},'生效端口声明 · '+(mode.ports===null?'从服务继承':'此模式覆盖')),
+        P.replace(effectivePorts,el('p',{class:'muted'},'生效端口声明 · '+(mode.ports==null?'从服务继承':'此模式覆盖')),
           rows.length?table(['监听地址','协议','端口'],rows.map(row=>[
             row.address||'0.0.0.0',(row.protocol||'tcp').toUpperCase(),
             row.end&&row.end!==row.port?row.port+'–'+row.end:row.port
           ])):el('p',{class:'muted'},'未声明端口'));
       }
       function renderPorts(){
-        P.replace(override,checkbox(mode.ports!==null,value=>{mode.ports=value?P.clone(service.ports):null;renderPorts();},
-          '此模式覆盖服务端口'),mode.ports!==null?P.ports(mode.ports,summarizePorts):null,effectivePorts);
+        const overrides=mode.ports!=null;
+        P.replace(override,checkbox(overrides,value=>{mode.ports=value?P.clone(service.ports):null;renderPorts();},
+          '此模式覆盖服务端口'),overrides?P.ports(mode.ports,summarizePorts):null,effectivePorts);
         summarizePorts();
       }
       renderPorts();
@@ -222,7 +223,7 @@
         field('传给启动脚本的参数',input(mode.args||'',value=>mode.args=value)),
         modeGroup('脚本文件',fileArea,el('div',{class:'form-grid'},purpose,filePicker),
           el('p',{class:'muted'},'脚本随本次模式暂存，服务在镜像详情最后确认时统一注册。')),
-        modeGroup('环境变量',P.keyValues(mode.env??=[])),
+        modeGroup('环境变量',P.keyValues(environment,()=>{mode.env=environment;})),
         modeGroup('端口',override,el('p',{class:'muted'},'端口声明用于组合与就绪检查。脚本实际监听的端口由脚本、启动参数或环境变量决定。')),
         dependencies.length?modeGroup('依赖服务',dependencies):null
       ],null,'mode-editor');

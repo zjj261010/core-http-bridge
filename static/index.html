@@ -173,13 +173,14 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
 <script src="/static/platform-ui.js?v=20261118-3"></script>
 <script defer src="/static/workbench.js?v=20261117-2"></script>
 </head>
-<body class="workspace" data-active-tab="images">
+<body class="workspace" data-active-tab="overview">
 <div class="app" id="app">
 
 <!-- ── Sidebar ── -->
 <aside class="sidebar" id="workspaceNav" aria-label="主导航">
-  <a class="brand" href="/#images"><strong>CORE 网络仿真<br>管理工作台</strong><small>CORE BRIDGE</small></a>
+  <a class="brand" href="/#overview"><strong>CORE 网络仿真<br>管理工作台</strong><small>CORE BRIDGE</small></a>
   <nav class="side-nav" id="sideNav" aria-label="功能导航">
+    <div class="side-tab" role="button" tabindex="0" data-tab="overview" onclick="switchTab('overview')">概览</div>
     <div class="sn-title">资源管理</div>
     <div class="side-tab" role="button" tabindex="0" data-tab="images" onclick="switchTab('images')">镜像管理</div>
     <div class="side-tab" role="button" tabindex="0" data-tab="containers" onclick="switchTab('containers')">容器管理</div>
@@ -217,7 +218,7 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--fg2); ma
   <header class="workspace-header">
     <div class="workspace-breadcrumb">
       <button class="mobile-menu" id="workspaceNavToggle" aria-label="打开导航" aria-controls="workspaceNav" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
-      <span class="workspace-category" id="workspaceCategory">资源管理</span><span class="divider">/</span><strong id="workspaceTitle">镜像管理</strong>
+      <span class="workspace-category" id="workspaceCategory">工作台</span><span class="divider">/</span><strong id="workspaceTitle">概览</strong>
     </div>
     <div class="workspace-meta">
       <button class="btn btn-primary btn-sm" id="workspaceCreate" onclick="showCreateSessionModal()">新建会话</button>
@@ -1087,8 +1088,9 @@ function renderTopologyJson() {
   pc.replaceChildren(Platform.fields(topo), Platform.button('导出配置', () => Platform.download(new Blob([JSON.stringify(topo, null, 2)], {type:'application/json'}), 'topology.json')));
 }
 
-// ── 5-Tab 前端路由（设计 §2.1: 同一单页内切换, hash 保持刷新/前进后退）──
+// ── 工作区路由 ──
 const TAB_SRC = {
+  overview:  '/static/overview.html',
   images:    '/static/target-admin.html',
   topologies: '/static/topologies.html',
   containers:'/static/containers.html',
@@ -1101,14 +1103,14 @@ function switchTab(name, approved=false) {
   if(name==='topo')name='topologies';
   if(name==='drafts')name='topologies';
   if(name==='publications')name='images';
-  if(name!=='topo'&&!TAB_SRC[name])return;
+  if(!Object.hasOwn(TAB_SRC,name))return;
   const currentFrame=document.getElementById('tabFrame');
   if(!approved&&['images','instances','topologies'].includes(document.body.dataset.activeTab)&&name!==document.body.dataset.activeTab&&currentFrame.getAttribute('data-src')){
     pendingNavigation={target:name,requestId:++navigationSequence};
     currentFrame.contentWindow.postMessage({type:'editor-navigation-request',...pendingNavigation},location.origin);return;
   }
-  const labels={images:'镜像管理',containers:'容器管理',instances:'节点模板',topologies:'拓扑管理',topo:'拓扑管理 · 运行画布',monitor:'数据监测',audit:'审计日志'};
-  const category=['images','containers','instances'].includes(name)?'资源管理':['monitor','audit'].includes(name)?'运行与复盘':'环境构建';
+  const labels={overview:'概览',images:'镜像管理',containers:'容器管理',instances:'节点模板',topologies:'拓扑管理',topo:'拓扑管理 · 运行画布',monitor:'数据监测',audit:'审计日志'};
+  const category=name==='overview'?'工作台':['images','containers','instances'].includes(name)?'资源管理':['monitor','audit'].includes(name)?'运行与复盘':'环境构建';
   document.body.dataset.activeTab=name;
   document.getElementById('workspaceTitle').textContent=labels[name];
   document.getElementById('workspaceCategory').textContent=category;
@@ -1126,19 +1128,31 @@ function switchTab(name, approved=false) {
     if (location.hash && location.hash !== '#topo') history.pushState(null, '', '#topo');
     return;
   }
-  const requestedSession=new URLSearchParams(location.search).get('session');
-  const src = TAB_SRC[name]+(name==='topologies'&&requestedSession?'?session='+encodeURIComponent(requestedSession):'');
+  const pageUrl = new URL(location.href);
+  const tabQuery = new URLSearchParams();
+  if (name === 'topologies') {
+    for (const key of ['session','deployment','history']) {
+      const value = pageUrl.searchParams.get(key);
+      if (value) tabQuery.set(key,value);
+    }
+  } else {
+    pageUrl.searchParams.delete('deployment');
+    pageUrl.searchParams.delete('history');
+  }
+  const src = TAB_SRC[name]+(tabQuery.size ? '?'+tabQuery : '');
   if (!src) return;
   if (frame.getAttribute('data-src') !== src) {
     frame.contentWindow.location.replace(src + (src.includes('?')?'&':'?')+'embedded=1');
     frame.setAttribute('data-src', src);
   }
   frame.style.display = 'block';
-  if (location.hash !== '#' + name) history.pushState(null, '', '#' + name);
+  pageUrl.hash = name;
+  if (pageUrl.href !== location.href) history.pushState(null, '', pageUrl);
 }
 function tabFromHash() {
-  const h = (location.hash || '#images').replace('#', '');
-  return h==='drafts'?'topologies':h==='publications'?'images':h === 'topo' || TAB_SRC[h] ? h : 'images';   // 默认视图 = 镜像管理
+  const h = location.hash.slice(1);
+  return h==='drafts' || h==='topo' ? 'topologies' : h==='publications' ? 'images' :
+    Object.hasOwn(TAB_SRC,h) ? h : 'overview';
 }
 window.addEventListener('hashchange', () => switchTab(tabFromHash()));
 

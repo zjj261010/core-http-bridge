@@ -105,7 +105,7 @@
     if (token !== opening) return;
     const def = P.clone(run.native_xml ? {format:'core-xml', name:'历史拓扑', xml_text:run.native_xml} : run.execution_definition || run.snapshot || run.source);
     if (!def) throw Error('此旧记录没有保存拓扑配置，请从原文件导入。');
-    def.name = runName(summary);
+    def.name = summary.display_name || runName(run);
     setDefinition(def, data.topologies.find(r => r.topology_id === topologyRef(run)) || null, 'history',
       {deployment_id:run.deployment_id, topology_id:topologyRef(run), drill_id:run.drill_id});
   }
@@ -187,7 +187,9 @@
       if (!visible.length) container.append(el('div', {class:'empty'}, entries.length ? '没有匹配的拓扑，请调整筛选。' : '还没有拓扑。点击“新建拓扑”添加节点，或导入已有文件。'));
     }
     updateCards();
-    app.append(historyPanel('全部运行历史'));
+    const history = historyPanel('全部运行历史');
+    history.open = new URLSearchParams(location.search).get('history') === '1';
+    app.append(history);
   }
   function renderWorkspace() {
     const session = contextSession(), run = session ? associated(session) : null;
@@ -822,9 +824,23 @@
     data = results[0].value;
     templates = results[1].status === 'fulfilled' ? results[1].value : [];
     nativeCatalog = results[2].status === 'fulfilled' ? results[2].value : [];
-    const sid = Number(new URLSearchParams(location.search).get('session'));
-    const session = data.sessions.find(s => s.id === sid);
-    if (session?.identity) await openSession(session, associated(session)); else render();
+    const requested = new URLSearchParams(location.search);
+    const deployment = requested.get('deployment');
+    if (deployment) {
+      const live = data.deployments.find(run => run.deployment_id === deployment && run.live);
+      const session = live && data.sessions.find(item => item.id === live.core_sid && item.drill_id === live.drill_id);
+      try {
+        if (session?.identity) await openSession(session, live);
+        else await openHistory({deployment_id:deployment});
+      } catch (error) {
+        render();
+        P.notice(error.message, true);
+        return;
+      }
+    } else {
+      const session = data.sessions.find(item => item.id === Number(requested.get('session')));
+      if (session?.identity) await openSession(session, associated(session)); else render();
+    }
     if (results[1].status === 'rejected' || results[2].status === 'rejected') P.notice('部分节点库暂不可用，已保存的拓扑仍可查看，请稍后刷新页面。', true);
   }
   load().catch(error => P.notice(error.message, true));

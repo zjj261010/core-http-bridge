@@ -8,12 +8,22 @@ const NetworkActivity = (() => {
   const local = new Set(['default','pc','host','router','docker']);
   const httpTargets = new Set([...local, 'podman']);
   const sameLink = (pair, link) => pair.includes(link.node1_id) && pair.includes(link.node2_id);
+  const ruleName = id => id === 'verification' ? '无害功能验收' : id;
+  const ruleLabel = rule => rule.name + (rule.validation === 'pending' ? ' · 待校验' : '');
 
   function editor(kind, definition, nodes, changed, initialLink) {
     const body = el('div'), title = titles[kind], modal = P.modal(title, body);
     const nodeName = id => nodes.find(node => node.id === id)?.name || '#' + id;
     const list = () => definition.network_activity?.[kind] || [];
     const endpoint = ([a,b]) => nodeName(a) + ' ↔ ' + nodeName(b);
+    const rules = new Map();
+    async function capabilities() {
+      const known = await api('/network-activity/capabilities');
+      if (kind === 'probes') {
+        known.rulesets.forEach(rule => rules.set(rule.id, rule));
+      }
+      return known;
+    }
     function update(items) {
       definition.network_activity ??= {traffic:[],probes:[]};
       definition.network_activity[kind] = items;
@@ -24,7 +34,8 @@ const NetworkActivity = (() => {
       const rows = list().map(item => {
         const summary = kind === 'traffic' ?
           item.protocol.toUpperCase() + ' · ' + nodeName(item.source_id) + ' → ' + nodeName(item.target_id) + ':' + item.port :
-          nodeName(item.node_id) + ' · ' + endpoint(item.link) + ' · ' + item.ruleset;
+          nodeName(item.node_id) + ' · ' + endpoint(item.link) + ' · ' +
+            (rules.has(item.ruleset) ? ruleLabel(rules.get(item.ruleset)) : ruleName(item.ruleset));
         return [item.name, summary, el('div', {class:'actions'},
           button('编辑', () => editItem(item)),
           button('移除', () => update(list().filter(row => row.id !== item.id))))];
@@ -32,7 +43,7 @@ const NetworkActivity = (() => {
       body.replaceChildren(table(['名称', '配置', '操作'], rows));
     }
     async function editItem(existing) {
-      const known = await api('/network-activity/capabilities');
+      const known = await capabilities();
       const source = nodes.filter(node => local.has(node.type));
       const defaults = kind === 'traffic' ?
         {name:'背景流量 ' + (list().length + 1),protocol:'http',port:80,path:'/',rate:5,delay:1,duration:30,
@@ -41,7 +52,7 @@ const NetworkActivity = (() => {
           link:initialLink,ruleset:known.rulesets[0]?.id};
       const item = P.clone(existing || defaults), content = el('div'), feedback = el('div', {role:'status'});
       const popup = P.modal((existing ? '编辑' : '新增') + title, el('div', {}, feedback, content));
-      let dirty = false;
+      let dirty = false, importing = false;
       popup.guard(() => dirty);
       popup.dialog.addEventListener('change', () => {dirty = true;});
       popup.dialog.addEventListener('input', () => {dirty = true;});
@@ -61,6 +72,48 @@ const NetworkActivity = (() => {
         return field(label,select([['','请选择接口'], ...pairs.map(pair => [pair.join(','),endpoint(pair)])],
           item[key]?.join(',') || '', value => {item[key] = value ? value.split(',').map(Number) : undefined;}));
       }
+      function ruleField() {
+        const picker = select([], item.ruleset, value => item.ruleset = value);
+        function refreshRules() {
+          const options = [...rules.values()].map(rule => el('option',{value:rule.id},ruleLabel(rule)));
+          if (item.ruleset && !rules.has(item.ruleset)) {
+            options.push(el('option',{value:item.ruleset},ruleName(item.ruleset) + ' · 规则集缺失'));
+          }
+          picker.replaceChildren(...options);
+          picker.value = item.ruleset || '';
+        }
+        refreshRules();
+        const file = el('input',{type:'file',accept:'.rules',hidden:true});
+        const importButton = el('button',{type:'button',class:'btn',onclick:() => file.click()},'导入规则');
+        file.addEventListener('input', event => event.stopPropagation());
+        file.addEventListener('change', async event => {
+          event.stopPropagation();
+          const selected = file.files[0];
+          file.value = '';
+          if (!selected || importing) return;
+          importing = importButton.disabled = confirmButton.disabled = true;
+          P.localMessage(feedback,'正在导入并检查「' + selected.name + '」…');
+          try {
+            const result = await api('/network-activity/rulesets/import?name=' + encodeURIComponent(selected.name),
+              'POST',selected,true);
+            const rule = result.ruleset;
+            rules.set(rule.id, rule);
+            if (modal.dialog.open) render();
+            if (!popup.dialog.open) return;
+            dirty = true;
+            item.ruleset = rule.id;
+            refreshRules();
+            const selectedRule = (result.reused ? '已选中已有规则集「' : '已导入并选中「') + rule.name + '」。';
+            const status = rule.validation === 'pending' ? '待校验，启动拓扑时会再次检查。' : 'Snort 校验通过。';
+            P.localMessage(feedback,selectedRule + status);
+          } catch (error) {
+            if (popup.dialog.open) P.localMessage(feedback,'无法导入「' + selected.name + '」。' + error.message,true);
+          } finally {
+            importing = importButton.disabled = confirmButton.disabled = false;
+          }
+        });
+        return el('div',{class:'snort-rule-controls'},field('Snort 规则集',picker),importButton,file);
+      }
       function renderFields() {
         const fields = [string('名称','name')];
         if (kind === 'traffic') {
@@ -78,20 +131,20 @@ const NetworkActivity = (() => {
           number(http ? '速率（请求/秒）' : '速率（bit/s）','rate'), number('启动延迟（秒）','delay'), number('持续时间（秒）','duration'));
         } else {
           fields.push(nodeSelect('监测节点',source,'node_id',renderFields), linkSelect('监测接口','link',item.node_id),
-            field('Snort 规则集',select(known.rulesets.map(rule => [rule.id,rule.name]),item.ruleset,value => item.ruleset = value)));
+            ruleControls);
         }
         const available = kind === 'probes' ? known.snort : item.protocol === 'http' ? known.http : known.iperf3;
         P.replace(content, !available ? el('p',{class:'notice error'},'当前宿主缺少运行依赖，仍可保存拓扑配置。') : null,
           el('div',{class:'form-grid'},fields));
       }
-      popup.footer.append(button('取消',popup.close),button('确定',() => {
+      const confirmButton = button('确定',() => {
         const valid = kind === 'traffic' ? item.source_id && item.target_id && item.target_link &&
           Number.isInteger(item.port) && item.port >= 1 && item.port <= 65535 &&
           Number.isInteger(item.rate) && item.rate >= 1 && item.rate <= (item.protocol === 'http' ? 50 : 10_000_000) &&
           Number.isInteger(item.delay) && item.delay >= 0 && item.delay <= 3600 &&
           Number.isInteger(item.duration) && item.duration >= 1 && item.duration <= 3600 &&
           (item.protocol !== 'http' || /^\/(?!\/)[!-~]*$/.test(item.path)) :
-          item.node_id && item.link && item.ruleset;
+          item.node_id && item.link && rules.has(item.ruleset);
         if (!item.name.trim() || !valid) {
           P.localMessage(feedback,'请检查必填字段、接口和数值范围。',true);
           return;
@@ -100,12 +153,17 @@ const NetworkActivity = (() => {
         item.id ??= kind + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,8);
         update(existing ? list().map(row => row.id === item.id ? item : row) : [...list(),item]);
         popup.finish();
-      },true));
+      },true);
+      const ruleControls = kind === 'probes' ? ruleField() : null;
+      popup.footer.append(button('取消',popup.close),confirmButton);
       renderFields();
     }
     modal.footer.append(button('新增' + title, () => editItem(), true));
     render();
     if (initialLink) editItem().catch(error => P.notice(error.message, true));
+    else if (kind === 'probes' && list().length) {
+      capabilities().then(() => {if (modal.dialog.open) render();}).catch(() => {});
+    }
   }
 
   function metrics(item) {
@@ -230,7 +288,7 @@ const NetworkActivity = (() => {
               }) : '—']);
           } else {
             probeRows.push([item.name,name(item.node_id) + (item.interface ? ' · ' + item.interface : ''),
-              el('span',{title:item.rules_sha256},item.ruleset),status,metrics(item)]);
+              el('span',{title:item.rules_sha256},item.ruleset_name || ruleName(item.ruleset)),status,metrics(item)]);
           }
         }
         tasks.replaceChildren(el('h3',{},'背景流量'),

@@ -6,6 +6,7 @@ CORE HTTP Bridge 将 CORE Emulator 的 gRPC 接口接入 FastAPI 和浏览器管
 
 | 页面 | 可执行的操作 |
 |---|---|
+| 概览 | 查看当前运行会话、拓扑与模板数量、近期运行、导入任务和宿主工具状态 |
 | 镜像管理 | 导入镜像或交付包，声明镜像的服务和启动模式，导入脚本，确认生效，导出配置或完整镜像包 |
 | 容器管理 | 创建和管理独立容器，查看容器状态和终端 |
 | 节点模板 | 分页管理 Docker 与 CORE 原生模板，按名称搜索，设置默认服务和模板修订 |
@@ -44,7 +45,7 @@ sudo systemctl restart core-bridge.service
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-成功时健康接口返回 `{"status":"ok","sessions":0}`，其中 `sessions` 是 CORE 当前会话数。有会话时该数值会相应增加。浏览器打开 [管理平台](http://127.0.0.1:8080/) 或直接进入 [拓扑管理](http://127.0.0.1:8080/#topologies)。
+成功时健康接口返回 `{"status":"ok","sessions":0}`，其中 `sessions` 是 CORE 当前会话数。有会话时该数值会相应增加。浏览器打开 [管理平台概览](http://127.0.0.1:8080/) 或直接进入 [拓扑管理](http://127.0.0.1:8080/#topologies)。
 
 ## 从页面完成一次运行
 
@@ -126,7 +127,11 @@ LD_LIBRARY_PATH="$tool_root/daq/lib" "$tool_root/snort/bin/snort" -V
 curl -fsS http://127.0.0.1:8080/network-activity/capabilities
 ```
 
-规则文件放在 `BRIDGE_DATA_DIR/snort-rules/`，扩展名为 `.rules`。每次运行记录规则文件校验值。本机已校验的社区规则快照是 `community-20261118.rules`，SHA-256 为 `274d8ab3f891c9569bb92b92261908f753f68f4cf7d70733dba702baba5239a2`。快速检查告警链路时，可选内置「无害功能验收」规则，并在拓扑内 HTTP 流量任务中使用路径 `/?probe=BRIDGE_IDS_CHECK`。确认流量经过探针所选接口后，到数据监测查看规则命中。
+在拓扑的「新增 Snort 监测点」或「编辑 Snort 监测点」弹窗中，点击规则集旁的「导入规则」，选择一个不超过 8 MiB 的 UTF-8 `.rules` 文件。文件包含完整的规则声明，可使用注释。宿主具备运行依赖时，会用 Snort 3 和平台运行所用的配置校验，成功后自动选中。缺少依赖时会标记「待校验」，启动拓扑时重新检查。
+
+导入的规则进入本机共享规则库，关闭弹窗后仍可在其他监测点选用。在弹窗点「确定」将规则选入拓扑草稿，保存拓扑后该选择才会写入拓扑。内容相同的文件复用同一条记录，同名且内容不同的文件生成新版本。规则元数据保存在平台数据库，文件保存在 `BRIDGE_DATA_DIR/snort-rules/imported/`。运行记录会显示实际使用的规则集及其 SHA-256。
+
+仍可将规则文件直接放在 `BRIDGE_DATA_DIR/snort-rules/`。本机已校验的社区规则快照是 `community-20261118.rules`，SHA-256 为 `274d8ab3f891c9569bb92b92261908f753f68f4cf7d70733dba702baba5239a2`。快速检查告警链路时，可选内置「无害功能验收」规则，并在拓扑内 HTTP 流量任务中使用路径 `/?probe=BRIDGE_IDS_CHECK`。确认流量经过探针所选接口后，到数据监测查看规则命中。
 
 ## 配置和持久目录
 
@@ -184,6 +189,7 @@ Swagger UI 和 OpenAPI 给出运行实例当前已加载版本的请求参数和
 | 节点模板和原生服务 | `GET /instances`、`GET /native-services`、`GET /native-services/{name}/defaults`、`POST /native-services/{name}/preview` |
 | 接口流量、事件和历史指标 | `GET /api/sessions/{session_id}/throughputs/stream`、`GET /api/sessions/{session_id}/events/stream`、`GET /metrics`、`GET /events` |
 | 背景流量和 Snort 记录 | `GET /network-activity/capabilities`、`GET /deployments/{deployment_id}/network-activity` |
+| 导入本地 Snort 规则 | `POST /network-activity/rulesets/import?name=文件名.rules`，请求体为文件原文 |
 | 分页查询或导出 Snort 告警 | `GET /deployments/{deployment_id}/network-activity/{run_id}/alerts`、`GET /deployments/{deployment_id}/network-activity/{run_id}/alerts.csv` |
 | 独立停止背景流量任务 | `POST /deployments/{deployment_id}/network-activity/{run_id}/{item_id}/stop` |
 

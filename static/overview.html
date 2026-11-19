@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>概览 · CORE Bridge</title>
+  <link rel="stylesheet" href="/static/workbench.css?v=20261117-2">
+  <link rel="stylesheet" href="/static/overview.css?v=1">
+  <script>if (window.self !== window.top) document.documentElement.classList.add('embedded');</script>
+  <script defer src="/static/platform-ui.js?v=20261119-2"></script>
+  <script defer src="/static/overview.js?v=1"></script>
+</head>
+<body class="bridge-page">
+  <nav class="nav" aria-label="工作区导航"></nav>
+  <main class="overview">
+    <header class="overview-heading">
+      <div>
+        <h1>概览</h1>
+        <p id="overview-updated" class="overview-caption" role="status">正在读取平台状态…</p>
+      </div>
+      <div class="overview-actions">
+        <button id="overview-refresh" type="button">刷新</button>
+        <a class="btn primary" href="/#topologies" target="_top">打开拓扑管理</a>
+      </div>
+    </header>
+
+    <section class="overview-metrics" aria-label="资源与运行">
+      <a class="overview-metric overview-metric-accent" href="/#topologies" target="_top">
+        <span>运行中的会话</span><strong id="overview-running">—</strong>
+      </a>
+      <a class="overview-metric" href="/#topologies" target="_top">
+        <span>已保存拓扑</span><strong id="overview-topologies">—</strong>
+      </a>
+      <a class="overview-metric" href="/#instances" target="_top">
+        <span>节点模板</span><strong id="overview-templates">—</strong>
+      </a>
+      <a class="overview-metric" href="/#images" target="_top">
+        <span>进行中的导入</span><strong id="overview-imports">—</strong>
+      </a>
+    </section>
+
+    <div class="overview-columns">
+      <section class="overview-panel" aria-labelledby="overview-runs-label">
+        <header class="overview-panel-heading">
+          <h2 id="overview-runs-label">近期运行</h2>
+          <a href="/?history=1#topologies" target="_top">查看全部</a>
+        </header>
+        <div id="overview-runs"><p class="overview-empty">正在读取运行记录…</p></div>
+      </section>
+
+      <div class="overview-aside">
+        <section class="overview-panel" aria-labelledby="overview-environment-label">
+          <header class="overview-panel-heading"><h2 id="overview-environment-label">运行环境</h2></header>
+          <dl class="overview-checks" id="overview-environment">
+            <div><dt>CORE 守护进程</dt><dd>检查中</dd></div>
+            <div><dt>HTTP 背景流量</dt><dd>检查中</dd></div>
+            <div><dt>TCP / UDP 背景流量</dt><dd>检查中</dd></div>
+            <div><dt>Snort 监测</dt><dd>检查中</dd></div>
+          </dl>
+        </section>
+        <section class="overview-panel" aria-labelledby="overview-jobs-label">
+          <header class="overview-panel-heading">
+            <h2 id="overview-jobs-label">最近导入</h2>
+            <a href="/#images" target="_top">镜像管理</a>
+          </header>
+          <div id="overview-jobs"><p class="overview-empty">正在读取导入任务…</p></div>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
