@@ -29,8 +29,10 @@ def test_import_keeps_independent_versions_and_legacy_rules(client, tmp_path, mo
     assert original['name'] == '流量.rules' and original['validation'] == 'validated'
     assert duplicate.json()['data'] == {'ruleset': original, 'reused': True}
     assert latest['name'] == '流量.rules · v2' and latest['id'] != original['id']
-    assert network._ruleset(original['id'])[1] == TEST_RULE
-    assert network._ruleset(latest['id'])[1] == second_data
+    snapshot = tmp_path / 'snapshot.rules'
+    for rule, expected in ((original, TEST_RULE), (latest, second_data)):
+        _, digest = network._snapshot_ruleset(rule['id'], snapshot)
+        assert digest == rule['sha256'] and snapshot.read_bytes() == expected
     assert original['sha256'] == hashlib.sha256(TEST_RULE).hexdigest()
     catalog = client.get('/network-activity/capabilities').json()['data']['rulesets']
     assert {rule['id'] for rule in catalog} == {'verification', 'manual', original['id'], latest['id']}
@@ -49,7 +51,8 @@ def test_invalid_import_does_not_add_to_library(client, monkeypatch):
     for content in (b'', b'\x00\x01', b'include external.rules\n' + TEST_RULE):
         assert client.post(RULE_IMPORT, params={'name': 'bad.rules'}, content=content).status_code == 400
     assert client.post(RULE_IMPORT, params={'name': '../bad.rules'}, content=TEST_RULE).status_code == 400
-    large = client.post(RULE_IMPORT, params={'name': 'large.rules'}, content=b'a' * (network.RULE_MAX_BYTES + 1))
+    monkeypatch.setattr(network, 'RULE_MAX_BYTES', 1024)
+    large = client.post(RULE_IMPORT, params={'name': 'large.rules'}, content=b'a' * 1025)
     assert large.status_code == 413
     assert not repo.read(network.RULE_COLLECTION)
 
@@ -60,7 +63,7 @@ def test_pending_import_validates_at_start_and_detects_changes(client, monkeypat
     assert result['validation'] == 'pending'
     checked = []
     monkeypatch.setattr(network, '_missing_tools', lambda *args: '')
-    monkeypatch.setattr(network, '_validate_snort_rules', lambda data, tools: checked.append(data))
+    monkeypatch.setattr(network, '_validate_snort_rules', lambda path, tools: checked.append(path.read_bytes()))
     network._preflight_tool('snort', {}, result['id'])
     assert checked == [TEST_RULE]
     assert repo.read(network.RULE_COLLECTION, result['id'])['validation'] == 'validated'
