@@ -9,6 +9,10 @@
   let current = null, definition = null, dirty = false, selected = null, selectedLink = null;
   let view = 'edit', context = null, connect = false, firstEndpoint = null, optionsToken = 0;
   let query = '', filter = 'all', paletteQuery = '', auxiliary = false, opening = 0;
+  const paletteGroups = [
+    {kind:'docker', label:'Docker 模板', state:{open:true, scrollTop:0}},
+    {kind:'netns', label:'原生模板', state:{open:true, scrollTop:0}},
+  ];
   const camera = {x:0, y:0, scale:1};
   P.navigation('topologies.html');
   const message = () => el('div', {'aria-live':'polite'});
@@ -268,7 +272,8 @@
           editable() ? '拖动节点调整位置，点击节点或链路编辑属性。' : '点选节点或链路查看属性。'), canvas()));
       const link = selectedLink === null ? null : definition.links[selectedLink];
       const node = allNodes().find(n => n.id === selected);
-      const properties = el('div', {class:'topology-panel-body topology-properties'});
+      const properties = el('div', {class:'topology-panel-body topology-properties', role:'region',
+        'aria-label':'属性内容', tabIndex:0});
       const inspector = el('aside', {class:'topology-panel topology-inspector', 'aria-label':'属性面板'},
         panelHeader(link ? '链路属性' : node ? '节点属性' : '属性'), properties);
       if (link) linkInspector(properties, link);
@@ -302,28 +307,58 @@
     const area = el('aside', {class:'topology-panel topology-palette', 'aria-label':'节点库'}, panelHeader('节点库'), body);
     if (!editable()) {body.append(el('p', {class:'muted'}, '当前为只读视图。编辑配置后可添加节点。')); return area;}
     const contents = el('div', {class:'topology-palette-groups'});
-    const search = input(paletteQuery, value => {paletteQuery = value; fill();}); search.placeholder = '搜索模板或节点'; search.setAttribute('aria-label', '搜索节点库');
-    body.append(search, contents);
+    const search = input(paletteQuery, value => {
+      const changedQuery = value.trim().toLowerCase() !== paletteQuery.trim().toLowerCase();
+      paletteQuery = value;
+      if (!changedQuery) return;
+      for (const group of paletteGroups) group.filtered = null;
+      fill();
+    }, 'search');
+    search.placeholder = '搜索模板';
+    search.setAttribute('aria-label', '搜索节点库');
+    const quickAdd = (label, action) => {
+      const control = button(label, action);
+      control.setAttribute('aria-label', '添加' + label);
+      return control;
+    };
+    const nativeControls = [['原生主机',[]],['原生路由器',['IPForward']]].map(([label, services]) =>
+      quickAdd(label, () => addNative(label, {type:'default', model:'bare', services:services.filter(s => nativeCatalog.some(item => item.name === s))})));
+    const networkControls = [['switch','交换机'],['hub','集线器'],['wlan','无线网络']].map(([type, label]) =>
+      quickAdd(label, () => addNative(label, {type, model:'bare', ...(type === 'wlan' ? {range:'275', bandwidth:'54000000', delay:'5000', jitter:'0', error:'0'} : {})})));
+    const quick = propertyGroup('常用节点', nativeControls, networkControls);
+    quick.classList.add('topology-palette-quick');
+    body.append(search, quick, contents);
     function fill() {
-      contents.replaceChildren();
-      const matches = name => name.toLowerCase().includes(paletteQuery.toLowerCase());
-      for (const [kind, label] of [['docker','Docker 模板'],['netns','原生模板']]) {
-        const items = templates.filter(t => t.runtime_type === kind && matches(t.name));
+      const keyword = paletteQuery.trim().toLowerCase();
+      const groups = paletteGroups.map(group => {
+        const {kind, label} = group;
+        const available = templates.filter(t => t.runtime_type === kind);
+        const items = available.filter(t => t.name.toLowerCase().includes(keyword));
+        const state = keyword ? (group.filtered ??= {open:items.length > 0, scrollTop:0}) : group.state;
+        const list = el('div', {id:'topology-palette-' + kind, class:'topology-group-body topology-palette-list',
+          role:'region', 'aria-label':label + '列表', tabIndex:0, hidden:!state.open});
         const controls = items.map(template => {
-          const control = button(template.name, () => addNode(template)); control.setAttribute('aria-label', '添加模板 ' + template.name);
+          const control = button(template.name, () => {
+            state.scrollTop = list.scrollTop;
+            addNode(template);
+          });
+          control.setAttribute('aria-label', '添加模板 ' + template.name);
           return el('div', {}, control, el('small', {class:'muted'}, '修订 ' + template.version + (template.image_tag ? ' · ' + template.image_tag : '')));
         });
-        if (!controls.length) controls.push(el('p', {class:'muted'}, templates.some(t => t.runtime_type === kind) ? '没有匹配模板' : '暂无此类模板'));
-        contents.append(propertyGroup(label + '（' + items.length + '）', controls));
-      }
-      const nativeControls = [['原生主机',[]],['原生路由器',['IPForward']]]
-        .filter(([label]) => matches(label)).map(([label, services]) =>
-          button('添加' + label, () => addNative(label, {type:'default', model:'bare', services:services.filter(s => nativeCatalog.some(item => item.name === s))})));
-      if (nativeControls.length) contents.append(propertyGroup('CORE 原生节点', nativeControls));
-      const networkControls = [['switch','交换机'],['hub','集线器'],['wlan','无线网络']]
-        .filter(([, label]) => matches(label)).map(([type, label]) =>
-          button('添加' + label, () => addNative(label, {type, model:'bare', ...(type === 'wlan' ? {range:'275', bandwidth:'54000000', delay:'5000', jitter:'0', error:'0'} : {})})));
-      if (networkControls.length) contents.append(propertyGroup('网络构件', networkControls));
+        list.append(...(controls.length ? controls : [el('p', {class:'muted'}, available.length ? '没有匹配模板' : '暂无此类模板')]));
+        const restoreScroll = () => {if (state.open && list.isConnected) list.scrollTop = state.scrollTop;};
+        const toggle = el('button', {type:'button', class:'topology-palette-toggle',
+          'aria-expanded':String(state.open), 'aria-controls':list.id, onclick:() => {
+          state.open = !state.open;
+          toggle.setAttribute('aria-expanded', String(state.open));
+          list.hidden = !state.open;
+          restoreScroll();
+        }}, el('span', {class:'topology-palette-caret', 'aria-hidden':'true'}), label + '（' + items.length + '）');
+        list.addEventListener('scroll', () => {if (state.open && list.isConnected) state.scrollTop = list.scrollTop;});
+        requestAnimationFrame(restoreScroll);
+        return el('section', {class:'topology-group topology-palette-group'}, toggle, list);
+      });
+      contents.replaceChildren(...groups);
     }
     fill(); return area;
   }
@@ -545,7 +580,7 @@
     if (!nodes.length) stage.append(el('p', {class:'canvas-empty'}, '从左侧添加模板、原生主机或网络构件，再点击“连线”连接两个节点。'));
     area.append(stage);
     updateCamera();
-    return el('div', {}, toolbar,
+    return el('div', {class:'topology-canvas-view'}, toolbar,
       el('p', {id:'canvas-controls-hint', class:'muted topology-view-hint'}, '拖动空白处平移，滚轮缩放。聚焦画布后可用方向键、+、− 和 0。'), area);
   }
   function nativeEditor(area, node) {
