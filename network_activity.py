@@ -55,7 +55,9 @@ RULE_MAX_MIB = 100
 RULE_MAX_BYTES = RULE_MAX_MIB * 1024 * 1024
 RULE_LIMIT_MESSAGE = f'Snort 规则文件不能超过 {RULE_MAX_MIB} MiB'
 RULE_ACTIONS = {'alert', 'block', 'drop', 'log', 'pass', 'react', 'reject', 'rewrite', 'file_id'}
-RULE_TOKEN = re.compile(r'/\*|[#"()]|[^\s#"()/]+|/')
+# '#' 仅在行首/空白后才视为注释——否则 Talos 规则里 reference:url 中的裸 '#'
+# （如 virustotal.com/#/file）会被误判为行注释, 括号平衡检查假阳性拒掉整条规则（实测 103 条）
+RULE_TOKEN = re.compile(r'/\*|(?<!\S)#|["()]|[^\s#"()/]+|/')
 RULE_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
 MAX_INTERVAL_SECONDS = 3
 
@@ -290,8 +292,10 @@ def _snort_env(tools):
 
 
 def _snort_args(tools, rules):
+    # -k none: Docker/veth 网卡有校验和卸载, 抓到的包校验和是坏的; Snort 默认
+    # 校验通过才检测, 坏校验包会被跳过导致规则永不触发（本地实测: bad_tcp4_checksum>0 且零告警）
     return [tools['snort'], '-c', tools['snort_config'], '-R', rules, '--daq-dir', tools['daq'],
-            '--daq', 'pcap', '--daq-mode', 'passive', '-A', 'alert_json', '--lua', SNORT_LUA]
+            '--daq', 'pcap', '--daq-mode', 'passive', '-k', 'none', '-A', 'alert_json', '--lua', SNORT_LUA]
 
 
 def _validate_snort_rules(rules, tools):
