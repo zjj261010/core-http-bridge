@@ -257,3 +257,91 @@ def test_legacy_shared_implementation_can_be_grouped_without_overwriting_native_
         assert manager.load(Path(directory))==[]
         assert manager.get_service('SSH') is native
         assert manager.get_service(selected[0]['execution_name']).group=='Image services'
+
+
+def service_source(name):
+    return ('from core.services.base import CoreService\n'
+            'class Sample(CoreService):\n'
+            f'    name = {name!r}\n'
+            '    group = "Delivery test"\n')
+
+
+def test_available_services_hide_generated_aliases_and_keep_runtime_registration(image_api, tmp_path, monkeypatch):
+    client, catalog, _, _ = image_api
+    monkeypatch.syspath_prepend(ta.CUSTOM_SERVICES_DIR)
+    applied = save(client, catalog, [service()], 'apply').json()['data']
+    assert applied['state'] == 'applied'
+    target = repo.revision('target', catalog['target_name'], applied['applied_target_version'])
+    snapshot_names, _ = versions.execution_mapping(catalog['target_name'], target)
+    selected, _ = images.execution(target, {'web': 'web-normal'})
+    internal = {*snapshot_names.values(), selected[0]['execution_name']}
+
+    bundle = tmp_path / 'legacy-bundle'
+    (bundle / 'services').mkdir(parents=True)
+    manifest = {'name': 'legacy-test', 'image': {'name': 'legacy-image', 'tag': 'v1'},
+                'services': [{'name': 'web'}]}
+    (bundle / 'manifest.json').write_text(json.dumps(manifest))
+    (bundle / 'services' / 'service.py').write_text(service_source('web'))
+    with monkeypatch.context() as patch:
+        patch.setattr(ta, '_docker', lambda *_: ('sha256:' + 'b' * 64, 0))
+        imported = client.post('/targets/import/bundle', json={'dir': str(bundle), 'services_only': True})
+    assert imported.status_code == 200, imported.text
+    assert imported.json()['data']['pieces']['manifest']['receipt']['version'] == 1
+    legacy = 'svc-legacy-test-web'
+    created = client.post('/instances', json={
+        'name': 'legacy-template', 'runtime_type': 'docker', 'image_tag': 'legacy-image:v1',
+        'target_name': 'legacy-test', 'target_version': 1, 'services': [{'name': legacy}],
+    })
+    assert created.status_code == 200, created.text
+    resolved, _ = versions.resolve('legacy-template', 1)
+    assert len(resolved['services']) == 1 and resolved['services'][0] != legacy
+    internal.update(resolved['services'])
+
+    manual = Path(ta.CUSTOM_SERVICES_DIR) / 'manual_service'
+    manual.mkdir()
+    alias_shaped_name = 'svc-0123456789ab-v1-manual'
+    (manual / 'manual.py').write_text(service_source(alias_shaped_name))
+    ta._svc_cache['loaded'] = False
+    response = client.get('/instances/available-services')
+    assert response.status_code == 200, response.text
+    available = response.json()['data']
+    assert 'DefaultRoute' in available['system']
+    for group in ('drill', 'image'):
+        names = {item['name'] for item in available[group]}
+        assert {legacy, alias_shaped_name, selected[0]['name']} <= names
+        assert names.isdisjoint(internal)
+    assert internal <= ta._registered_service_names()
+
+
+@pytest.mark.parametrize('second_name', ['web', 'svc-delivery-test-web'])
+def test_bundle_rejects_duplicate_registered_names_before_loading_or_installing(client, tmp_path, monkeypatch, second_name):
+    bundle = tmp_path / 'incoming'
+    (bundle / 'services').mkdir(parents=True)
+    (bundle / 'services' / 'service.py').write_text(service_source('web'))
+    (bundle / 'services' / 'copy.py').write_text(service_source(second_name))
+    (bundle / 'manifest.json').write_text(json.dumps({
+        'name': 'delivery-test', 'image': {'name': 'delivery-image', 'tag': 'v1'},
+        'services': [{'name': 'web'}],
+    }))
+    (bundle / 'image.tar').touch()
+    docker_calls = []
+    monkeypatch.setattr(ta, '_docker', lambda *args: docker_calls.append(args))
+    response = client.post('/targets/import/bundle', json={'dir': str(bundle)})
+    assert response.status_code == 400, response.text
+    error = response.json()['error']
+    assert error['code'] == 'DELIVERY_INVALID'
+    assert all(value in error['message'] for value in ('service.py', 'copy.py', 'svc-delivery-test-web'))
+    assert not docker_calls
+    assert not Path(ta.CUSTOM_SERVICES_DIR).exists()
+    assert not repo.revision('target', 'delivery-test')
+
+
+def test_import_rejects_duplicate_manifest_entries_after_adding_prefix(client):
+    result = client.post('/targets/import/pieces', json={
+        'manifest': {'name': 'delivery-test', 'image': {'name': 'delivery-image', 'tag': 'v1'},
+                     'services': [{'name': 'web'}, {'name': 'svc-delivery-test-web'}]},
+        'py': service_source('web'), 'services_only': True,
+    })
+    assert result.status_code == 400, result.text
+    assert result.json()['error']['message'] == '重复服务: svc-delivery-test-web'
+    assert not Path(ta.CUSTOM_SERVICES_DIR).exists()

@@ -44,11 +44,10 @@ def prepare(body):
         package=man['name']
     sources=dict(body.get('python_files') or {})
     if body.get('py'): sources['editor.py']=body['py']
-    names=[n for text in sources.values() for n in delivery.names(text)]
-    if len(names)!=len(set(names)): raise ValueError('本次提交内有重复服务定义')
-    mapping={n:ta._prefixed_service_name(n,package) for n in names}
+    mapping = delivery.service_name_mapping(sources, package, ta._prefixed_service_name)
     if man:
         for svc in man['services']: svc['name']=mapping.get(svc['name'],svc['name'])
+        man = delivery.manifest(man)
     body.update(package=package,manifest=man,python_files=sources,py='')
     return body,mapping
 

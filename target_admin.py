@@ -11,6 +11,7 @@ import logging
 import os
 import pty
 from pathlib import Path
+import re
 import signal
 import subprocess
 import tarfile
@@ -750,8 +751,11 @@ def standalone_container_exec(name: str, body: dict):
 # 被引用锁定（locked）；同软件 normal/vuln 互斥、跨软件可组合
 # ═══════════════════════════════════════════════
 
+_GENERATED_SERVICE_PACKAGE = re.compile(r'version_[0-9a-f]{12}_[0-9]+|image_exec_[0-9a-f]{24}')
+
+
 def _available_services() -> dict:
-    """Native origin is determined by CORE's built-in catalog, never display names."""
+    """List declarations and selectable registrations, excluding generated implementations."""
     from core.services.manager import ServiceManager
     manager=ServiceManager();manager.load_locals()
     native=set(manager.services)
@@ -760,12 +764,16 @@ def _available_services() -> dict:
         if not isinstance(manifest,dict): continue
         for service in manifest.get('services') or []:
             declared[service['name']]={'name':service['name'],'mode':service.get('mode'),'software':service.get('software') or manifest.get('software') or manifest.get('name'),'source':'image'}
+    registry = _service_registry()
+    runtime_aliases = {
+        name for name, service in registry.items()
+        if _GENERATED_SERVICE_PACKAGE.fullmatch(service.__module__.partition('.')[0])
+    }
     custom=[]
-    for name in sorted(_service_registry()):
-        if name not in native:
-            custom.append(declared.get(name,{'name':name,'mode':None,'software':name,'source':'image' if name.startswith(('svc-','imgsvc-','imgmode-')) else 'unknown'}))
+    for name in sorted(registry.keys() - native - runtime_aliases):
+        custom.append(declared.get(name,{'name':name,'mode':None,'software':name,'source':'image' if name.startswith(('svc-','imgsvc-','imgmode-')) else 'unknown'}))
     for name,service in declared.items():
-        if name not in native and not any(item['name']==name for item in custom): custom.append(service)
+        if name not in native and name not in registry: custom.append(service)
     return {'drill':custom,'system':sorted(native),'image':[item for item in custom if item['source']=='image'],'unknown':[item for item in custom if item['source']=='unknown']}
 
 

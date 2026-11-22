@@ -65,6 +65,25 @@ def names(source):
     return [name for _, name in declarations(source)[1]]
 
 
+def service_name_mapping(sources, package, prefix):
+    mapping = {}
+    owners = {}
+    for filename, source in sources.items():
+        for name in names(source):
+            if not name:
+                continue
+            registered_name = prefix(name, package)
+            if registered_name in owners:
+                other_file, other_name = owners[registered_name]
+                raise ValueError(
+                    f'本次提交内有重复服务定义：{other_file} 中的 {other_name} 和 '
+                    f'{filename} 中的 {name} 均注册为 {registered_name}'
+                )
+            owners[registered_name] = (filename, name)
+            mapping[name] = registered_name
+    return mapping
+
+
 def rewrite(source, mapping):
     tree, decls = declarations(source)
     # Also rewrite explicit string references (dependencies and template selectors).
@@ -81,10 +100,7 @@ def install(directory, package, sources, templates, prefix):
     package = re.sub(r'[^a-zA-Z0-9_-]', '-', package).strip('-')
     if not package:
         raise ValueError('服务包名必填')
-    all_names = [n for source in sources.values() for n in names(source) if n]
-    if len(set(all_names)) != len(all_names):
-        raise ValueError('本次提交内有重复服务定义')
-    mapping = {n: prefix(n, package) for n in all_names}
+    mapping = service_name_mapping(sources, package, prefix)
     rewritten = {fn: rewrite(source, mapping) for fn, source in sources.items() if names(source)}
     owners = {}
     for path in root.glob('**/*.py'):
