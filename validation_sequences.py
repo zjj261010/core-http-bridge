@@ -30,9 +30,9 @@ import core_adapter
 import network_activity as network
 import platform_db
 import repository as repo
+import validation_actions
 
 logger = logging.getLogger(__name__)
-VERSION = 'validation/1'
 BATCH_SIZE = 100
 OBSERVATION_GRACE = 2
 PATHS = {'IF-02': '/api/v1/execution-results', 'IF-03': '/api/v1/snort-alerts'}
@@ -219,20 +219,29 @@ def _accept(bridge, body):
             raise Rejected(409, 1005, '序列编号已用于不同内容')
         return json.loads(row['context'])['receipt'] if row else None
 
-    accepted = {'code': 0, 'message': 'accepted', 'scenario_id': ids[0], 'sequence_id': ids[1],
-                'dictionary_version': VERSION}
+    def mapped_catalog():
+        record = validation_actions.catalog()
+        for step in actions:
+            entry = record['items'].get(step.action_name)
+            if entry is None:
+                raise Rejected(400, 1002, '未配置动作映射：' + step.action_name)
+            if 'simulation_steps' in entry:
+                raise Rejected(400, 1002, '动作仅供文档对照，当前未接入执行：' + step.action_name)
+        return record
+
     with repo.connection() as connection:
         if receipt := existing(connection):
             return receipt
     if int(ids[0]) > 2**31 - 1 or [step.seq for step in actions] != list(range(1, len(actions) + 1)):
         raise Rejected(400, 1004, '会话编号或步骤顺序无效')
-    if any(step.action_name != 'HttpServiceCheck' for step in actions):
-        raise Rejected(400, 1002, '初版支持预置 HTTP 验证 HttpServiceCheck')
+    mapped_catalog()
     context = _bind(bridge, int(ids[0]), actions)
-    context['receipt'] = accepted
     with repo.transaction() as connection:
         if receipt := existing(connection):
             return receipt
+        accepted = {'code': 0, 'message': 'accepted', 'scenario_id': ids[0], 'sequence_id': ids[1],
+                    'dictionary_version': validation_actions.dictionary_version(mapped_catalog())}
+        context['receipt'] = accepted
         if connection.execute("""SELECT 1 FROM validation_tasks WHERE scenario_id=?
                 AND execution_state IN ('accepted','executing')""", (ids[0],)).fetchone():
             raise Rejected(409, 1006, '该会话已有未完成的验证序列')
@@ -431,7 +440,8 @@ def _freeze(task, context, reason, *, interrupted):
                                 duration_sec=body.get('duration', 0 if step_state == 'SKIPPED' else None),
                                 source_node_id=context['source_id'], target_node_id=context['target_id'],
                                 stdout_digest=f"HTTP {result['http_status']}" if 'http_status' in result else None))
-        _queue(connection, task, 'IF-02', 0, {**_key(task), 'dictionary_version': VERSION, 'results': results})
+        version = (context.get('receipt') or {}).get('dictionary_version', validation_actions.DEFAULT_VERSION)
+        _queue(connection, task, 'IF-02', 0, {**_key(task), 'dictionary_version': version, 'results': results})
         batch_no, batch = 1, []
         base = {**_key(task), 'observation_status': status}
         for alert in _alerts(connection, context, steps):

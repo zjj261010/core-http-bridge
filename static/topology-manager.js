@@ -131,7 +131,7 @@
           definition = normalize(def);
         }
         render();
-      }), button('导入', importFile), button('新建拓扑', () => open(), true)));
+      }), button('动作映射', showActionMappings), button('导入', importFile), button('新建拓扑', () => open(), true)));
     app.replaceChildren(heading);
     if (data.runtime_error) app.append(el('p', {class:'notice error'}, data.runtime_error));
     if (!definition) renderList(); else renderWorkspace();
@@ -319,6 +319,69 @@
       current ? {topology_id:current.topology_id} : {drill_id:drill}));
   }
   function nodeName(id) { return allNodes().find(n => n.id === id)?.name || '#' + id; }
+  async function showActionMappings() {
+    const route = '/validation/action-mappings';
+    const execution = item => item?.simulation_steps ? '仅供对照' : '预置 HTTP 服务验证';
+    const content = el('div');
+    const version = el('span', {class:'muted'});
+    const feedback = message();
+
+    async function showMappings() {
+      const {items, dictionary_version} = await api(route);
+      version.textContent = '字典版本 ' + dictionary_version;
+      content.replaceChildren(items.length ? table(['动作编码','显示名称','仿真步数','执行方式','说明','操作'], items.map(item => [
+        item.action_name, item.label, item.simulation_steps || '—', execution(item), item.description || '—', el('div', {class:'actions'},
+          button('编辑', () => editMapping(item)), button('删除', async () => {
+            if (!confirm('删除动作映射「' + item.action_name + '」？此编码将无法用于下发新序列。')) return;
+            try {
+              await api(route + '/' + encodeURIComponent(item.action_name), 'DELETE');
+              P.localMessage(feedback, '已删除「' + item.action_name + '」。');
+              await showMappings();
+            } catch (error) { P.localMessage(feedback, error.message, true); }
+          })),
+      ])) : el('p', {class:'muted'}, '暂无动作映射。'));
+    }
+
+    function editMapping(item) {
+      const code = el('input', {value:item?.action_name || '', maxLength:64, required:true});
+      const label = el('input', {value:item?.label || '', maxLength:64, required:true});
+      const description = el('textarea', {value:item?.description || '', maxLength:400, rows:3});
+      const errorMessage = message();
+      const save = button('保存', async () => {
+        const values = {action_name:code.value.trim(), label:label.value.trim(), description:description.value.trim()};
+        if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(values.action_name)) {
+          code.focus();
+          return P.localMessage(errorMessage, '动作编码须以英文字母开头，可含字母、数字、点、下划线和连字符，最多 64 字符。', true);
+        }
+        if (!values.label) {
+          label.focus();
+          return P.localMessage(errorMessage, '请填写显示名称。', true);
+        }
+        try {
+          await api(item ? route + '/' + encodeURIComponent(item.action_name) : route, item ? 'PUT' : 'POST', values);
+        } catch (error) {
+          P.localMessage(errorMessage, error.message, true);
+          return;
+        }
+        editor.finish();
+        P.localMessage(feedback, '已保存「' + values.action_name + '」。');
+        try { await showMappings(); }
+        catch (error) { P.localMessage(feedback, error.message, true); }
+      }, true);
+      const editor = P.modal(item ? '编辑动作映射' : '新增动作映射', el('div', {},
+        el('div', {class:'form-grid'}, field('动作编码', code), field('显示名称', label)),
+        el('p', {}, '执行方式 · ' + execution(item)), field('说明', description), errorMessage),
+      [button('取消', () => editor.close()), save]);
+      editor.guard(() => code.value !== (item?.action_name || '') || label.value !== (item?.label || '') ||
+        description.value !== (item?.description || ''));
+    }
+
+    await showMappings();
+    P.modal('动作映射', el('div', {}, el('div', {class:'actions'}, button('新增映射', () => editMapping(), true),
+      button('刷新', showMappings), version),
+    el('p', {class:'muted'}, '仅供对照的条目来自 V1.0。IF-01 受理执行方式为预置 HTTP 服务验证的编码。'), feedback, content));
+  }
+
   async function showValidation(deploymentId) {
     const route = '/deployments/' + encodeURIComponent(deploymentId) + '/validation-sequences';
     const state = {accepted:'已受理', executing:'执行中', finished:'已归档', pending:'待发送',

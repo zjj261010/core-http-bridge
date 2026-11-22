@@ -1913,6 +1913,8 @@ from network_activity import router as network_activity_router
 app.include_router(network_activity_router, tags=["背景流量与 Snort"])
 from validation_sequences import router as validation_router
 app.include_router(validation_router, tags=["容器平台验证接口"])
+from validation_actions import router as validation_actions_router
+app.include_router(validation_actions_router, tags=["验证动作映射"])
 
 if __name__ == "__main__":
     import uvicorn

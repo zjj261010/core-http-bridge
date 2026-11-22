@@ -51,6 +51,83 @@ def test_recovery_keeps_completed_steps_without_replaying_uncertain_work():
     assert deliveries() == reports
 
 
+def test_mapping_crud_controls_acceptance_and_pins_dictionary_version(client, monkeypatch):
+    validation.initialize()
+    monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'test-token')
+    monkeypatch.setattr(validation, '_bind', lambda *_: {
+        'deployment_id': 'deploy-test', 'source_id': 1, 'target_id': 2,
+    })
+    mapping_route = '/validation/action-mappings'
+    incoming = '/api/v1/attack-sequences'
+    headers = {'Authorization': 'Bearer test-token'}
+    default = client.get(mapping_route).json()['data']
+    assert default['dictionary_version'] == 'validation/2'
+    assert [item['action_name'] for item in default['items'] if 'simulation_steps' not in item] == ['HttpServiceCheck']
+
+    mapping = {'action_name': 'LabHttpCheck', 'label': '测试站点', 'description': '检查已配置的网页'}
+    assert client.post(mapping_route, json=mapping).status_code == 201
+    assert client.post(mapping_route, json=mapping).status_code == 409
+    assert client.post(mapping_route, json={**mapping, 'command': 'echo test'}).status_code == 422
+    request = {'scenario_id': '41', 'sequence_id': 'before-rename', 'actions': [
+        {'seq': 1, 'action_name': mapping['action_name'], 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
+    ]}
+    receipt = client.post(incoming, json=request, headers=headers).json()
+    assert receipt['code'] == 0 and receipt['dictionary_version'] == 'validation/3'
+
+    changed = {**mapping, 'action_name': 'WebReachability', 'label': '网页可达性'}
+    assert client.put(mapping_route + '/LabHttpCheck', json=changed).json()['data'] == changed
+    assert client.post(incoming, json=request, headers=headers).json() == receipt
+    assert client.post(incoming, json={**request, 'sequence_id': 'after-rename'}, headers=headers).json()['code'] == 1002
+    assert client.delete(mapping_route + '/WebReachability').status_code == 200
+    assert client.delete(mapping_route + '/HttpServiceCheck').status_code == 200
+    remaining = client.get(mapping_route).json()['data']
+    assert remaining['dictionary_version'] == 'validation/6'
+    assert len(remaining['items']) == 9 and all('simulation_steps' in item for item in remaining['items'])
+
+    with repo.connection() as connection:
+        task = connection.execute('SELECT * FROM validation_tasks').fetchone()
+    validation._freeze(task, json.loads(task['context']), 'test', interrupted=False)
+    report = json.loads(deliveries()[0]['payload'])
+    assert report['dictionary_version'] == receipt['dictionary_version']
+    assert report['results'][0]['action_name'] == 'LabHttpCheck'
+
+
+def test_reference_catalog_migrates_once_and_reference_rows_cannot_execute(client, monkeypatch):
+    import validation_actions as actions
+
+    validation.initialize()
+    monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'test-token')
+    repo.put(actions.COLLECTION, actions.CATALOG, {'revision': 7, 'items': {
+        'LabCheck': {'action_name': 'LabCheck', 'label': '本地检查', 'description': ''},
+        'ServiceDiscovery': {'action_name': 'ServiceDiscovery', 'label': '本地显示名', 'description': ''},
+    }})
+    route = '/validation/action-mappings'
+    result = client.get(route).json()['data']
+    assert result['dictionary_version'] == 'validation/8'
+    items = {item['action_name']: item for item in result['items']}
+    assert set(items) == {'DiscoverRemoteSystems', 'ServiceDiscovery', 'DiscoverDeception',
+                          'ExploitRemoteService', 'PrivilegeEscalate', 'DegradeServices', 'Impact',
+                          'Withdraw', 'Sleep', 'LabCheck'}
+    assert items['ServiceDiscovery']['simulation_steps'] == '激进 1 / 隐蔽 3'
+    assert items['ServiceDiscovery']['label'] == '本地显示名'
+    assert 'simulation_steps' not in items['LabCheck']
+    changed = {'action_name': 'DocumentedDiscovery', 'label': '文档动作', 'description': ''}
+    assert client.put(route + '/ServiceDiscovery', json=changed).status_code == 200
+    request = {'scenario_id': '41', 'sequence_id': 'documented-action', 'actions': [
+        {'seq': 1, 'action_name': changed['action_name'], 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
+    ]}
+    with monkeypatch.context() as patch:
+        def cannot_bind(*_):
+            pytest.fail('文档条目不应进入会话绑定')
+        patch.setattr(validation, '_bind', cannot_bind)
+        denial = client.post('/api/v1/attack-sequences', json=request,
+                             headers={'Authorization': 'Bearer test-token'})
+    assert denial.status_code == 400 and denial.json()['code'] == 1002
+    assert client.delete(route + '/Sleep').status_code == 200
+    assert {item['action_name'] for item in client.get(route).json()['data']['items']} == (
+        set(items) - {'Sleep', 'ServiceDiscovery'} | {'DocumentedDiscovery'})
+
+
 @pytest.mark.parametrize(('total', 'sizes'), [(0, [0]), (100, [100]), (101, [100, 1])])
 def test_alert_batch_boundaries_and_precise_step_attribution(total, sizes):
     task, context = seed_task()
