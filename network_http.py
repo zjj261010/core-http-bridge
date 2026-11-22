@@ -24,6 +24,24 @@ def request(address, port, path):
         connection.close()
 
 
+def check(address, port):
+    connection = http.client.HTTPConnection(address, port, timeout=2)
+    endpoints = {}
+    try:
+        connection.connect()
+        source_ip, source_port = connection.sock.getsockname()
+        endpoints = dict(source_ip=source_ip, source_port=source_port)
+        connection.request('GET', '/?probe=BRIDGE_IDS_CHECK', headers={'Connection': 'close'})
+        with connection.getresponse() as response:
+            report('done', http_status=response.status, **endpoints)
+            return 0 if 200 <= response.status < 300 else 1
+    except (OSError, http.client.HTTPException):
+        report('failed', **endpoints)
+        return 1
+    finally:
+        connection.close()
+
+
 def run(address, port, path, rate, duration):
     report('starting')
     deadline = time.monotonic() + 15
@@ -69,5 +87,7 @@ def run(address, port, path, rate, duration):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 4 and sys.argv[1] == '--check':
+        raise SystemExit(check(sys.argv[2], int(sys.argv[3])))
     host, port, path, qps, duration = sys.argv[1:]
     run(host, int(port), path, int(qps), int(duration))

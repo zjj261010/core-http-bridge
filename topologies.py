@@ -228,6 +228,14 @@ def validate(definition, pin=True, *, check_local=False):
                 value=getattr(link.options,key)
                 if value is not None and not 0<=value<=100: raise ValueError(f'链路参数 {key} 须为 0–100')
     normalized = topo.model_dump(exclude_none=True)
+    sources = [node for node in topo.nodes if node.validation_source]
+    targets = [node for node in topo.nodes if node.validation_http_port]
+    if len(sources) > 1 or len(targets) > 1:
+        raise ValueError('每个拓扑至多标记一个序列执行节点和一个 HTTP 验证目标')
+    if any(kinds[node.id] not in network_activity.LOCAL_NODE_TYPES for node in sources + targets):
+        raise ValueError('序列验证节点须为本机 CORE 原生节点或 Docker 节点')
+    if sources and targets and sources[0].id == targets[0].id:
+        raise ValueError('序列执行节点和 HTTP 验证目标须为不同节点')
     if topo.network_activity and (topo.network_activity.traffic or topo.network_activity.probes):
         network_activity.validate(topo.network_activity, normalized, kinds)
     else:
@@ -370,6 +378,9 @@ def state(sid,status):
     for d in repo.read('deployments').values():
         if d.get('drill_id')==drill:
             d['status']=status
+            if status == 'running':
+                d['validation_epoch'] = repo.identifier('run')
+                d.pop('network_activity_start', None)
             if status=='running' and not d.get('has_run'):
                 execution=snapshot_session(sid)
                 d.update(has_run=True,source=execution,snapshot=execution,execution_definition=execution,bindings=copy.deepcopy(bindings(sid)))
@@ -383,6 +394,9 @@ def _signature(definition):
     for node in definition.get('nodes',[]):
         nodes.append({k:node.get(k) for k in ('id','name','type','model','image','instance','instance_version','target_name','target_version','service_overrides','service_selection','effective_services','service_configs','external_service_files')})
         nodes[-1]['services']=sorted(node.get('services') or [])
+        for role in ('validation_source', 'validation_http_port'):
+            if node.get(role):
+                nodes[-1][role] = node[role]
     links=copy.deepcopy(definition.get('links') or [])
     for link in links:
         for key in ('iface1','iface2'):
@@ -477,7 +491,7 @@ def deploy_definition(definition,topology_id=None,revision=None,start=False):
                     native_services.check_selection(names, configs, registered=registered, check_dependencies=True)
                 except ValueError as error:
                     raise ValueError(display + '：' + str(error)) from error
-        bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in node}
+        bound[str(node['id'])]={k:node[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services','validation_source','validation_http_port') if k in node}
         resets = [name for name, value in (overrides or {}).items() if value is None]
         if node.get('instance') and resets:
             bound[str(node['id'])]['native_service_resets'] = resets

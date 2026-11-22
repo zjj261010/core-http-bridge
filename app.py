@@ -147,12 +147,14 @@ async def lifespan(_app: FastAPI):
         jobs.recover()
         __import__('image_services').recover()
         __import__('network_activity').recover()
+        __import__('validation_sequences').start(bridge)
         platform_db.start_sampler()   # reconciler + 事件落库 + 指标采样（5s）
         logger.info("platform db sampler started")
     except Exception:
         logger.exception("platform_db startup failed")
     yield
     await asyncio.to_thread(__import__("jobs").shutdown)
+    await asyncio.to_thread(__import__('validation_sequences').shutdown)
     __import__('image_services').shutdown()
     await asyncio.to_thread(__import__('network_activity').shutdown)
     bridge.close()
@@ -391,6 +393,8 @@ class TopologyNode(BaseModel):
     target_name: str | None = None
     target_version: int | None = None
     emane: str | None = None
+    validation_source: bool | None = None
+    validation_http_port: int | None = Field(default=None, ge=1, le=65535)
 
 class TopologyLink(BaseModel):
     model_config = {'extra': 'allow'}
@@ -1907,6 +1911,8 @@ from native_services import router as native_services_router
 app.include_router(native_services_router, tags=["CORE 原生服务"])
 from network_activity import router as network_activity_router
 app.include_router(network_activity_router, tags=["背景流量与 Snort"])
+from validation_sequences import router as validation_router
+app.include_router(validation_router, tags=["容器平台验证接口"])
 
 if __name__ == "__main__":
     import uvicorn

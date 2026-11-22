@@ -44,7 +44,7 @@ VERIFY_RULE = (
     'content:"BRIDGE_IDS_CHECK"; sid:1000001; rev:1;)\n'
 )
 SNORT_LUA = (
-    "alert_json = {fields = 'timestamp proto src_ap dst_ap rule action msg class'};"
+    "alert_json = {fields = 'timestamp seconds proto src_ap dst_ap src_addr src_port dst_addr dst_port rule action msg class priority'};"
     "perf_monitor = {seconds=1, packets=1, output='console', format='csv', "
     "modules={{name='daq',pegs='analyzed dropped'}}}"
 )
@@ -242,6 +242,7 @@ def _tools():
     return {
         'nsenter': Path('/usr/bin/nsenter'),
         'ss': Path('/usr/bin/ss'),
+        'stdbuf': Path('/usr/bin/stdbuf'),
         'timeout': Path('/usr/bin/timeout'),
         'iperf3': TOOL_ROOT / 'iperf/bin/iperf3',
         'snort': TOOL_ROOT / 'snort/bin/snort',
@@ -254,7 +255,7 @@ def _missing_tools(kind, tools):
     names = {
         'http': ('nsenter', 'timeout'),
         'iperf3': ('nsenter', 'timeout', 'ss', 'iperf3'),
-        'snort': ('nsenter', 'snort'),
+        'snort': ('nsenter', 'snort', 'stdbuf'),
     }[kind]
     missing = [name for name in names if not tools[name].is_file() or not os.access(tools[name], os.X_OK)]
     if kind == 'snort':
@@ -739,7 +740,10 @@ class Worker:
         rule_path = self.path / 'loaded.rules'
         entry, version = _snapshot_ruleset(spec.ruleset, rule_path)
         self.update(interface=iface.name, ruleset_name=entry['name'], rules_sha256=version)
-        proc = self.spawn(spec.node_id, [*_snort_args(tools, rule_path), '-i', iface.name], env=_snort_env(tools))
+        # A quiet pcap interface can block before a multi-packet batch fills.
+        proc = self.spawn(spec.node_id, [tools['stdbuf'], '-oL', *_snort_args(tools, rule_path),
+                                         '--daq-batch-size', '1', '-i', iface.name],
+                          env=_snort_env(tools))
         columns, packets, drops, alerts = [], 0, 0, 0
 
         def consume(line):
@@ -759,7 +763,9 @@ class Worker:
                     'type': 'snort', 'action': 'detect', 'node_id': spec.node_id, 'probe_id': spec.id,
                     'probe': spec.name, 'interface': iface.name, 'run_id': self.run.id,
                     'ruleset_name': entry['name'], 'rules_sha256': version,
-                    **{key: match.get(key) for key in ('timestamp','proto','src_ap','dst_ap','rule','msg','class')},
+                    **{key: match.get(key) for key in ('timestamp', 'seconds', 'proto', 'src_ap', 'dst_ap',
+                                                       'src_addr', 'src_port', 'dst_addr', 'dst_port',
+                                                       'rule', 'msg', 'class', 'priority')},
                 }, self.run.drill)
             elif 'packet processing' not in line.lower():
                 return False

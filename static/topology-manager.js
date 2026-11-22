@@ -224,6 +224,8 @@
       if (current) actions.append(button('编辑下次运行配置', () => open(current)));
       if ((run || context?.deployment_id) && definition.network_activity) actions.append(
         button('网络任务与 Snort 告警', () => NetworkActivity.show(run?.deployment_id || context.deployment_id)));
+      if ((run || context?.deployment_id) && definition.nodes?.some(node => node.validation_source)) actions.append(
+        button('序列验证记录', () => showValidation(run?.deployment_id || context.deployment_id)));
       if (session?.state === 1) actions.append(button(run?.status === 'stopped' ? '再次运行' : '启动会话', resume, true));
       if (session?.state === 4) actions.append(button('检查联通', async () => {
         const result = await sessionAction('connectivity');
@@ -281,6 +283,30 @@
         const name = field('节点名称', input(node.name, value => {node.name = value; changed(); updateNodeLabel(node);}));
         const details = el('fieldset', {class:'topology-properties', disabled:!editable()}, propertyGroup('基本信息', name));
         properties.append(details);
+        if (definition.nodes.includes(node) && ['default','router','host','pc','docker'].includes(node.type || 'default')) {
+          const source = checkbox(node.validation_source, enabled => {
+            for (const item of definition.nodes) delete item.validation_source;
+            if (enabled) {
+              node.validation_source = true;
+              delete node.validation_http_port;
+            }
+            changed(); render();
+          }, '序列执行节点');
+          const port = input(node.validation_http_port || '', value => {
+            const number = Number(value);
+            if (value && (!Number.isInteger(number) || number < 1 || number > 65535)) {
+              P.notice('HTTP 验证端口须为 1–65535', true); return;
+            }
+            if (value) {
+              for (const item of definition.nodes) delete item.validation_http_port;
+              delete node.validation_source;
+              source.querySelector('input').checked = false;
+              node.validation_http_port = number;
+            } else delete node.validation_http_port;
+            changed();
+          }, 'number');
+          details.append(propertyGroup('序列验证', source, field('HTTP 验证目标端口（留空关闭）', port)));
+        }
         nodeEditor(details).catch(error => {if (details.isConnected) P.localMessage(details, error.message, true);});
         if (editable()) properties.append(el('div', {class:'topology-property-actions'}, button('删除节点', () => removeNode(node.id))));
         else if (view === 'live' && session?.state === 4 && ['default','router','host','PC','pc','docker','podman'].includes(node.type)) properties.append(nodeOperations(node, session));
@@ -293,6 +319,37 @@
       current ? {topology_id:current.topology_id} : {drill_id:drill}));
   }
   function nodeName(id) { return allNodes().find(n => n.id === id)?.name || '#' + id; }
+  async function showValidation(deploymentId) {
+    const route = '/deployments/' + encodeURIComponent(deploymentId) + '/validation-sequences';
+    const state = {accepted:'已受理', executing:'执行中', finished:'已归档', pending:'待发送',
+      confirmed:'已确认', blocked:'需处理', SUCCESS:'成功', FAIL:'失败', SKIPPED:'跳过', running:'执行中'};
+    const observed = {complete:'完整', partial:'部分覆盖', unavailable:'不可用'};
+    const content = el('div');
+    async function refreshValidation() {
+      const {items, callback_configured} = await api(route);
+      content.replaceChildren();
+      if (!callback_configured) content.append(el('p', {class:'muted'}, '回调地址未配置，报文保存在本机。'));
+      if (!items.length) content.append(el('p', {class:'muted'}, '暂无序列验证记录。'));
+      for (const item of items) {
+        const deliveries = item.deliveries.map(row => [row.interface, row.batch_no || '—',
+          row.status === 'pending' && !row.attempts ? '待发送' : state[row.status], row.attempts, row.error || '—']);
+        const retry = item.deliveries.some(row => row.status === 'blocked') ? button('补发阻塞报文', async () => {
+          await api(route + '/' + encodeURIComponent(item.task_id) + '/retry', 'POST');
+          await refreshValidation();
+        }) : null;
+        content.append(propertyGroup(item.sequence_id,
+          el('p', {}, '会话 ' + item.scenario_id + ' · ' + state[item.state] + ' · ' +
+            nodeName(item.source_node_id) + ' → ' + nodeName(item.target_node_id) + ' · 观测 ' +
+            (observed[item.observation_status] || '待归档')),
+          table(['步骤','状态','HTTP 状态','耗时（秒）','原因'], item.steps.map(step => [step.seq,
+            step.state === 'pending' ? '待执行' : state[step.state], step.http_status ?? '—',
+            step.duration_sec ?? '—', step.reason || '—'])),
+          deliveries.length ? table(['接口','批次','回传状态','尝试次数','最近错误'], deliveries) : null, retry));
+      }
+    }
+    await refreshValidation();
+    P.modal('序列验证记录', el('div', {}, button('刷新', refreshValidation), content));
+  }
   function updateNodeLabel(node) {
     const control = document.querySelector('[data-node-id="' + node.id + '"]');
     if (control) {control.querySelector('strong').textContent = node.name; control.setAttribute('aria-label', '选择节点 ' + node.name);}
@@ -811,8 +868,13 @@
     const warnings = definition.format === 'core-xml' ? [] : TopologyAddressing.warnings(definition.links, addressNodes());
     const addressNotice = warnings.length ? '\nIPv4 检查\n' + warnings.slice(0, 8).join('\n') +
       (warnings.length > 8 ? '\n另有 ' + (warnings.length - 8) + ' 项。' : '') + '\n仍要启动？' : '';
+    const source = definition.nodes?.find(node => node.validation_source);
+    const target = definition.nodes?.find(node => node.validation_http_port);
+    const validationNotice = source && target ? '序列验证由 ' + source.name + ' 执行，目标为 ' +
+      target.name + ' 的 HTTP 端口 ' + target.validation_http_port + '。\n' : '';
     if (!confirm('启动“' + definition.name + '”？\n' + allNodes().length + ' 个节点，' + (definition.links?.length || 0) + ' 条链路。\n' +
-      (dirty || !current ? '当前修改会先保存。\n' : '') + (active ? '此拓扑已有 ' + active + ' 个活动会话。\n' : '') + '将创建新的 CORE 会话，已有运行不变。' + addressNotice)) return;
+      (dirty || !current ? '当前修改会先保存。\n' : '') + (active ? '此拓扑已有 ' + active + ' 个活动会话。\n' : '') +
+      validationNotice + '将创建新的 CORE 会话，已有运行不变。' + addressNotice)) return;
     if (dirty || !current) await save();
     try {
       const run = await api('/topologies/' + current.topology_id + '/deploy', 'POST', {revision:current.revision, start:true});

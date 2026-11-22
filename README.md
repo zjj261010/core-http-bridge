@@ -108,7 +108,7 @@ curl -fsS http://127.0.0.1:8080/health
 
 iperf3 3.17 首次提供 `--json-stream`。本项目验收的是 3.22，部署可直接用 3.22。Snort 和 LibDAQ 版本变动后，先用所选规则集校验配置，再检查实际捕获包数和告警。 [iperf3 官方版本记录](https://software.es.net/iperf/news.html) · [Snort 3.13.2.0](https://github.com/snort3/snort3/releases/tag/3.13.2.0) · [LibDAQ 3.0.29](https://github.com/snort3/libdaq/releases/tag/v3.0.29)
 
-默认工具目录是 `/opt/core-network-tools`。可用 `CORE_BRIDGE_NETWORK_ROOT` 指向其他持久目录，保持以下相对路径。Bridge 还使用宿主的 `nsenter`、`ss` 和 `timeout`。
+默认工具目录是 `/opt/core-network-tools`。可用 `CORE_BRIDGE_NETWORK_ROOT` 指向其他持久目录，保持以下相对路径。Bridge 还使用宿主的 `nsenter`、`ss`、`timeout` 和 `stdbuf`。
 
 ```text
 /opt/core-network-tools/
@@ -132,6 +132,29 @@ curl -fsS http://127.0.0.1:8080/network-activity/capabilities
 导入的规则进入本机共享规则库，关闭弹窗后仍可在其他监测点选用。在弹窗点「确定」将规则选入拓扑草稿，保存拓扑后该选择才会写入拓扑。内容相同的文件复用同一条记录，同名且内容不同的文件生成新版本。规则元数据保存在平台数据库，文件保存在 `BRIDGE_DATA_DIR/snort-rules/imported/`。运行记录会显示实际使用的规则集及其 SHA-256。
 
 仍可将规则文件直接放在 `BRIDGE_DATA_DIR/snort-rules/`。本机已校验的社区规则快照是 `community-20261118.rules`，SHA-256 为 `274d8ab3f891c9569bb92b92261908f753f68f4cf7d70733dba702baba5239a2`。快速检查告警链路时，可选内置「无害功能验收」规则，并在拓扑内 HTTP 流量任务中使用路径 `/?probe=BRIDGE_IDS_CHECK`。确认流量经过探针所选接口后，到数据监测查看规则命中。
+
+## 容器平台序列验证
+
+初版用预置的 `HttpServiceCheck` 贯通三个接口。它从拓扑中标记的执行节点，对已标记的目标节点及端口发送一次固定 HTTP GET。内置 Snort「无害功能验收」规则可以识别请求。HTTP 2xx 记为成功。
+
+1. 在拓扑中标记一个「序列执行节点」，在另一个节点的属性里填写「HTTP 验证目标端口」。目标服务须已配置启动，并能够响应带验收标记的根路径请求。将 Snort 探针放在请求经过的接口上，选择内置「无害功能验收」规则，保存并启动拓扑。
+2. 在运行会话里读取 CORE 会话 ID。IF-01 的 `scenario_id` 使用该 ID 的十进制字符串。用 `POST /api/v1/attack-sequences` 提交样例，带上 `Authorization: Bearer <入站令牌>`。调用方等待受理回执，序列在后台执行。
+3. 在运行详情打开「序列验证记录」，可查看步骤结果、探针观测状态和回传进度。接收方确认 IF-02 的整组结果后，Bridge 才开始发送 IF-03 告警批次。无告警时仍有空尾批。暂时断线会自动重试，接收契约或鉴权错误可在纠正后从记录里补发。
+
+| Bridge 环境变量 | 用途 |
+|---|---|
+| `BRIDGE_VALIDATION_TOKEN` | 设置后启用 IF-01，作为入站 Bearer 令牌 |
+| `BRIDGE_VALIDATION_CALLBACK_URL` | 接收端 HTTP(S) 根地址。Bridge 固定追加 IF-02、IF-03 路径。地址为空时报文在本地待发 |
+| `BRIDGE_VALIDATION_CALLBACK_TOKEN` | 可选的出站 Bearer 令牌 |
+
+入站样例中的会话、地址和网段须换成本次运行数据。数字平台只提供约定时，可运行 `python3 scripts/mock-validation-receiver.py --db <持久目录>/receipts.db`，并将 Bridge 回调地址设为 `http://127.0.0.1:18082`。参数 `--fail-first` 可模拟接收端首次入库后返回 503，以核对补发和去重。启用本功能时使用单进程 Bridge。令牌通过私有部署配置注入。 [设计开发说明书](docs/design/数字平台与容器平台交互设计开发说明书V1.1.docx)
+
+```json
+{"scenario_id":"41","sequence_id":"demo-001","actions":[
+  {"seq":1,"action_name":"HttpServiceCheck",
+   "target_node":{"subnet":"10.93.0.0/24","ip":"10.93.0.2"},
+   "params":{"check_id":"web-health"}}]}
+```
 
 ## 配置和持久目录
 
