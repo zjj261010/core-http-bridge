@@ -84,38 +84,17 @@ def list_mappings():
 
 @router.post('', status_code=201)
 def create_mapping(mapping: ActionMapping):
-    with repo.transaction():
-        record = catalog()
-        if mapping.action_name in record['items']:
-            raise HTTPException(409, '动作编码已存在')
-        record['items'][mapping.action_name] = _entry(mapping)
-        _save(record)
-    return {'data': mapping}
+    # 动作映射编辑已关闭（字典只读）：IF-01 受理语义依赖稳定的字典版本，线上不接受运行期增删
+    raise HTTPException(403, '动作映射编辑已关闭（字典只读）')
 
 
 @router.put('/{action_name}')
 def update_mapping(action_name: str, mapping: ActionMapping):
-    with repo.transaction():
-        record = catalog()
-        items = record['items']
-        if action_name not in items:
-            raise HTTPException(404, '动作映射已删除或改名，请刷新列表')
-        if mapping.action_name != action_name and mapping.action_name in items:
-            raise HTTPException(409, '动作编码已存在')
-        payload = _entry(mapping, items[action_name])
-        if payload != items[action_name]:
-            del items[action_name]
-            items[mapping.action_name] = payload
-            _save(record)
-    return {'data': mapping}
+    # 动作映射编辑已关闭（字典只读）：IF-01 受理语义依赖稳定的字典版本，线上不接受运行期增删
+    raise HTTPException(403, '动作映射编辑已关闭（字典只读）')
 
 
 @router.delete('/{action_name}')
 def delete_mapping(action_name: str):
-    with repo.transaction():
-        record = catalog()
-        if action_name not in record['items']:
-            raise HTTPException(404, '动作映射已删除或改名，请刷新列表')
-        del record['items'][action_name]
-        _save(record)
-    return {'data': {'action_name': action_name}}
+    # 动作映射编辑已关闭（字典只读）：IF-01 受理语义依赖稳定的字典版本，线上不接受运行期增删
+    raise HTTPException(403, '动作映射编辑已关闭（字典只读）')
