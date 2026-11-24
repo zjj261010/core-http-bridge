@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -253,6 +254,82 @@ def _accept(bridge, body):
     return accepted
 
 
+def _mock_enabled():
+    """联调假数据模式（BRIDGE_VALIDATION_MOCK=1）: 任意 id 可走通受理→轮询→取结果→取告警;
+    受理免会话/免拓扑即落"已完成"假数据, 查询端点零改动读真表; 默认关闭不影响真实契约"""
+    return os.environ.get('BRIDGE_VALIDATION_MOCK', '') not in ('', '0', 'false', 'False')
+
+
+def _mock_accept(body):
+    """联调假数据受理: 免会话/免拓扑, 按提交的动作序列即落"全部成功"完成态＋合成告警。
+    保留 1004（格式/seq）与 1005（同键异文）错误路径; 动作名不做字典校验（mock 回显任意动作）。
+    全部行带 mock 前缀标识, 不与真实任务混写。"""
+    ids = body.scenario_id, body.sequence_id
+    payload = [item.model_dump(mode='json') for item in sorted(body.actions, key=lambda step: step.seq)]
+    digest = hashlib.sha256(_json(payload).encode()).hexdigest()
+    if int(ids[0]) > 2**31 - 1 or [step['seq'] for step in payload] != list(range(1, len(payload) + 1)):
+        raise Rejected(400, 1004, '会话编号或步骤顺序无效')
+    with repo.connection() as connection:
+        row = connection.execute('SELECT digest,context FROM validation_tasks WHERE scenario_id=? AND sequence_id=?',
+                                 ids).fetchone()
+        if row:
+            if row['digest'] != digest:
+                return JSONResponse({**body.model_dump(include={'scenario_id', 'sequence_id'}),
+                                     'code': 1005, 'message': '相同序列编号但内容不同'}, status_code=409)
+            return JSONResponse(json.loads(row['context'])['receipt'])
+
+    now = time.time()
+    drill = f'd-mock-{ids[0]}-{ids[1]}'
+    run = f'net-mock-{ids[0]}-{ids[1]}'
+    task_id = 'validation-mock-' + uuid.uuid4().hex[:12]
+    source_ip, port = '10.99.0.10', 80
+    started = now
+    steps, events = [], []
+    for item in payload:
+        seq, target_ip = item['seq'], str(item['target_node']['ip'])
+        window_end = started + 0.15
+        src_port = 40000 + seq
+        steps.append((task_id, seq, 'SUCCESS', _json({
+            'request': item, 'reason': '', 'started': started, 'ended': window_end, 'duration': 0.15,
+            'result': {'exit_code': 0, 'http_status': 200, 'source_ip': source_ip, 'source_port': src_port}})))
+        # 每步两条告警（请求/响应方向, 五元组与步骤结果精确匹配 → seq 归属走真实算法）
+        for offset, src, sport, dst, dport in ((0.05, source_ip, src_port, target_ip, port),
+                                               (0.10, target_ip, port, source_ip, src_port)):
+            stamp = started + offset
+            events.append({'type': 'snort', 'run_id': run, 'probe_id': 'mock-probe', 'seconds': int(stamp),
+                           'timestamp': f'01/01-00:00:00.{int(stamp % 1 * 1e6):06d}', 'proto': 'TCP',
+                           'rule': '1:1000001:1', 'priority': 3, 'msg': 'Mock IDS verification',
+                           'src_addr': src, 'src_port': sport, 'dst_addr': dst, 'dst_port': dport})
+        started = window_end + 0.05
+    receipt = {'code': 0, 'message': 'accepted', 'scenario_id': ids[0], 'sequence_id': ids[1],
+               'dictionary_version': validation_actions.dictionary_version(validation_actions.catalog()),
+               'mock': True}
+    context = {'receipt': receipt, 'deployment_id': f'deploy-mock-{ids[0]}', 'drill_id': drill,
+               'identity': 'mock', 'source_id': 2, 'target_id': 1, 'port': port,
+               'run_id': run, 'cursor': 0, 'observation_start': now,
+               'observation_end': started, 'observation_status': 'complete',
+               'probes': {'mock-probe': {'status': 'running', 'metrics': {'drops': 0}}}}
+    with repo.transaction() as connection:
+        # 幂等重播种: 只清本 run 的旧假告警（事件表无业务键, 不碰真实数据）
+        connection.execute("DELETE FROM events WHERE drill_id=? AND json_extract(detail,'$.run_id')=?",
+                           (drill, run))
+        # steps 外键引用 tasks → 先落任务行（占位 context）, 事件上界算好后回填
+        connection.execute('INSERT INTO validation_tasks VALUES(?,?,?,?,?,?,?,?)',
+                           (task_id, ids[0], ids[1], context['deployment_id'], 'finished', digest,
+                            _json(context), time.time()))
+        for _, seq, state, body_json in steps:
+            connection.execute('INSERT INTO validation_steps VALUES(?,?,?,?)', (task_id, seq, state, body_json))
+        for detail in events:
+            connection.execute('INSERT INTO events(ts,drill_id,core_sid,type,action,detail) VALUES(?,?,?,?,?,?)',
+                               (platform_db._now(), drill, int(ids[0]), 'snort', None,
+                                json.dumps(detail, ensure_ascii=False)))
+        context['observation_end_id'] = connection.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+        connection.execute('UPDATE validation_tasks SET context=? WHERE task_id=?', (_json(context), task_id))
+    logger.info('mock validation accepted: %s/%s (%s 步)', ids[0], ids[1], len(payload))
+    return JSONResponse(receipt)
+
+
+
 @router.post('/api/v1/attack-sequences')
 def accept(body: Sequence, authorization: Annotated[str | None, Header()] = None):
     import app
@@ -262,6 +339,8 @@ def accept(body: Sequence, authorization: Annotated[str | None, Header()] = None
     token = os.environ.get('BRIDGE_VALIDATION_TOKEN')
     if token and not hmac.compare_digest((authorization or '').encode(), ('Bearer ' + token).encode()):
         return JSONResponse({'code': 1000, 'message': '调用凭据无效'}, status_code=401)
+    if _mock_enabled():
+        return _mock_accept(body)
     try:
         return _accept(app.bridge, body)
     except Rejected as error:
@@ -601,6 +680,29 @@ def _query_payload(sequence_id: str, scenario_id: str, *, with_results: bool):
                 'results': results, 'alerts_total': len(alerts)}
 
 
+
+
+def _mock_fallback(sequence_id, scenario_id):
+    """mock 模式下未受理过的 id: 合成默认完成态（单步 HttpServiceCheck; 全字段有值, 恒成功有告警）"""
+    run = f'net-mock-{scenario_id}-{sequence_id}'
+    started, ended = time.time() - 1.0, time.time() - 0.8
+    steps = [dict(seq=1, action_name='HttpServiceCheck', state='SUCCESS', reason='', duration_sec=0.2)]
+    results = [dict(seq=1, action_name='HttpServiceCheck', actual='SUCCESS', exit_code=0, reason='',
+                    started_at=_utc(started), ended_at=_utc(ended), duration_sec=0.2,
+                    source_node_id=2, target_node_id=1, stdout_digest='HTTP 200')]
+    alerts = []
+    for offset, src, sport, dst, dport in ((0.05, '10.99.0.10', 40001, '10.99.0.1', 80),
+                                           (0.10, '10.99.0.1', 80, '10.99.0.10', 40001)):
+        alerts.append(dict(event_id=f'{run}:{100 + len(alerts)}', probe_id='mock-probe', seq=1,
+                           ts=_utc(started + offset), sid='1:1000001', priority=3,
+                           src_ip=src, src_port=sport, dst_ip=dst, dst_port=dport,
+                           proto='TCP', msg='Mock IDS verification'))
+    base = dict(scenario_id=scenario_id, sequence_id=sequence_id, state='finished',
+                observation_status='complete', dictionary_version=validation_actions.DEFAULT_VERSION,
+                source_node_id=2, target_node_id=1)
+    return base, steps, results, alerts
+
+
 @router.get('/api/v1/attack-sequences/{sequence_id}')
 def query_task(sequence_id: str, scenario_id: str):
     """V2.0 Q1: 任务状态与步骤查询（含已完成步骤; state=finished 后结果冻结）"""
@@ -608,6 +710,9 @@ def query_task(sequence_id: str, scenario_id: str):
         row = connection.execute("""SELECT * FROM validation_tasks
             WHERE scenario_id=? AND sequence_id=?""", (scenario_id, sequence_id)).fetchone()
         if row is None:
+            if _mock_enabled():
+                base, steps, _, _ = _mock_fallback(sequence_id, scenario_id)
+                return {'data': {**base, 'steps': steps}}
             return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
         context = json.loads(row['context'])
         steps = []
@@ -629,6 +734,9 @@ def query_results(sequence_id: str, scenario_id: str):
     """V2.0 Q2: 整条结果序列查询（结构对齐 V1.0 IF-02 payload, 数字平台入库可复用）"""
     payload = _query_payload(sequence_id, scenario_id, with_results=True)
     if payload is None:
+        if _mock_enabled():
+            base, _, results, alerts = _mock_fallback(sequence_id, scenario_id)
+            return {'data': {**base, 'results': results, 'alerts_total': len(alerts)}}
         return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
     return {'data': payload}
 
@@ -649,6 +757,15 @@ def query_alerts(sequence_id: str, scenario_id: str, after_event_id: str | None 
         row = connection.execute("""SELECT * FROM validation_tasks
             WHERE scenario_id=? AND sequence_id=?""", (scenario_id, sequence_id)).fetchone()
         if row is None:
+            if _mock_enabled():
+                base, _, _, matched = _mock_fallback(sequence_id, scenario_id)
+                matched = [alert for alert in matched
+                           if after is None or int(alert['event_id'].rsplit(':', 1)[-1]) > after]
+                alerts = matched[:limit]
+                return {'data': {**base, 'observation_status': base['observation_status'],
+                                 'is_last': len(matched) <= limit, 'total': len(matched),
+                                 'after_event_id': alerts[-1]['event_id'] if alerts else after_event_id,
+                                 'alerts': alerts}}
             return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
         context = json.loads(row['context'])
         # _alerts 期望已解析的步骤 body（按 result 五元组把告警归属到步骤 seq）

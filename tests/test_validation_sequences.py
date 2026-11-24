@@ -390,3 +390,60 @@ def test_sealed_window_freezes_late_arriving_alerts_and_pull_mode_queues_nothing
     with repo.connection() as connection:
         rows = connection.execute('SELECT * FROM validation_deliveries WHERE task_id=?', (task['task_id'],)).fetchall()
     assert rows == []
+
+
+def test_mock_mode_full_flow_and_fallback(client, monkeypatch):
+    """联调假数据模式: 任意 id 受理即完成; Q1 恒 finished/Q2 恒成功/Q3 恒有数据且全字段有值;
+    未受理过的 id 由查询端兜底合成; 关闭开关后真实 404 契约恢复。"""
+    validation.initialize()
+    monkeypatch.delenv('BRIDGE_VALIDATION_CALLBACK_URL', raising=False)
+    monkeypatch.setenv('BRIDGE_VALIDATION_MOCK', '1')
+    # 任意 scenario（无需真实会话）+ 任意动作名（mock 不做字典校验, 按序列回显）
+    request = {'scenario_id': '555123', 'sequence_id': 'integration-x', 'actions': [
+        {'seq': 1, 'action_name': 'ExploitRemoteService',
+         'target_node': {'subnet': '10.99.0.0/24', 'ip': '10.99.0.1'}},
+        {'seq': 2, 'action_name': 'HttpServiceCheck',
+         'target_node': {'subnet': '10.99.0.0/24', 'ip': '10.99.0.1'}},
+    ]}
+    receipt = client.post('/api/v1/attack-sequences', json=request).json()
+    assert receipt['code'] == 0 and receipt['mock'] is True
+
+    # Q1: 轮询恒完成
+    q1 = client.get('/api/v1/attack-sequences/integration-x?scenario_id=555123').json()['data']
+    assert q1['state'] == 'finished'
+    assert [s['state'] for s in q1['steps']] == ['SUCCESS', 'SUCCESS']
+    assert all(s['reason'] == '' and s['duration_sec'] for s in q1['steps'])
+
+    # Q2: 按提交序列回显, 结果恒成功, 每个关键字都有数据（无 null/缺失）
+    q2 = client.get('/api/v1/attack-sequences/integration-x/results?scenario_id=555123').json()['data']
+    assert [r['action_name'] for r in q2['results']] == ['ExploitRemoteService', 'HttpServiceCheck']
+    for row in q2['results']:
+        assert row['actual'] == 'SUCCESS' and row['exit_code'] == 0
+        assert all(v is not None for v in row.values()), row
+    assert q2['alerts_total'] == 4
+
+    # Q3: 恒有数据, 全字段有值, seq 归属非空
+    q3 = client.get('/api/v1/snort-alerts', params={'scenario_id': '555123', 'sequence_id': 'integration-x'}).json()['data']
+    assert q3['total'] == 4 and q3['alerts'] and q3['is_last'] is True
+    assert all(a['seq'] in (1, 2) and a['msg'] and a['sid'] and a['ts'] for a in q3['alerts'])
+    for alert in q3['alerts']:
+        assert all(v is not None for v in alert.values()), alert
+
+    # 未受理过的 id: 查询端兜底合成默认完成态（轮询/结果/告警都有数据）
+    assert client.get('/api/v1/attack-sequences/never-seen?scenario_id=999').json()['data']['state'] == 'finished'
+    q2f = client.get('/api/v1/attack-sequences/never-seen/results?scenario_id=999').json()['data']
+    assert q2f['results'][0]['actual'] == 'SUCCESS' and q2f['alerts_total'] >= 1
+    q3f = client.get('/api/v1/snort-alerts', params={'scenario_id': '999', 'sequence_id': 'never-seen'}).json()['data']
+    assert q3f['total'] >= 1 and q3f['alerts']
+
+    # 幂等与冲突: 同键同文原回执; 同键异文 1005
+    again = client.post('/api/v1/attack-sequences', json=request).json()
+    assert again['code'] == 0
+    conflict = client.post('/api/v1/attack-sequences', json={
+        **request, 'actions': [request['actions'][0]]}).json()
+    assert conflict['code'] == 1005
+
+    # 关闭开关: 真实契约恢复（未知任务 404/1001）
+    monkeypatch.delenv('BRIDGE_VALIDATION_MOCK', raising=False)
+    assert client.get('/api/v1/attack-sequences/never-seen?scenario_id=999').status_code == 404
+    assert client.get('/api/v1/attack-sequences/never-seen?scenario_id=999').json()['code'] == 1001
