@@ -350,7 +350,9 @@ def _run(bridge, task):
             body.update(result=result, reason=None if result['exit_code'] == 0 else 'http_check_failed')
         except subprocess.TimeoutExpired:
             body['reason'] = 'http_check_timeout'
-        except (Rejected, grpc.RpcError, OSError, ValueError):
+        except (Rejected, grpc.RpcError, OSError, ValueError) as error:
+            logger.warning('validation step %s/%s unavailable: %s: %s',
+                           task['sequence_id'], row['seq'], type(error).__name__, error)
             body['reason'] = 'node_or_interface_unavailable'
         body.update(ended=time.time(), duration=round(time.monotonic() - baseline, 3))
         with repo.transaction() as connection:
@@ -366,6 +368,13 @@ def _run(bridge, task):
 def _probes(run_id):
     run = repo.read(network.RUN_COLLECTION, run_id) if run_id else None
     return {probe_id: item for probe_id, item in (run or {}).get('items', {}).items() if item['kind'] == 'probe'}
+
+
+def _reported_status(row, context):
+    """查询接口的观测状态：finished 任务回放封存值（数据冻结承诺），未结束才实时推导。"""
+    if row['execution_state'] == 'finished':
+        return context.get('observation_status')
+    return _observation_status(context, False)
 
 
 def _observation_status(context, interrupted):
@@ -539,6 +548,98 @@ def _deliver_next(base_url):
             (status, attempts, time.time() + (min(300, 2**min(attempts, 9)) if retry else 0),
              error, row['task_id'], row['interface'], row['batch_no']))
     return True
+
+
+def _query_payload(sequence_id: str, scenario_id: str, *, with_results: bool):
+    """Q2 共用: 定位任务并组装 V1.0 IF-02 同构结果序列; 任务不存在返回 None"""
+    with repo.connection() as connection:
+        row = connection.execute("""SELECT * FROM validation_tasks
+            WHERE scenario_id=? AND sequence_id=?""", (scenario_id, sequence_id)).fetchone()
+        if row is None:
+            return None
+        context = json.loads(row['context'])
+        results, steps = [], []
+        for step in _steps(connection, row):
+            body = json.loads(step['body'])
+            result = body.get('result', {})
+            state = step['state']
+            if state in ('pending', 'running'):
+                body['reason'] = 'interrupted_outcome_unknown' if state == 'running' else 'pending'
+                state = 'FAIL' if state == 'running' else 'SKIPPED'
+            results.append(dict(seq=step['seq'], action_name=body['request']['action_name'],
+                                actual=state, exit_code=result.get('exit_code'), reason=body.get('reason'),
+                                started_at=_utc(body.get('started')), ended_at=_utc(body.get('ended')),
+                                duration_sec=body.get('duration', 0 if state == 'SKIPPED' else None),
+                                source_node_id=context.get('source_id'), target_node_id=context.get('target_id'),
+                                stdout_digest=f"HTTP {result['http_status']}" if 'http_status' in result else None))
+            steps.append(body)
+        alerts = list(_alerts(connection, context, steps))
+        return {**_key(row), 'dictionary_version': (context.get('receipt') or {}).get('dictionary_version',
+                                                                                   validation_actions.DEFAULT_VERSION),
+                'state': row['execution_state'], 'observation_status': _reported_status(row, context),
+                'results': results, 'alerts_total': len(alerts)}
+
+
+@router.get('/api/v1/attack-sequences/{sequence_id}')
+def query_task(sequence_id: str, scenario_id: str, authorization: Annotated[str | None, Header()] = None):
+    """V2.0 Q1: 任务状态与步骤查询（含已完成步骤; state=finished 后结果冻结）"""
+    with repo.connection() as connection:
+        row = connection.execute("""SELECT * FROM validation_tasks
+            WHERE scenario_id=? AND sequence_id=?""", (scenario_id, sequence_id)).fetchone()
+        if row is None:
+            return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
+        context = json.loads(row['context'])
+        steps = []
+        for step in _steps(connection, row):
+            body = json.loads(step['body'])
+            steps.append(dict(seq=step['seq'], action_name=body['request']['action_name'],
+                              state=step['state'], reason=body.get('reason'),
+                              duration_sec=body.get('duration')))
+        return {'data': {**_key(row), 'state': row['execution_state'],
+                         'observation_status': context.get('observation_status'),
+                         'dictionary_version': (context.get('receipt') or {}).get('dictionary_version',
+                                                                                 validation_actions.DEFAULT_VERSION),
+                         'source_node_id': context.get('source_id'), 'target_node_id': context.get('target_id'),
+                         'steps': steps}}
+
+
+@router.get('/api/v1/attack-sequences/{sequence_id}/results')
+def query_results(sequence_id: str, scenario_id: str, authorization: Annotated[str | None, Header()] = None):
+    """V2.0 Q2: 整条结果序列查询（结构对齐 V1.0 IF-02 payload, 数字平台入库可复用）"""
+    payload = _query_payload(sequence_id, scenario_id, with_results=True)
+    if payload is None:
+        return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
+    return {'data': payload}
+
+
+@router.get('/api/v1/snort-alerts')
+def query_alerts(sequence_id: str, scenario_id: str, after_event_id: str | None = None,
+                 limit: int = 100,
+                 authorization: Annotated[str | None, Header()] = None):
+    """V2.0 Q3: 告警分页查询（after_event_id 增量游标; is_last 标识窗口末尾）"""
+    limit = max(1, min(limit, 500))
+    after = None
+    if after_event_id:
+        match = re.fullmatch(r'(.+):(\d+)', after_event_id)
+        if match is None:
+            return JSONResponse({'code': 1004, 'message': 'after_event_id 格式无效（须为 run_id:事件号）'},
+                                status_code=400)
+        after = int(match.group(2))
+    with repo.connection() as connection:
+        row = connection.execute("""SELECT * FROM validation_tasks
+            WHERE scenario_id=? AND sequence_id=?""", (scenario_id, sequence_id)).fetchone()
+        if row is None:
+            return JSONResponse({'code': 1001, 'message': '任务不存在'}, status_code=404)
+        context = json.loads(row['context'])
+        # _alerts 期望已解析的步骤 body（按 result 五元组把告警归属到步骤 seq）
+        steps = [json.loads(step['body']) for step in _steps(connection, row)]
+        matched = [alert for alert in _alerts(connection, context, steps)
+                   if after is None or int(alert['event_id'].rsplit(':', 1)[-1]) > after]
+        alerts = matched[:limit]
+        last = alerts[-1]['event_id'] if alerts else after_event_id
+        return {'data': {**_key(row), 'observation_status': _reported_status(row, context),
+                         'is_last': len(matched) <= limit, 'total': len(matched),
+                         'after_event_id': last, 'alerts': alerts}}
 
 
 @router.get('/deployments/{deployment_id}/validation-sequences')

@@ -146,3 +146,127 @@ def test_alert_batch_boundaries_and_precise_step_attribution(total, sizes):
     assert all(batch['observation_status'] == 'complete' for batch in batches)
     if total:
         assert [alert['seq'] for alert in batches[0]['alerts']] == [1] + [None] * (sizes[0] - 1)
+
+
+def test_v2_query_endpoints_state_results_alerts(client, monkeypatch):
+    """V2.0 查询接口: Q1 状态/步骤, Q2 结果序列(对齐 IF-02 结构), Q3 告警分页"""
+    validation.initialize()
+    monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'test-token')
+    monkeypatch.setattr(validation, '_bind', lambda *_: {
+        'deployment_id': 'deploy-test', 'source_id': 1, 'target_id': 2,
+    })
+    headers = {'Authorization': 'Bearer test-token'}
+    request = {'scenario_id': '41', 'sequence_id': 'v2-query', 'actions': [
+        {'seq': 1, 'action_name': 'HttpServiceCheck', 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
+    ]}
+    receipt = client.post('/api/v1/attack-sequences', json=request, headers=headers).json()
+    assert receipt['code'] == 0
+
+    # Q1: 任务查询（accepted 态）
+    q1 = client.get('/api/v1/attack-sequences/v2-query?scenario_id=41')
+    assert q1.status_code == 200
+    data = q1.json()['data']
+    assert data['state'] == 'accepted' and data['scenario_id'] == '41' and data['sequence_id'] == 'v2-query'
+    assert data['steps'][0]['state'] == 'pending'
+
+    # Q3: 告警查询（无告警 → 空数组 + is_last）
+    q3 = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'v2-query'})
+    assert q3.json()['data']['alerts'] == []
+
+    # 不存在任务 → 404/1001
+    missing = client.get('/api/v1/attack-sequences/no-such?scenario_id=41')
+    assert missing.status_code == 404 and missing.json()['code'] == 1001
+
+    # 模拟执行完成（隔离环境无 bridge 执行器——直接置步骤终态再封存）
+    with repo.connection() as connection:
+        task = connection.execute('SELECT * FROM validation_tasks').fetchone()
+        body = json.loads(connection.execute('SELECT body FROM validation_steps WHERE task_id=?',
+                                             (task['task_id'],)).fetchone()[0])
+        body.update(started=time.time(), ended=time.time() + 0.4, duration=0.4,
+                    result=dict(exit_code=0, http_status=200, source_ip='10.0.0.1', source_port=40001))
+        connection.execute('UPDATE validation_steps SET state=?,body=? WHERE task_id=?',
+                           ('SUCCESS', json.dumps(body), task['task_id']))
+    validation._freeze(task, json.loads(task['context']), 'test', interrupted=False)
+
+    # Q1: finished 态
+    q1 = client.get('/api/v1/attack-sequences/v2-query?scenario_id=41')
+    assert q1.json()['data']['state'] == 'finished'
+    # Q2: 结果序列（结构对齐 V1.0 IF-02 payload）
+    q2 = client.get('/api/v1/attack-sequences/v2-query/results?scenario_id=41')
+    payload = q2.json()['data']
+    assert payload['dictionary_version'] == receipt['dictionary_version']
+    r0 = payload['results'][0]
+    assert r0['actual'] == 'SUCCESS' and r0['seq'] == 1 and 'duration_sec' in r0
+    assert r0['started_at'].endswith('Z') and 'source_node_id' in r0
+
+
+def test_q3_pagination_cursor_and_frozen_observation_status(client, monkeypatch):
+    """Q3 分页游标(after_event_id/limit/is_last) + finished 后 observation_status 冻结。"""
+    validation.initialize()
+    monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'test-token')
+    monkeypatch.setattr(validation, '_bind', lambda *_: {
+        'deployment_id': 'deploy-test', 'drill_id': 'd-test', 'source_id': 1, 'target_id': 2, 'port': 8080,
+    })
+    headers = {'Authorization': 'Bearer test-token'}
+    request = {'scenario_id': '41', 'sequence_id': 'v2-page', 'actions': [
+        {'seq': 1, 'action_name': 'HttpServiceCheck', 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
+    ]}
+    assert client.post('/api/v1/attack-sequences', json=request, headers=headers).json()['code'] == 0
+    with repo.connection() as connection:
+        task = connection.execute('SELECT * FROM validation_tasks').fetchone()
+        task_id, context = task['task_id'], json.loads(task['context'])
+        # 受理态 context 无观测字段——按执行器 (_run) 的形态补齐，模拟已进入观测
+        context.update(run_id='run-test', cursor=0, observation_start=time.time(),
+                       observation_end=time.time() + 1,
+                       probes={'p': {'status': 'running', 'metrics': {'drops': 0}}})
+        started = context['observation_start'] + 0.1
+        ended = context['observation_start'] + 0.5
+        body = json.loads(connection.execute('SELECT body FROM validation_steps WHERE task_id=?',
+                                             (task_id,)).fetchone()[0])
+        body.update(started=started, ended=ended, duration=0.4,
+                    result=dict(exit_code=0, http_status=200, source_ip='10.0.0.1', source_port=40001))
+        connection.execute('UPDATE validation_steps SET state=?,body=? WHERE task_id=?',
+                           ('SUCCESS', json.dumps(body), task_id))
+        connection.execute('UPDATE validation_tasks SET context=? WHERE task_id=?',
+                           (json.dumps(context), task_id))
+    # 事件表独立连接（platform_db.record_event 自管连接, 与 repo 连接并存会撞锁）
+    # 三条窗口内告警：请求方向(归属 seq=1)、响应方向(对称匹配, 归属 seq=1)、无关五元组(归属不了)
+    alerts_spec = [
+        dict(src_addr='10.0.0.1', src_port=40001, dst_addr='10.0.0.2', dst_port=context['port'], at=0.2),
+        dict(src_addr='10.0.0.2', src_port=context['port'], dst_addr='10.0.0.1', dst_port=40001, at=0.25),
+        dict(src_addr='10.0.0.1', src_port=49999, dst_addr='10.0.0.2', dst_port=context['port'], at=0.3),
+    ]
+    for spec in alerts_spec:
+        stamp = started + spec.pop('at')
+        platform_db.record_event(41, {'type': 'snort', 'run_id': 'run-test',
+                                     'probe_id': 'p', 'seconds': int(stamp),
+                                     'timestamp': f'01/01-00:00:00.{int(stamp % 1 * 1e6):06d}',
+                                     'proto': 'TCP', 'rule': '1:1000001:1', 'priority': 3, **spec},
+                                 context['drill_id'])
+    validation._freeze(task, context, 'test', interrupted=False)
+
+    def alerts(**params):
+        response = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'v2-page', **params})
+        assert response.status_code == 200, response.text
+        return response.json()['data']
+
+    # 全量：3 条（2 条归属 seq=1，1 条归属不了 seq=null）
+    full = alerts()
+    assert full['total'] == 3 and len(full['alerts']) == 3 and full['is_last'] is True
+    assert [a['seq'] for a in full['alerts']] == [1, 1, None]
+    cursor = full['after_event_id']
+    assert cursor == full['alerts'][-1]['event_id']
+
+    # limit=1 分页 + 游标推进
+    page1 = alerts(limit=1)
+    assert page1['total'] == 3 and len(page1['alerts']) == 1 and page1['is_last'] is False
+    page2 = alerts(limit=2, after_event_id=page1['after_event_id'])
+    assert len(page2['alerts']) == 2 and page2['is_last'] is True
+    assert [a['event_id'] for a in page2['alerts']] == [a['event_id'] for a in full['alerts'][1:]]
+
+    # 非法游标 400/1004；finished 后 observation_status 用封存值（实时推导会因探针不在库返回 unavailable）
+    bad = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'v2-page',
+                                                     'after_event_id': 'bogus'})
+    assert bad.status_code == 400 and bad.json()['code'] == 1004
+    frozen = alerts()['observation_status']
+    assert frozen == 'partial' != validation._observation_status({**context, 'probes': {}}, False)

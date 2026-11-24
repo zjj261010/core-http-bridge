@@ -277,6 +277,9 @@ class NodeModel(BaseModel):
     service_overrides: dict[str, str | None] | None = None
     service_configs: dict[str, ServiceConfig | None] | None = None
     instance: str | None = None   # 来源实例名——部署即登记引用（实例锁定扳机, 设计 §5.2）
+    # 验证序列角色标记（V1.1 §2）：序列执行节点 / HTTP 验证目标（每拓扑至多一组）
+    validation_source: bool | None = None
+    validation_http_port: int | None = Field(default=None, ge=1, le=65535)
 
 class StartSessionRequest(BaseModel):
     definition: bool = False
@@ -787,6 +790,7 @@ def add_node(session_id: int, body: NodeModel):
     from core_adapter import activate
     with topologies.mutation_lock:
         binding = {}
+        request_name = body.name   # 用户标签（重命名前留档, display_name 用）
         if body.instance:
             try:
                 resets = [name for name, value in (body.service_configs or {}).items() if value is None]
@@ -815,6 +819,9 @@ def add_node(session_id: int, body: NodeModel):
                     result=activate(bridge,dirs,body.services or [])
                     if result['missing']: raise ValueError('服务未在 daemon 注册: '+', '.join(result['missing']))
                 binding={k:resolved[k] for k in ('instance','instance_version','target_name','target_version','image_ref','service_overrides','service_selection','effective_services') if k in resolved}
+                # 验证序列角色标记随节点绑定固化（部署时进运行快照, 验证序列受理依赖）
+                if body.validation_source: binding['validation_source'] = True
+                if body.validation_http_port: binding['validation_http_port'] = body.validation_http_port
                 if resets:
                     binding['native_service_resets'] = resets
                 binding.update(display_name=display,runtime_name=body.name)
@@ -823,9 +830,15 @@ def add_node(session_id: int, body: NodeModel):
         if body.type in (None,0):
             if body.id is None:
                 body.id=max(bridge.get_session(session_id).nodes.keys(),default=0)+1
-            display=binding.get('display_name') or body.name or f'n{body.id}'
             body=body.model_copy(update={'name':f'n{body.id}'})
-            binding.update(display_name=display,runtime_name=body.name)
+        # 非 instance 路径（原生/docker+image）绑定同样要落 display/runtime_name——
+        # 运行期 Docker 命名空间解析按 bindings.runtime_name 对账（deploy_definition 路径对所有节点都落）；
+        # display 在重命名之前取，用户标签与运行名分离
+        display=binding.get('display_name') or request_name
+        binding.update(display_name=display,runtime_name=body.name)
+        # 验证序列角色标记（非 instance 路径也要带上——部署绑定依赖）
+        if body.validation_source: binding['validation_source'] = True
+        if body.validation_http_port: binding['validation_http_port'] = body.validation_http_port
         try:
             if body.service_configs:
                 if body.type not in (None,0):
