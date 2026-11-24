@@ -230,7 +230,7 @@
         // 漏洞标注（纯声明元数据：给人看的提示，平台不验证实际是否有洞，也不参与就绪检查）
         // 顺序: 先定性(漏洞状态)后细节(CVE 编号)——漏洞状态决定"这是不是可攻击环境", CVE 是它的索引细节
         el('div',{class:'form-grid'},
-          field('漏洞状态',select([['','未知'],['true','有'],['false','无']],mode.vulnerable===true?'true':mode.vulnerable===false?'false':'',value=>{mode.vulnerable=value===''?null:value==='true';if(value==='true'&&!mode.cve.length)mode.cve=['CVE-0000-0000'];})),
+          field('漏洞状态',select([['','未知'],['true','有'],['false','无']],mode.vulnerable===true?'true':mode.vulnerable===false?'false':'',value=>{mode.vulnerable=value===''?null:value==='true';if(value==='true'&&!(mode.cve||[]).length)mode.cve=['CVE-0000-0000'];})),
           field('CVE 标注（逗号分隔，可空）',input((mode.cve||[]).join(', '),value=>{mode.cve=value.split(',').map(s=>s.trim()).filter(Boolean);}))),
         field('传给启动脚本的参数',input(mode.args||'',value=>mode.args=value)),
         modeGroup('脚本文件',fileArea,el('div',{class:'form-grid'},purpose,filePicker),
