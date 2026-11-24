@@ -1,23 +1,30 @@
-# Bridge and transitive dependencies from the CORE 9.2.1 Python 3.10 environment.
-annotated-doc==0.0.6
+# Bridge + CORE 9.2.1 SDK 依赖闭包（Linux x86_64 / Python 3.10）
+# 基线：现场旧离线包（v1.1.5，20 wheel）+ 本机已验收运行版本（229 项测试）。
+# 原则：核对与补装以现场已验收版本为准——uvicorn/PyYAML/idna 按现场基线钉定；
+# uvloop/httptools/watchfiles/python-dotenv 为 uvicorn[standard] 附加件（现场已装，逐项列出便于核对）。
+# netaddr/protobuf 为 CORE gRPC SDK 硬依赖（旧包未列，2026-11-24 补齐）。
+# core==9.2.1 本体由 CORE 安装器提供，不在本清单（勿经 pip 重装覆盖）。
+# 变更本文件须同步重建 wheels/ 与 requirements.lock.txt（哈希锁），并重跑 229 项测试。
+annotated-doc==0.0.5
 annotated-types==0.8.0
-anyio==4.16.0
-click==8.5.1
+anyio==4.14.2
+click==8.4.2
 exceptiongroup==1.3.1
-fastapi==0.162.5
+fastapi==0.141.1
 grpcio==1.69.0
 h11==0.16.0
-httptools==0.9.0
-idna==3.20
-opentelemetry-api==1.45.2
-pydantic==2.14.3
-pydantic_core==2.50.4
-python-dotenv==1.2.4
-PyYAML==6.0.1
-starlette==1.7.0
-typing-inspection==0.4.5
+httptools==0.8.0
+idna==3.19
+netaddr==0.10.1
+protobuf==5.29.3
+pydantic==2.13.4
+pydantic_core==2.46.4
+python-dotenv==1.2.3
+PyYAML==6.0.3
+starlette==1.6.0
+typing-inspection==0.4.4
 typing_extensions==4.16.0
-uvicorn[standard]==0.54.0
-uvloop==0.23.0
-watchfiles==1.3.0
+uvicorn==0.52.4
+uvloop==0.22.1
+watchfiles==1.2.0
 websockets==16.1.1

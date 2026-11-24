@@ -1,0 +1,24 @@
+# CORE HTTP Bridge systemd 单元模板（2026-11-24）
+# 用法: 按现场路径替换 <BRIDGE_DIR>/<CORE_VENV> 后拷到 /etc/systemd/system/core-bridge.service
+#       systemctl daemon-reload && systemctl enable --now core-bridge
+# 环境变量全部可选（默认即 V2.0 拉模式 + 免鉴权 + 真实契约）:
+#   BRIDGE_VALIDATION_TOKEN     配置后 IF-01 启用 Bearer 校验（可选加固）
+#   BRIDGE_VALIDATION_CALLBACK_URL  旧推模式 opt-in（配置后封存生成本任务投递并推送）
+#   BRIDGE_VALIDATION_MOCK=1    联调假数据模式（任意 id 即完成/成功/有告警；验收必须关闭）
+[Unit]
+Description=CORE HTTP Bridge (CORE gRPC -> HTTP REST)
+After=network.target core-daemon.service
+Wants=core-daemon.service
+
+[Service]
+Type=simple
+WorkingDirectory=<BRIDGE_DIR>
+ExecStart=<CORE_VENV>/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+# Environment=BRIDGE_VALIDATION_TOKEN=<现场凭据>
+# Environment=BRIDGE_VALIDATION_CALLBACK_URL=<数字平台接收端>
+
+[Install]
+WantedBy=multi-user.target

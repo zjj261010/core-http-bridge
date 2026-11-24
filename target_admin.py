@@ -506,7 +506,9 @@ def _bundle_body(body):
     draft = _read_bundle(directory)
     merged = {**draft, **body}
     merged['package'] = body.get('package') or (merged.get('manifest') or {}).get('name') or draft['package']
-    merged['image_path'] = str(directory / 'image.tar')
+    # 镜像归档: image.tar 优先, 兼容 image.tar.gz（docker load 原生支持 gzip 归档, 体积减半）
+    merged['image_path'] = str(next((directory / n for n in ('image.tar', 'image.tar.gz')
+                                     if (directory / n).is_file()), directory / 'image.tar'))
     return merged
 
 
@@ -1564,7 +1566,8 @@ def bundle_draft(dir: str = ''):
             raise ValueError('包目录不存在')
         draft = _read_bundle(directory)
         return JSONResponse({'ok':True, 'data':{'package':directory.name, 'dir':str(directory), 'draft':draft,
-          'inventory':{'py':list(draft['python_files']), 'templates':list(draft['templates']), 'has_image_tar':(directory/'image.tar').exists()}}})
+          'inventory':{'py':list(draft['python_files']), 'templates':list(draft['templates']),
+                       'has_image_tar':any((directory/n).is_file() for n in ('image.tar', 'image.tar.gz'))}}})
     except (ValueError, OSError) as e:
         return _err('DRAFT_INVALID', str(e))
 
