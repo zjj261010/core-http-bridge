@@ -217,7 +217,12 @@ def _manifest_index() -> dict:
             continue
         nm, tg = img.get("name"), img.get("tag")
         if nm:
-            idx[f"{nm}:{tg or 'latest'}"] = m
+            key = f"{nm}:{tg or 'latest'}"
+            # 「分开导入只导镜像件」会生成 services 为空的占位清单——与已编目清单同 ref 时不得遮蔽有内容的
+            previous = idx.get(key)
+            if previous is not None and not m.get('services') and previous.get('services'):
+                continue
+            idx[key] = m
     return idx
 
 
