@@ -398,14 +398,22 @@ def _alert_stamp(detail):
 def _alerts(connection, context, steps):
     if not context.get('run_id') or 'observation_start' not in context:
         return
-    rows = connection.execute("""SELECT id,detail FROM events
+    # 观测窗口: 执行中任务尚无 observation_end——开放窗口可查已入库告警（acceptance: executing 可查）;
+    # observation_end_id 是封存时的事件上界——迟到入库的事件不改变已封存任务的查询结果（数据冻结承诺）
+    end = context.get('observation_end')
+    end_id = context.get('observation_end_id')
+    sql = """SELECT id,detail FROM events
         WHERE drill_id=? AND type='snort' AND json_valid(detail)
-          AND json_extract(detail,'$.run_id')=? AND id>? ORDER BY id""",
-        (context['drill_id'], context['run_id'], context['cursor']))
-    for row in rows:
+          AND json_extract(detail,'$.run_id')=? AND id>?"""
+    params = [context['drill_id'], context['run_id'], context['cursor']]
+    if end_id is not None:
+        sql += ' AND id<=?'
+        params.append(end_id)
+    sql += ' ORDER BY id'
+    for row in connection.execute(sql, params):
         detail = json.loads(row['detail'])
         stamp = _alert_stamp(detail)
-        if stamp is None or not context['observation_start'] <= stamp <= context['observation_end']:
+        if stamp is None or stamp < context['observation_start'] or (end is not None and stamp > end):
             continue
         src, dst = (detail.get('src_addr'), detail.get('src_port')), (detail.get('dst_addr'), detail.get('dst_port'))
         matches = []
@@ -432,7 +440,15 @@ def _queue(connection, task, interface, batch_no, payload):
 def _freeze(task, context, reason, *, interrupted):
     status = _observation_status(context, interrupted)
     context.setdefault('observation_end', time.time())
+    # 推送模式（IF-02/03 投递）仅在显式配置回调地址时启用; V2.0 查询模式默认不产生投递记录
+    push_mode = bool(os.environ.get('BRIDGE_VALIDATION_CALLBACK_URL'))
     with repo.transaction() as connection:
+        if context.get('run_id') and 'observation_start' in context:
+            # 封存事件上界（先于告警遍历）: 迟到入库的事件不得改变已封存任务的查询结果（数据冻结承诺）
+            boundary = connection.execute("""SELECT COALESCE(MAX(id),0) FROM events
+                WHERE drill_id=? AND type='snort' AND json_extract(detail,'$.run_id')=? AND id>?""",
+                (context['drill_id'], context['run_id'], context.get('cursor', 0))).fetchone()[0]
+            context.setdefault('observation_end_id', boundary)
         results, steps = [], []
         for row in _steps(connection, task):
             body = json.loads(row['body'])
@@ -449,16 +465,17 @@ def _freeze(task, context, reason, *, interrupted):
                                 duration_sec=body.get('duration', 0 if step_state == 'SKIPPED' else None),
                                 source_node_id=context['source_id'], target_node_id=context['target_id'],
                                 stdout_digest=f"HTTP {result['http_status']}" if 'http_status' in result else None))
-        version = (context.get('receipt') or {}).get('dictionary_version', validation_actions.DEFAULT_VERSION)
-        _queue(connection, task, 'IF-02', 0, {**_key(task), 'dictionary_version': version, 'results': results})
-        batch_no, batch = 1, []
-        base = {**_key(task), 'observation_status': status}
-        for alert in _alerts(connection, context, steps):
-            if len(batch) == BATCH_SIZE:
-                _queue(connection, task, 'IF-03', batch_no, {**base, 'batch_no': batch_no, 'is_last': False, 'alerts': batch})
-                batch_no, batch = batch_no + 1, []
-            batch.append(alert)
-        _queue(connection, task, 'IF-03', batch_no, {**base, 'batch_no': batch_no, 'is_last': True, 'alerts': batch})
+        if push_mode:
+            version = (context.get('receipt') or {}).get('dictionary_version', validation_actions.DEFAULT_VERSION)
+            _queue(connection, task, 'IF-02', 0, {**_key(task), 'dictionary_version': version, 'results': results})
+            batch_no, batch = 1, []
+            base = {**_key(task), 'observation_status': status}
+            for alert in _alerts(connection, context, steps):
+                if len(batch) == BATCH_SIZE:
+                    _queue(connection, task, 'IF-03', batch_no, {**base, 'batch_no': batch_no, 'is_last': False, 'alerts': batch})
+                    batch_no, batch = batch_no + 1, []
+                batch.append(alert)
+            _queue(connection, task, 'IF-03', batch_no, {**base, 'batch_no': batch_no, 'is_last': True, 'alerts': batch})
         context['observation_status'] = status
         connection.execute("UPDATE validation_tasks SET execution_state='finished',context=? WHERE task_id=?",
                            (_json(context), task['task_id']))
@@ -558,12 +575,16 @@ def _query_payload(sequence_id: str, scenario_id: str, *, with_results: bool):
         if row is None:
             return None
         context = json.loads(row['context'])
+        finished = row['execution_state'] == 'finished'
         results, steps = [], []
         for step in _steps(connection, row):
             body = json.loads(step['body'])
             result = body.get('result', {})
             state = step['state']
             if state in ('pending', 'running'):
+                if not finished:
+                    # 未结束任务: 只返回当前已完成步骤, 不把进行中步骤误标为终态（state 字段仍提示 executing）
+                    continue
                 body['reason'] = 'interrupted_outcome_unknown' if state == 'running' else 'pending'
                 state = 'FAIL' if state == 'running' else 'SKIPPED'
             results.append(dict(seq=step['seq'], action_name=body['request']['action_name'],

@@ -37,7 +37,8 @@ def deliveries():
         return [dict(row) for row in connection.execute('SELECT * FROM validation_deliveries ORDER BY batch_no')]
 
 
-def test_recovery_keeps_completed_steps_without_replaying_uncertain_work():
+def test_recovery_keeps_completed_steps_without_replaying_uncertain_work(monkeypatch):
+    monkeypatch.setenv('BRIDGE_VALIDATION_CALLBACK_URL', 'http://callback.test')
     task, _ = seed_task()
     validation._recover_task(task['task_id'])
     reports = deliveries()
@@ -55,6 +56,7 @@ def test_mapping_catalog_readonly_and_reference_action_accept(client, monkeypatc
     """动作映射字典只读（编辑端点 403）；参考字典 9 条 + HttpServiceCheck 可被 IF-01 受理；版本钉定不变。"""
     validation.initialize()
     monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'test-token')
+    monkeypatch.setenv('BRIDGE_VALIDATION_CALLBACK_URL', 'http://callback.test')  # 投递用例走推送模式
     monkeypatch.setattr(validation, '_bind', lambda *_: {
         'deployment_id': 'deploy-test', 'source_id': 1, 'target_id': 2,
     })
@@ -164,7 +166,8 @@ def test_reference_catalog_migrates_once_and_unmapped_actions_cannot_execute(cli
 
 
 @pytest.mark.parametrize(('total', 'sizes'), [(0, [0]), (100, [100]), (101, [100, 1])])
-def test_alert_batch_boundaries_and_precise_step_attribution(total, sizes):
+def test_alert_batch_boundaries_and_precise_step_attribution(total, sizes, monkeypatch):
+    monkeypatch.setenv('BRIDGE_VALIDATION_CALLBACK_URL', 'http://callback.test')  # 投递用例走推送模式
     task, context = seed_task()
     repo.put('network_activity', 'probe-run',
              {'items': {'p': {'kind': 'probe', 'status': 'running', 'metrics': {'drops': 0}}}})
@@ -305,3 +308,85 @@ def test_q3_pagination_cursor_and_frozen_observation_status(client, monkeypatch)
     assert bad.status_code == 400 and bad.json()['code'] == 1004
     frozen = alerts()['observation_status']
     assert frozen == 'partial' != validation._observation_status({**context, 'probes': {}}, False)
+
+
+def _window_context(context):
+    """执行中 context: 补观测字段并移除封存字段（真实执行中任务尚无 observation_end/上界）"""
+    context.update(run_id='run-live', cursor=0, observation_start=time.time(),
+                   probes={'p': {'status': 'running', 'metrics': {'drops': 0}}})
+    context.pop('observation_end', None)
+    context.pop('observation_end_id', None)
+    return context
+
+
+def _record_alert(context, src_port, offset, drill_id):
+    stamp = context['observation_start'] + offset
+    platform_db.record_event(drill_id, {'type': 'snort', 'run_id': 'run-live', 'probe_id': 'p',
+                                       'seconds': int(stamp),
+                                       'timestamp': f'01/01-00:00:00.{int(stamp % 1 * 1e6):06d}',
+                                       'proto': 'TCP', 'rule': '1:1000001:1', 'priority': 3,
+                                       'src_addr': '10.0.0.1', 'src_port': src_port,
+                                       'dst_addr': '10.0.0.2', 'dst_port': context['port']}, drill_id)
+
+
+def test_executing_task_queries_do_not_500_and_q2_keeps_only_finished_steps(client, monkeypatch):
+    """问题1回归: executing 任务已有告警时 Q2/Q3 必须 200; Q2 只含已完成步骤。"""
+    monkeypatch.delenv('BRIDGE_VALIDATION_CALLBACK_URL', raising=False)
+    task, context = seed_task()
+    with repo.connection() as connection:
+        connection.execute("UPDATE validation_tasks SET execution_state='executing' WHERE task_id=?", (task['task_id'],))
+        body = json.loads(connection.execute('SELECT body FROM validation_steps WHERE task_id=? AND seq=1',
+                                             (task['task_id'],)).fetchone()[0])
+        body.update(started=time.time(), ended=time.time() + 0.3, duration=0.3,
+                    result=dict(exit_code=0, http_status=200, source_ip='10.0.0.1', source_port=40001))
+        connection.execute('UPDATE validation_steps SET body=? WHERE task_id=? AND seq=1',
+                           (json.dumps(body), task['task_id']))  # seq=1 已完成; seq=2 running / seq=3 pending
+    context = _window_context(context)
+    with repo.transaction() as connection:
+        connection.execute('UPDATE validation_tasks SET context=? WHERE task_id=?',
+                           (json.dumps(context), task['task_id']))
+    _record_alert(context, 40001, 0.1, context['drill_id'])  # 窗口内告警
+
+    q2 = client.get('/api/v1/attack-sequences/test-one/results?scenario_id=41')
+    assert q2.status_code == 200, q2.text
+    payload = q2.json()['data']
+    assert payload['state'] == 'executing'
+    assert [r['seq'] for r in payload['results']] == [1]  # running/pending 步骤不误标终态
+    assert payload['alerts_total'] == 1
+
+    q3 = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'test-one'})
+    assert q3.status_code == 200, q3.text
+    assert q3.json()['data']['total'] == 1
+
+
+def test_sealed_window_freezes_late_arriving_alerts_and_pull_mode_queues_nothing(client, monkeypatch):
+    """问题2+3回归: 封存后迟到告警不改变查询结果; 拉模式（未配回调）零投递记录。"""
+    monkeypatch.delenv('BRIDGE_VALIDATION_CALLBACK_URL', raising=False)
+    task, context = seed_task()
+    context = _window_context(context)
+    with repo.transaction() as connection:
+        connection.execute('UPDATE validation_tasks SET context=? WHERE task_id=?',
+                           (json.dumps(context), task['task_id']))
+    _record_alert(context, 40001, 0.1, context['drill_id'])
+    # 预置观测结束时间（_freeze setdefault 不覆盖）: 告警在窗口内, 随后封存
+    context['observation_end'] = time.time() + 5
+    validation._freeze(task, context, 'test', interrupted=False)
+
+    q3 = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'test-one'})
+    sealed = q3.json()['data']
+    assert sealed['total'] == 1 and sealed['observation_status'] is not None
+
+    # 迟到入库: 抓包时间仍在原观测窗口内, 但晚于封存事件上界
+    _record_alert(context, 40002, 0.2, context['drill_id'])
+    q3 = client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'test-one'})
+    after = q3.json()['data']
+    assert after['total'] == sealed['total'] and after['alerts'] == sealed['alerts']
+    assert after['after_event_id'] == sealed['after_event_id']
+
+    q2 = client.get('/api/v1/attack-sequences/test-one/results?scenario_id=41')
+    assert q2.json()['data']['alerts_total'] == sealed['total']  # Q2 总数与 Q3 一致
+
+    # 拉模式: 投递表无该任务新记录（历史 confirmed 行不受影响）
+    with repo.connection() as connection:
+        rows = connection.execute('SELECT * FROM validation_deliveries WHERE task_id=?', (task['task_id'],)).fetchall()
+    assert rows == []
