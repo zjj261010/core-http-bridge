@@ -139,18 +139,27 @@ export LD_LIBRARY_PATH=$ROOT/daq/lib
 $ROOT/snort/bin/snort -V
 $ROOT/snort/bin/snort -c $ROOT/snort/etc/snort/snort.lua -T
 
-# 5.3 告警闭环（模拟平台真实用法: pcap 被动抓 lo, BRIDGE_IDS_CHECK 特征串告警）
+# 5.3 告警闭环（生产同形: 实时抓"真实链路接口"。⚠️ WSL2 mirrored 模式下 127.0.0.1
+#     流量不过 lo —— 不要用 lo, 也不要用 pcap 回放(-r, DAQ 模式组合有回放怪癖, 曾零告警)。
+#     用 veth+netns 自包含链路, 与生产"探针嗅探链路接口"形态完全一致）
 cat > /tmp/bridge-check.rules <<'EOF'
 alert tcp any any -> any any (msg:"Bridge IDS verification"; content:"BRIDGE_IDS_CHECK"; sid:1000001; rev:1;)
 EOF
-python3 -m http.server 5998 --bind 127.0.0.1 & sleep 1
+ip netns add srv
+ip link add v0 type veth peer-name v1
+ip link set v1 netns srv
+ip addr add 10.200.0.1/24 dev v0 && ip link set v0 up
+ip netns exec srv sh -c 'ip addr add 10.200.0.2/24 dev v1 && ip link set v1 up'
+ip netns exec srv sh -c 'python3 -m http.server 5998 --bind 10.200.0.2 &' sleep 1
+# 先不加 --lua 跑通（--lua 字符串必须严格单行, 多行/引号问题曾致 override 加载 FATAL 把排查带偏）;
+# 告警出来后再把 --lua "alert_json = {fields = '... rule msg'};" 以严格单行加回复测
 $ROOT/snort/bin/snort -c $ROOT/snort/etc/snort/snort.lua -R /tmp/bridge-check.rules \
-  --daq-dir $ROOT/daq/lib/daq --daq pcap --daq-mode passive -i lo -k none \
-  -A alert_json --lua "alert_json = {fields = 'timestamp seconds proto src_addr src_port dst_addr dst_port rule msg'};" \
-  -l /tmp/snort-log & sleep 2
-curl -s "http://127.0.0.1:5998/?probe=BRIDGE_IDS_CHECK" >/dev/null; sleep 2
+  --daq-dir $ROOT/daq/lib/daq --daq pcap --daq-mode passive -i v0 -k none \
+  -A alert_json -l /tmp/snort-log & sleep 3
+curl -s --noproxy '*' -m 5 "http://10.200.0.2:5998/?probe=BRIDGE_IDS_CHECK" >/dev/null; sleep 2
 grep -c BRIDGE_IDS_CHECK /tmp/snort-log/alert_json.log    # 必须 ≥ 1
-kill %1 %2 2>/dev/null
+# 控制变量阶梯: ①裸规则(仅 sid)+live veth 应全通报警 ②content 规则+live ③加回单行 --lua
+# 只有 live veth 也零告警才怀疑引擎/构建, 并提供 snort -V 全文+启动 counters+alert_fast 落盘文件
 ```
 
 **通过条件**：`alert_json.log` 至少 1 条含 `BRIDGE_IDS_CHECK` 的 JSON 告警（字段含 rule/msg）。
