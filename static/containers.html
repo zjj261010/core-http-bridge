@@ -90,11 +90,13 @@ input[type=text],select{width:100%;padding:7px 10px;background:var(--bg);color:v
 <label>镜像（来自镜像管理）</label>
 <select id="runImage"><option value="">加载中…</option></select>
 <label>容器名（留空自动 standalone-镜像名）</label>
-<input type="text" id="runName" placeholder="standalone-dmz">
+<input type="text" id="runName" placeholder="standalone-dmz" oninput="updateRunPreview()">
 <label>端口映射（可选，逗号分隔，如 8080:80,9200:9200）</label>
-<input type="text" id="runPorts" placeholder="">
+<input type="text" id="runPorts" placeholder="" oninput="updateRunPreview()">
 <label>启动命令（可选——路线 B 镜像无 CMD，填 tail -f /dev/null 保活后再 exec）</label>
-<input type="text" id="runCmd" placeholder="tail -f /dev/null">
+<input type="text" id="runCmd" placeholder="tail -f /dev/null" oninput="updateRunPreview()">
+<div class="actions"><button class="btn" onclick="updateRunPreview()">预览启动命令</button></div>
+<pre id="runPreview" style="display:none;background:#141821;color:#9fd6a0;padding:10px;border-radius:8px;white-space:pre-wrap;word-break:break-all;margin:8px 0 0"></pre>
 </div>
 <div class="modal-footer">
   <button class="btn" onclick="hideModal('runModal')">取消</button>
@@ -113,7 +115,13 @@ function toast(msg, ok) {
   t.style.background = ok ? '#22c55e' : '#ef4444'; t.style.display = 'block';
   clearTimeout(t._h); t._h = setTimeout(function() { t.style.display = 'none'; }, 3500);
 }
-function showModal(id) { $(id).style.display = 'block'; }
+function showModal(id) {
+  $(id).style.display = 'block';
+  if (id === 'runModal') {
+    if (!$('runCmd').value) $('runCmd').value = 'tail -f /dev/null';
+    preloadRunInspect($('runImage').value);
+  }
+}
 function hideModal(id) { $(id).style.display = 'none'; }
 
 async function api(method, path, body) {
@@ -201,14 +209,42 @@ function doExec() {
 }
 
 // ── 新建容器 ──
+var _runImageCache = {};   // ref -> inspect 摘要（entrypoint/cmd），供启动命令预览
 async function loadImagesForSelect() {
   try {
     var d = await api('GET', '/targets');
     var imgs = d.images || [];
     $('runImage').innerHTML = imgs.map(function(i) { return '<option value="' + esc(i.ref) + '">' + esc(i.ref) + '</option>'; }).join('');
+    $('runImage').addEventListener('change', function() { preloadRunInspect($('runImage').value); updateRunPreview(); });
   } catch (e) {
     $('runImage').innerHTML = '<option value="">镜像列表加载失败: ' + esc(e.message) + '</option>';
   }
+}
+async function preloadRunInspect(ref) {
+  if (!ref || _runImageCache[ref]) { updateRunPreview(); return; }
+  try {
+    var d = await api('POST', '/targets/image/detail', { ref: ref });
+    _runImageCache[ref] = d.inspect || {};
+  } catch (e) { /* 静默：预览不依赖 inspect 也能拼命令 */ }
+  updateRunPreview();
+}
+// 组装与后端 standalone_container_run 等价的 docker run 命令（预览用）
+function buildRunCommand() {
+  var image = $('runImage').value;
+  if (!image) return '';
+  var name = $('runName').value.trim();
+  if (name && name.indexOf('standalone-') !== 0) name = 'standalone-' + name;
+  var ports = $('runPorts').value.trim();
+  var portArgs = ports ? ports.split(',').map(function(p) { return p.trim(); }).filter(Boolean)
+                       .map(function(p) { return '-p ' + p; }).join(' ') : '';
+  var cmd = $('runCmd').value.trim();
+  return 'docker run -d --name ' + (name || 'standalone-<镜像名>') + (portArgs ? ' ' + portArgs : '') + ' ' + image + (cmd ? ' ' + cmd : '');
+}
+function updateRunPreview() {
+  var pre = $('runPreview');
+  if (!pre) return;
+  pre.style.display = 'block';
+  pre.textContent = buildRunCommand() || '（请选择镜像）';
 }
 function doRun() {
   var image = $('runImage').value;
