@@ -167,12 +167,19 @@
     }
     function render(focusEditor=false){
       const add=button('新增模式',()=>{
-        const mode={id:uid('mode'),name:'新模式',strategy:'script',interpreter:'sh',workdir:'/',args:'',env:[],ports:null,depends_on:[],default:!work.modes.length,files:[]};
+        const mode={id:uid('mode'),name:'新模式',strategy:'script',interpreter:'sh',workdir:'/',args:'',env:[],ports:null,depends_on:[],default:!work.modes.length,files:[],cve:[],vulnerable:null};
         work.modes.push(mode);editing=mode.id;render(true);
       },true);
+      // 漏洞标注（纯声明元数据，平台不验证实际是否存在该漏洞）
+      const vulnTag=mode=>{
+        if(mode.vulnerable===true)return el('span',{class:'cve-tag cve-vuln'},...(mode.cve||[]).length?mode.cve:['有']);
+        if(mode.vulnerable===false)return el('span',{class:'cve-tag cve-baseline'},'无');
+        return el('span',{class:'muted'},'未知');
+      };
       const rows=work.modes.map(mode=>[
         el('span',{class:mode.id===editing?'mode-row-active':''},mode.name),
         ({script:'脚本',manual:'手动',legacy:'原有实现附件'})[mode.strategy],
+        vulnTag(mode),
         el('div',{},mode.files.filter(file=>file.role==='startup').map(file=>el('div',{},file.name))),
         checkbox(mode.default,checked=>{work.modes.forEach(item=>item.default=checked&&item.id===mode.id);render();}),
         el('div',{class:'actions'},
@@ -183,7 +190,7 @@
       const form=mode?editor(mode):null;
       P.replace(body,message,imageSection('模式列表',[
         el('p',{class:'muted'},'节点每次只选择此服务的一种启动模式。'),
-        table(['模式','启动方式','启动脚本','默认','操作'],rows)
+        table(['模式','启动方式','漏洞标注','启动脚本','默认','操作'],rows)
       ],add),form,moveEditor());
       validateLocal();
       if(focusEditor && form){
@@ -220,6 +227,11 @@
           field('启动方式',select([['script','按脚本启动'],['manual','仅手动操作'],...(mode.implementation?[['legacy','保留原有实现附件']]:[])],mode.strategy,value=>{mode.strategy=value;validateLocal();})),
           field('执行器',select([['sh','sh'],['bash','bash'],['python3','python3'],['shebang','按脚本声明']],mode.interpreter||'sh',value=>mode.interpreter=value)),
           field('工作目录',input(mode.workdir||'/',value=>mode.workdir=value))),
+        // 漏洞标注（纯声明元数据：给人看的提示，平台不验证实际是否有洞，也不参与就绪检查）
+        // 顺序: 先定性(漏洞状态)后细节(CVE 编号)——漏洞状态决定"这是不是可攻击环境", CVE 是它的索引细节
+        el('div',{class:'form-grid'},
+          field('漏洞状态',select([['','未知'],['true','有'],['false','无']],mode.vulnerable===true?'true':mode.vulnerable===false?'false':'',value=>{mode.vulnerable=value===''?null:value==='true';if(value==='true'&&!mode.cve.length)mode.cve=['CVE-0000-0000'];})),
+          field('CVE 标注（逗号分隔，可空）',input((mode.cve||[]).join(', '),value=>{mode.cve=value.split(',').map(s=>s.trim()).filter(Boolean);}))),
         field('传给启动脚本的参数',input(mode.args||'',value=>mode.args=value)),
         modeGroup('脚本文件',fileArea,el('div',{class:'form-grid'},purpose,filePicker),
           el('p',{class:'muted'},'脚本随本次模式暂存，服务在镜像详情最后确认时统一注册。')),

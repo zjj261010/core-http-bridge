@@ -285,7 +285,11 @@ def _pieces(ref: str, mindex: dict) -> dict:
     svcs_ok = True
     svc_list = []
     for s in (man or {}).get("services") or []:
-        svc_list.append({"name": s.get("name"), "mode": s.get("mode")})
+        # 漏洞标注（纯声明元数据）随 service_pairs 带出
+        pair = {"name": s.get("name"), "mode": s.get("mode")}
+        if s.get("cve") is not None: pair["cve"] = s.get("cve")
+        if s.get("vulnerable") is not None: pair["vulnerable"] = s.get("vulnerable")
+        svc_list.append(pair)
         if not _svc_dir_exists(s.get("name", "")):
             svcs_ok = False
     has_svcs = bool(svc_list)

@@ -45,6 +45,11 @@ def manifest(value):
             raise ValueError('服务 software 必须是字符串')
         if m.get('schema_version', 1) < 3 and s.get('mode') not in (None, '', 'normal', 'vuln'):
             raise ValueError('服务 mode 仅支持 normal、vuln 或单模式（留空）')
+        # 漏洞标注（纯声明元数据）: 校验形态后透传, 不参与任何验证语义
+        if 'cve' in s and (not isinstance(s['cve'], list) or any(not isinstance(c, str) for c in s['cve'])):
+            raise ValueError('服务 cve 标注必须是字符串数组')
+        if 'vulnerable' in s and s['vulnerable'] not in (True, False):
+            raise ValueError('服务 vulnerable 标注必须是布尔值')
     return m
 
 

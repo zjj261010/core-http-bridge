@@ -345,3 +345,41 @@ def test_import_rejects_duplicate_manifest_entries_after_adding_prefix(client):
     assert result.status_code == 400, result.text
     assert result.json()['error']['message'] == '重复服务: svc-delivery-test-web'
     assert not Path(ta.CUSTOM_SERVICES_DIR).exists()
+
+
+def test_mode_vulnerability_annotation_defaults_and_validation():
+    """漏洞标注: 三态默认值(normalize) + CVE 格式校验 + legacy 迁移自动带入"""
+    import image_services
+
+    services, issues = image_services.normalize([
+        {'name': 'svc-annotated', 'modes': [{'name': 'vuln', 'strategy': 'manual', 'cve': ['CVE-2014-6271']}]},
+        {'name': 'svc-baseline', 'modes': [{'name': 'normal', 'strategy': 'manual', 'cve': [], 'vulnerable': False}]},
+        {'name': 'svc-untouched', 'modes': [{'name': 'plain', 'strategy': 'manual'}]},
+        {'name': 'svc-badformat', 'modes': [{'name': 'bad', 'strategy': 'manual', 'cve': ['XXXX-1']}]},
+    ])
+    modes = {s['name']: s['modes'][0] for s in services}
+    assert modes['svc-annotated']['vulnerable'] is True          # 有 cve → 漏洞态
+    assert modes['svc-baseline']['vulnerable'] is False           # 显式基线
+    assert modes['svc-untouched']['vulnerable'] is None           # 未标注
+    assert 'svc-badformat / bad 的 CVE 标注格式无效' in ''.join(issues)
+    # 非法类型直接拒绝
+    import pytest
+    with pytest.raises(ValueError):
+        image_services.normalize([{'name': 'x', 'modes': [{'name': 'm', 'strategy': 'manual', 'cve': 'CVE-1-1'}]}])
+
+
+def test_legacy_catalog_carries_cve_annotation_from_manifest():
+    """bundle 迁移: manifest 顶层 cve 自动标到模式上（CSLE 单漏洞包形态）"""
+    import image_services
+
+    catalog = image_services.legacy_catalog({'name': 'p', 'cve': ['CVE-2015-3306'],
+                                              'services': [{'name': 'svc-x'}]})
+    mode = catalog['services'][0]['modes'][0]
+    assert mode['cve'] == ['CVE-2015-3306'] and mode['vulnerable'] is True
+    # 条目级 cve 优先于顶层
+    catalog2 = image_services.legacy_catalog({'name': 'p', 'cve': ['CVE-0000-0001'],
+                                               'services': [{'name': 'svc-y', 'cve': ['CVE-2016-10033']}]})
+    assert catalog2['services'][0]['modes'][0]['cve'] == ['CVE-2016-10033']
+    # 无 cve 的包（osvc 系）不受影响
+    catalog3 = image_services.legacy_catalog({'name': 'q', 'services': [{'name': 'svc-z'}]})
+    assert catalog3['services'][0]['modes'][0]['cve'] == [] and catalog3['services'][0]['modes'][0]['vulnerable'] is None

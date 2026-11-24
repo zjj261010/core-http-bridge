@@ -109,3 +109,6 @@
   .resource-page button{min-height:44px}
   .resource-page :is(input:not([type=checkbox],[type=radio]),select,textarea){font-size:16px}
 }
+.cve-tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;white-space:nowrap}
+.cve-vuln{background:#fde8e8;color:#b02a2a;border:1px solid #f5b5b5}
+.cve-baseline{background:#e8f5e8;color:#2a7a2a;border:1px solid #b5dfb5}

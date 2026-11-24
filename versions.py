@@ -15,6 +15,13 @@ def target_body(name, manifest, sources=None, templates=None):
     m.pop('target_revision',None)
     m.pop('target_id',None)
     m.pop('publication_state',None)
+    # 漏洞标注（纯声明元数据）: bundle manifest 顶层 cve 透传到服务条目（条目级已有则不覆盖）
+    # 外部经 /targets/image/detail 读 manifest services 即可看到标注
+    top_cve = [c for c in (m.get('cve') or []) if isinstance(c, str) and c.strip()]
+    for entry in m.get('services') or []:
+        if top_cve and not entry.get('cve'):
+            entry['cve'] = list(top_cve)
+            entry.setdefault('vulnerable', True)
     supplied_sources=sources
     sources = {} if sources is None else copy.deepcopy(sources)
     package = Path(ta.CUSTOM_SERVICES_DIR)/name

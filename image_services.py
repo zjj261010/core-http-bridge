@@ -11,6 +11,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import re
 import shlex
 import uuid
 import zipfile
@@ -80,13 +81,17 @@ def legacy_catalog(manifest, sources=None, templates=None):
     services = []
     for entry in manifest.get('services', []):
         sid = 'service-' + key(entry['name'])[:12]
+        # 漏洞标注（纯声明元数据, 平台不验证）: bundle 导入时从 manifest 自动带入
+        # 条目级 cve 优先, 否则取 manifest 顶层（CSLE 单漏洞包把 cve 写在顶层）
+        entry_cve = [c for c in (entry.get('cve') or manifest.get('cve') or []) if isinstance(c, str) and c.strip()]
         services.append({**copy.deepcopy(entry),'id': sid, 'name': entry.get('display_name') or entry['name'],
                          'software': entry.get('software', ''), 'description': '',
                          'ports': [{'port': p, 'protocol': 'tcp', 'address': '0.0.0.0'} for p in entry.get('ports', [])],
                          'modes': [{'id': 'mode-' + key(entry['name'])[:12], 'name': entry.get('mode') or '原有启动方式',
                                     'strategy': 'legacy', 'implementation': entry['name'], 'default': True,
                                     'interpreter': 'sh', 'workdir': '/', 'args': '', 'env': [],
-                                    'ports': None, 'depends_on': [], 'files': []}]})
+                                    'ports': None, 'depends_on': [], 'files': [],
+                                    'cve': entry_cve, 'vulnerable': bool(entry_cve) or None}]})
     owners={m['implementation']:(s['id'],m['id']) for s in services for m in s['modes']}
     for source in (sources or {}).values():
         for cls in ast.parse(source).body:
@@ -170,6 +175,19 @@ def normalize(services):
                 issues.append(name + ' 的模式名称为空或重复')
             mode_names.add(mode['name'].casefold())
             defaults += bool(mode.get('default'))
+            # 漏洞标注（纯声明元数据, 不触发任何验证）: 三态 vulnerable(True 漏洞态/False 基线态/None 未标注)
+            mode.setdefault('cve', [])
+            if not isinstance(mode['cve'], list) or any(not isinstance(c, str) for c in mode['cve']):
+                raise ValueError(name + ' / ' + mode['name'] + ' 的 CVE 标注必须是字符串数组')
+            mode['cve'] = [c.strip() for c in mode['cve'] if c.strip()]
+            for cve_id in mode['cve']:
+                if not re.fullmatch(r'CVE-\d{4}-\d{4,}', cve_id):
+                    issues.append(name + ' / ' + mode['name'] + ' 的 CVE 标注格式无效：' + cve_id)
+            if mode.get('vulnerable') not in (None, True, False):
+                raise ValueError(name + ' / ' + mode['name'] + ' 的漏洞态标注无效')
+            mode.setdefault('vulnerable', None)
+            if mode['vulnerable'] is None:
+                mode['vulnerable'] = bool(mode['cve']) or None
             if mode.get('strategy') not in ('script', 'manual', 'legacy'):
                 raise ValueError(name + ' 的启动方式无效')
             if mode.get('interpreter', 'sh') not in ('sh', 'bash', 'python3', 'shebang'):
@@ -191,7 +209,6 @@ def normalize(services):
                 file_names.add(identity)
                 read_attachment(item)
             for item in mode.get('env') or []:
-                import re
                 if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', item.get('name', '')):
                     raise ValueError('环境变量名称无效')
         if defaults > 1:
@@ -352,7 +369,9 @@ def compile_sources(catalog, selection=None, prefix=''):
 def flattened(catalog):
     return [{'name': mode_name(service, mode), 'display_name': service['name'], 'service_id': service['id'],
              'mode_id': mode['id'], 'mode_name': mode['name'], 'software': service.get('software', ''),
-             'origin': 'image', 'ports': [p['port'] for p in (mode.get('ports') if mode.get('ports') is not None else service.get('ports', []))]}
+             'origin': 'image', 'ports': [p['port'] for p in (mode.get('ports') if mode.get('ports') is not None else service.get('ports', []))],
+             # 漏洞标注（纯声明元数据, 平台不验证）: 随拍平条目进入 manifest v3 / 外部可见
+             'cve': list(mode.get('cve') or []), 'vulnerable': mode.get('vulnerable')}
             for service in catalog['services'] for mode in service['modes']]
 
 
