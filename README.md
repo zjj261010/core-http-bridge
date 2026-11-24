@@ -182,6 +182,8 @@ curl -fsS http://127.0.0.1:8080/network-activity/capabilities
 
 ## 离线部署准备
 
+面向已安装 CORE、系统 Python 3.8 和 glibc 2.28 的麒麟 V10 x86_64 环境，见 [麒麟 V10 离线打包与部署计划](docs/platform/麒麟V10离线打包与部署计划.md)。
+
 先准备 CORE、对应的 CORE venv、Docker 和所需的系统包。下列清单固定了 Linux x86_64、Python 3.10 环境中的 Bridge 依赖。联网准备机使用相同的 Python 版本和平台下载 wheel。仓库中的 `Dockerfile` 是历史构建示例，Bridge 的部署入口为宿主 CORE venv。
 
 ```bash
