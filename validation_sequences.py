@@ -257,10 +257,10 @@ def _accept(bridge, body):
 def accept(body: Sequence, authorization: Annotated[str | None, Header()] = None):
     import app
 
+    # 鉴权可选（用户定稿 2026-11-24）：默认关闭，访问控制靠内网隔离＋端口准入；
+    # 配置了 BRIDGE_VALIDATION_TOKEN 才启用 Bearer 校验（纯配置可逆）
     token = os.environ.get('BRIDGE_VALIDATION_TOKEN')
-    if not token:
-        return JSONResponse({'code': 1501, 'message': '序列验证接口未启用'}, status_code=503)
-    if not hmac.compare_digest((authorization or '').encode(), ('Bearer ' + token).encode()):
+    if token and not hmac.compare_digest((authorization or '').encode(), ('Bearer ' + token).encode()):
         return JSONResponse({'code': 1000, 'message': '调用凭据无效'}, status_code=401)
     try:
         return _accept(app.bridge, body)
@@ -581,7 +581,7 @@ def _query_payload(sequence_id: str, scenario_id: str, *, with_results: bool):
 
 
 @router.get('/api/v1/attack-sequences/{sequence_id}')
-def query_task(sequence_id: str, scenario_id: str, authorization: Annotated[str | None, Header()] = None):
+def query_task(sequence_id: str, scenario_id: str):
     """V2.0 Q1: 任务状态与步骤查询（含已完成步骤; state=finished 后结果冻结）"""
     with repo.connection() as connection:
         row = connection.execute("""SELECT * FROM validation_tasks
@@ -604,7 +604,7 @@ def query_task(sequence_id: str, scenario_id: str, authorization: Annotated[str 
 
 
 @router.get('/api/v1/attack-sequences/{sequence_id}/results')
-def query_results(sequence_id: str, scenario_id: str, authorization: Annotated[str | None, Header()] = None):
+def query_results(sequence_id: str, scenario_id: str):
     """V2.0 Q2: 整条结果序列查询（结构对齐 V1.0 IF-02 payload, 数字平台入库可复用）"""
     payload = _query_payload(sequence_id, scenario_id, with_results=True)
     if payload is None:
@@ -614,8 +614,7 @@ def query_results(sequence_id: str, scenario_id: str, authorization: Annotated[s
 
 @router.get('/api/v1/snort-alerts')
 def query_alerts(sequence_id: str, scenario_id: str, after_event_id: str | None = None,
-                 limit: int = 100,
-                 authorization: Annotated[str | None, Header()] = None):
+                 limit: int = 100):
     """V2.0 Q3: 告警分页查询（after_event_id 增量游标; is_last 标识窗口末尾）"""
     limit = max(1, min(limit, 500))
     after = None

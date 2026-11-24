@@ -89,6 +89,41 @@ def test_mapping_catalog_readonly_and_reference_action_accept(client, monkeypatc
     assert report['results'][0]['action_name'] == 'HttpServiceCheck'
 
 
+def test_auth_optional_off_by_default_and_enforced_when_configured(client, monkeypatch):
+    """鉴权默认关闭（未配置 Token = 接口开放，无/错凭据均放行）；配置 Token 才启用 Bearer 校验。"""
+    validation.initialize()
+    request = {'scenario_id': '41', 'sequence_id': 'auth-off', 'actions': [
+        {'seq': 1, 'action_name': 'HttpServiceCheck', 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
+    ]}
+    incoming = '/api/v1/attack-sequences'
+    monkeypatch.setattr(validation, '_bind', lambda *_: {
+        'deployment_id': 'deploy-test', 'source_id': 1, 'target_id': 2,
+    })
+
+    # Token 未配置：不带凭据 / 带任意凭据都放行（内网隔离＋端口准入为访问控制手段）
+    monkeypatch.delenv('BRIDGE_VALIDATION_TOKEN', raising=False)
+    assert client.post(incoming, json=request).json()['code'] == 0
+    # 不同会话（同会话第二个未完成任务会被 1006 串行拒绝）
+    assert client.post(incoming, json={**request, 'scenario_id': '42', 'sequence_id': 'auth-off-2'},
+                       headers={'Authorization': 'Bearer whatever'}).json()['code'] == 0
+
+    # 查询接口恒开放
+    assert client.get('/api/v1/attack-sequences/auth-off?scenario_id=41').status_code == 200
+    assert client.get('/api/v1/attack-sequences/auth-off/results?scenario_id=41').status_code == 200
+    assert client.get('/api/v1/snort-alerts', params={'scenario_id': '41', 'sequence_id': 'auth-off'}).status_code == 200
+
+    # Token 配置后：正确凭据放行，错误/缺失凭据 401/1000
+    monkeypatch.setenv('BRIDGE_VALIDATION_TOKEN', 'secret')
+    ok = client.post(incoming, json={**request, 'scenario_id': '43', 'sequence_id': 'auth-on'},
+                     headers={'Authorization': 'Bearer secret'})
+    assert ok.json()['code'] == 0
+    bad = client.post(incoming, json={**request, 'scenario_id': '44', 'sequence_id': 'auth-on-bad'},
+                      headers={'Authorization': 'Bearer wrong'})
+    assert bad.status_code == 401 and bad.json()['code'] == 1000
+    none = client.post(incoming, json={**request, 'scenario_id': '45', 'sequence_id': 'auth-on-none'})
+    assert none.status_code == 401 and none.json()['code'] == 1000
+
+
 def test_reference_catalog_migrates_once_and_unmapped_actions_cannot_execute(client, monkeypatch):
     import validation_actions as actions
 
