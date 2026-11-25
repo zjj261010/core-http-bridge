@@ -187,6 +187,12 @@ glibc 版本、G1 各二进制的最高符号版本、G3 包大小与 sha256。
 
 ## 7. 现场安装方式（写进交付说明即可，不在 WSL 执行）
 
+**前置门禁（真机首验规程, 启用前必做）**：工具包装到**隔离目录**（如 `/opt/core-network-tools-v2/`，
+现役目录不动），用 `CORE_BRIDGE_NETWORK_ROOT=/opt/core-network-tools-v2` 复跑 §5.3 的 veth 测试
+（规则串照抄）：告警 ≥1 条才允许切换正式目录（旧目录保留一份作回滚）；零告警则不切换并退回。
+背景：WSL2 kernel 6.18 上实测 live 抓 veth 时 DAQ 循环无信号自动退出且零告警（tcpdump 同接口正常、
+双 DAQ/双 libpcap/双 snort 版本均复现），构建环境特异性未完全排除——二进制最终裁决以真机实测为准。
+
 ```bash
 tar -xzf core-network-tools-*.tar.gz -C /opt/          # 得到 /opt/core-network-tools
 # 或装在别的目录, 在 core-bridge 的 systemd 单元加: Environment=CORE_BRIDGE_NETWORK_ROOT=<目录>
