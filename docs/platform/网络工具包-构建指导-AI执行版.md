@@ -63,7 +63,13 @@ root/
 - 一切非麒麟仓库自带的第三方 so（luajit/hwloc/libdnet/nghttp2 若源码编的）装进各自组件前缀的
   `lib/`，并给最终二进制加运行时搜索路径：
   `LDFLAGS="-Wl,-rpath,'$ORIGIN/../lib' -Wl,-rpath,'$ORIGIN/../../daq/lib'"`
-- 仓库里有的（openssl/zlib/pcre2/libpcap）直接链接系统的，不必私有化
+- 仓库里有的（openssl/zlib/pcre2）直接链接系统的，不必私有化
+- **libpcap 必须私有化（r3 定稿）**：把编出的 `libpcap.so.1` 拷进 `snort/lib/`。snort 自身
+  NEEDED libpcap，经 RPATH `$ORIGIN/../lib` 优先加载私有副本；daq_pcap 虽无 RPATH，但被
+  snort dlopen 时按 soname 复用进程内已加载副本，**不需要**再拷到 daq/lib（soname 去重，
+  已实证）。私有化收益：不受现场麒麟 libpcap 1.9.1（需 libibverbs）依赖链牵制。
+  编 libpcap 时禁用 verbs 支持使 NEEDED 只剩 libc
+- libsafec 等 build-time only 库（运行期全树零 NEEDED）不拷，省体积
 
 ## 3. 构建顺序（依赖先行）
 
@@ -159,7 +165,9 @@ $ROOT/snort/bin/snort -c $ROOT/snort/etc/snort/snort.lua -R /tmp/bridge-check.ru
   --daq-dir $ROOT/daq/lib/daq --daq pcap --daq-mode passive -i v0 -k none \
   -A alert_json --daq-batch-size 1 -l /tmp/snort-log & sleep 3
 curl -s --noproxy '*' -m 5 "http://10.200.0.2:5998/?probe=BRIDGE_IDS_CHECK" >/dev/null; sleep 2
-grep -c BRIDGE_IDS_CHECK /tmp/snort-log/alert_json.log    # 必须 ≥ 1
+# ⚠️ 告警打印到 STDOUT（alert_json 未配 file 参数时不落日志文件; 平台 Worker 即按 stdout 流解析）。
+#    把 snort 的重定向输出口径算进去, 判定看捕获的运行输出, 别 grep 日志文件:
+grep -c BRIDGE_IDS_CHECK <snort-stdout-捕获文件>   # 必须 ≥ 1
 # 控制变量阶梯: ①裸规则(仅 sid)+live veth 应全通报警 ②content 规则+live ③加回单行 --lua
 # 只有 live veth + --daq-batch-size 1 仍零告警才怀疑引擎/构建, 并提供 snort -V 全文+
 # 启动 counters+alert_fast 落盘文件
@@ -203,6 +211,10 @@ tar -xzf core-network-tools-*.tar.gz -C /opt/          # 得到 /opt/core-networ
 # 或装在别的目录, 在 core-bridge 的 systemd 单元加: Environment=CORE_BRIDGE_NETWORK_ROOT=<目录>
 # 现场自检: <CORE venv python> scripts/offline-check.py --network-tools   → "离线部署自检通过"
 ```
+
+> libpcap 私有化后（r3 起）现场不再依赖麒麟系统 libpcap/libibverbs；`ldd daq_pcap.so` 报
+> `libpcap.so.1 => not found` 属静态视角假象（soname 去重机制），不算失败——判定只看
+> snort 进程内 live 告警。
 
 ## 8. 常见故障速查
 

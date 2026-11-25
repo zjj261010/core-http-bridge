@@ -64,7 +64,7 @@ def test_mapping_catalog_readonly_and_reference_action_accept(client, monkeypatc
     incoming = '/api/v1/attack-sequences'
     headers = {'Authorization': 'Bearer test-token'}
     default = client.get(mapping_route).json()['data']
-    assert default['dictionary_version'] == 'validation/2'
+    assert default['dictionary_version'] == 'validation/3'
     assert [item['action_name'] for item in default['items'] if 'simulation_steps' not in item] == ['HttpServiceCheck']
 
     # 编辑端点全部 403（字典只读）
@@ -73,15 +73,15 @@ def test_mapping_catalog_readonly_and_reference_action_accept(client, monkeypatc
     assert client.put(mapping_route + '/HttpServiceCheck', json=readonly).status_code == 403
     assert client.delete(mapping_route + '/HttpServiceCheck').status_code == 403
     # 版本不受"编辑尝试"影响
-    assert client.get(mapping_route).json()['data']['dictionary_version'] == 'validation/2'
+    assert client.get(mapping_route).json()['data']['dictionary_version'] == 'validation/3'
 
     # 预置动作 HttpServiceCheck 仍可被 IF-01 受理，且受理不再 bump 字典版本
     request = {'scenario_id': '41', 'sequence_id': 'readonly-accept', 'actions': [
         {'seq': 1, 'action_name': 'HttpServiceCheck', 'target_node': {'subnet': 'lab', 'ip': '10.0.0.2'}},
     ]}
     receipt = client.post(incoming, json=request, headers=headers).json()
-    assert receipt['code'] == 0 and receipt['dictionary_version'] == 'validation/2'
-    assert client.get(mapping_route).json()['data']['dictionary_version'] == 'validation/2'
+    assert receipt['code'] == 0 and receipt['dictionary_version'] == 'validation/3'
+    assert client.get(mapping_route).json()['data']['dictionary_version'] == 'validation/3'
 
     with repo.connection() as connection:
         task = connection.execute('SELECT * FROM validation_tasks').fetchone()
@@ -141,7 +141,7 @@ def test_reference_catalog_migrates_once_and_unmapped_actions_cannot_execute(cli
     items = {item['action_name']: item for item in result['items']}
     assert set(items) == {'DiscoverRemoteSystems', 'ServiceDiscovery', 'DiscoverDeception',
                           'ExploitRemoteService', 'PrivilegeEscalate', 'DegradeServices', 'Impact',
-                          'Withdraw', 'Sleep', 'LabCheck'}
+                          'Withdraw', 'Sleep', 'LabCheck'} | set(actions.CSLE_EXPLOIT_ENTRIES)
     assert items['ServiceDiscovery']['simulation_steps'] == '激进 1 / 隐蔽 3'
     assert items['ServiceDiscovery']['label'] == '本地显示名'
     assert 'simulation_steps' not in items['LabCheck']
