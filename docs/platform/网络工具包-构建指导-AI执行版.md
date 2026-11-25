@@ -153,13 +153,18 @@ ip netns exec srv sh -c 'ip addr add 10.200.0.2/24 dev v1 && ip link set v1 up'
 ip netns exec srv sh -c 'python3 -m http.server 5998 --bind 10.200.0.2 &' sleep 1
 # 先不加 --lua 跑通（--lua 字符串必须严格单行, 多行/引号问题曾致 override 加载 FATAL 把排查带偏）;
 # 告警出来后再把 --lua "alert_json = {fields = '... rule msg'};" 以严格单行加回复测
+# ⚠️ --daq-batch-size 1 是生产必带参数（平台 Worker 固定携带）: 安静链路上 pcap DAQ
+#    默认攒批不派发 → 零告警；WSL 内核上更恶化为无信号自动退出。测试必须与生产同参！
 $ROOT/snort/bin/snort -c $ROOT/snort/etc/snort/snort.lua -R /tmp/bridge-check.rules \
   --daq-dir $ROOT/daq/lib/daq --daq pcap --daq-mode passive -i v0 -k none \
-  -A alert_json -l /tmp/snort-log & sleep 3
+  -A alert_json --daq-batch-size 1 -l /tmp/snort-log & sleep 3
 curl -s --noproxy '*' -m 5 "http://10.200.0.2:5998/?probe=BRIDGE_IDS_CHECK" >/dev/null; sleep 2
 grep -c BRIDGE_IDS_CHECK /tmp/snort-log/alert_json.log    # 必须 ≥ 1
 # 控制变量阶梯: ①裸规则(仅 sid)+live veth 应全通报警 ②content 规则+live ③加回单行 --lua
-# 只有 live veth 也零告警才怀疑引擎/构建, 并提供 snort -V 全文+启动 counters+alert_fast 落盘文件
+# 只有 live veth + --daq-batch-size 1 仍零告警才怀疑引擎/构建, 并提供 snort -V 全文+
+# 启动 counters+alert_fast 落盘文件
+# （2026-11-25 实测裁定: WSL"零告警+自动退出"根因即缺 --daq-batch-size 1——
+#   同包在容器平台侧 Ubuntu/kernel 5.15 带此参数实测 2 告警/2 请求, 二进制无恙）
 ```
 
 **通过条件**：`alert_json.log` 至少 1 条含 `BRIDGE_IDS_CHECK` 的 JSON 告警（字段含 rule/msg）。
