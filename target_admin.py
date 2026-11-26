@@ -196,6 +196,20 @@ def _audit(action: str, **kw):
         logger.warning("audit jsonl write failed: %s", e)
 
 
+def _register_imported(refs) -> None:
+    """导入登记：凡经导入接口确认载入的 ref 记入 image_imports（镜像列表统计口径：
+    docker 实存 ∩ [清单编目 ∪ 导入目录记录 ∪ 导入登记]，2026-11-26 用户定稿）。
+    新装与续办（jobs resume 复用已完成件）两条路径都要登记；幂等，重复导入仅刷新时间。"""
+    refs = [r for r in refs if r]
+    if not refs:
+        return
+    with _store_lock, repository.transaction():
+        imports = repository.read('image_imports')
+        for r in refs:
+            imports[r] = {'ref': r, 'imported_at': repository.now()}
+        repository.replace_collection('image_imports', imports)
+
+
 def _manifest_index() -> dict:
     """镜像 ref -> manifest（按 manifest.image.name/tag 索引）"""
     idx = {}
@@ -337,9 +351,10 @@ def _enrich_pairs(pairs: list) -> list:
 
 @router.get("/targets")
 def targets_list():
-    """靶标镜像列表（按 image ID 去重别名，含三件完整性 + 编目状态）。
-    只列本项目管理的镜像：有清单编目（manifest 索引）或导入目录记录（image_catalogs）的 ref；
-    宿主上自行 docker load/pull 的外来镜像不纳入（2026-11-26 用户定稿）。"""
+    """靶标镜像列表（按 ref 列出，含三件完整性 + 编目状态）。
+    统计口径（2026-11-26 用户定稿）：docker 实存 ∩（清单编目 mindex ∪ 导入目录记录
+    image_catalogs ∪ 导入登记 image_imports）——凡经导入接口载入即统计（含仅镜像件、
+    暂无清单）；宿主自行 docker load/pull 的不统计。"""
     manifests = _load_manifests()
     mindex = _manifest_index()
     managed = set(mindex)
@@ -364,8 +379,7 @@ def targets_list():
         ref = f"{repo}:{tag}"
         if ref not in managed:
             continue
-        iid = o.get("ID") or ref
-        iid = ref  # Every tag remains selectable, including aliases of one image ID.
+        iid = ref  # 键取 ref：同一镜像 ID 的多个 tag 均可选（历史行为，别名不折叠）
         pc = _pieces(ref, mindex)
         by_id[iid] = {
             "ref": ref,
@@ -427,6 +441,8 @@ def _import_delivery(body:dict,checkpoint=None,reuse=None,input_keys=None):
     def cached(kind):
         previous=reuse.get(kind)
         if ds.reusable(kind,previous,keys[kind]):
+            if kind=='image':
+                _register_imported((previous.get('receipt') or {}).get('images') or {})
             progress(kind,{**previous,'reused':True,'detail':'沿用内容和实际结果均未改变的已完成件'})
             return True
         return False
@@ -449,12 +465,7 @@ def _import_delivery(body:dict,checkpoint=None,reuse=None,input_keys=None):
                 if not refs:
                     refs=[line.split(': ',1)[1] for line in out.splitlines() if line.startswith(('Loaded image: ','Loaded image ID: '))]
                 receipt=ds.image_receipt(refs)
-                # 导入登记（2026-11-26 用户语义：凡经导入接口 load 的镜像即统计——含仅导镜像件、无清单场景）
-                with _store_lock, repository.transaction():
-                    imports = repository.read('image_imports')
-                    for r in refs:
-                        imports[r] = {'ref': r, 'imported_at': repository.now()}
-                    repository.replace_collection('image_imports', imports)
+                _register_imported(refs)
                 progress('image',{'ok':True,'state':'done','detail':out[:1000],'receipt':receipt})
             except (ValueError,OSError,subprocess.TimeoutExpired,tarfile.TarError) as e:
                 progress('image',{'ok':False,'state':'failed','detail':str(e)})
@@ -1610,31 +1621,6 @@ def _prefixed_service_name(name: str, manifest_name: str) -> str:
     return f"svc-{mn}-{base}"
 
 
-def _rewrite_py_names(py_text: str, manifest_name: str) -> str:
-    return delivery.rewrite(py_text, {n:_prefixed_service_name(n,manifest_name) for n in delivery.names(py_text)})
-
-
-def _rewrite_manifest_names(manifest: dict, manifest_name: str) -> dict:
-    # CORE builtins retain their registered names. Custom names alone receive a prefix.
-    for svc in manifest.get('services') or []:
-        if svc.get('mode') or svc.get('name','').startswith('svc-'):
-            svc['name'] = _prefixed_service_name(svc['name'], manifest_name)
-    return manifest
-
-
-def _svc_name_conflicts(package: str, names: list) -> list:
-    """服务名冲突（重名时 CORE 先扫描者静默胜出——必须在导入时拦截, 实测 2026-11-15）：
-    跨包同名（owner≠package）→ 归属混乱；同包内重复定义（owner=package）→ 打包错误。都拒绝"""
-    seen_in_submission = set()
-    conflicts = []
-    for name in names:
-        if name in seen_in_submission:
-            conflicts.append({"service": name, "owner_package": package, "reason": "本次提交内重复定义"})
-        seen_in_submission.add(name)
-        owner = _service_name_owner(name)
-        if owner and owner != package:
-            conflicts.append({"service": name, "owner_package": owner, "reason": "已被其它包定义"})
-    return conflicts
 
 
 def _extract_service_names(py_text: str) -> list:
