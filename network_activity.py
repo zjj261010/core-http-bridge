@@ -238,10 +238,20 @@ def validate(plan, definition, kinds):
             captures.add(capture)
 
 
+def _ss_path():
+    """iproute2 的 ss 路径因发行版而异：Debian 系在 /usr/bin，el8 系（麒麟 V10）在 /usr/sbin。
+    依次探测，全部缺席时回退 /usr/bin/ss 保持原有报错行为（2026-11-26 现场实测修正）。"""
+    for cand in ('/usr/bin/ss', '/usr/sbin/ss', '/bin/ss', '/sbin/ss'):
+        path = Path(cand)
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    return Path('/usr/bin/ss')
+
+
 def _tools():
     return {
         'nsenter': Path('/usr/bin/nsenter'),
-        'ss': Path('/usr/bin/ss'),
+        'ss': _ss_path(),
         'stdbuf': Path('/usr/bin/stdbuf'),
         'timeout': Path('/usr/bin/timeout'),
         'iperf3': TOOL_ROOT / 'iperf/bin/iperf3',
