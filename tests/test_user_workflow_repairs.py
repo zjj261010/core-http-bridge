@@ -99,6 +99,7 @@ def test_image_list_adds_detail_byte_count_and_preserves_legacy_size_string(clie
             return json.dumps({'RepoTags':['fixture:v1'],'Size':45137148}),0
         raise AssertionError(command)
     monkeypatch.setattr(ta,'_docker',docker)
+    monkeypatch.setattr(ta,'_manifest_index',lambda:{'fixture:v1':{'name':'fixture','image':{'name':'fixture','tag':'v1'},'services':[]}})
     item=client.get('/targets').json()['data']['images'][0]
     assert item['size']=='186MB'
     assert item['size_bytes']==45137148
@@ -107,6 +108,7 @@ def test_image_list_adds_detail_byte_count_and_preserves_legacy_size_string(clie
 def test_missing_image_inspection_keeps_existing_image_list_usable(client,monkeypatch):
     import target_admin as ta
     monkeypatch.setattr(ta,'_docker',lambda command,timeout:(json.dumps({'Repository':'fixture','Tag':'v1','Size':'186MB'}),0) if command.startswith('images ') else ('image disappeared',1))
+    monkeypatch.setattr(ta,'_manifest_index',lambda:{'fixture:v1':{'name':'fixture','image':{'name':'fixture','tag':'v1'},'services':[]}})
     response=client.get('/targets')
     assert response.status_code==200
     assert response.json()['data']['images'][0]['size']=='186MB'

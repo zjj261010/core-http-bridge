@@ -337,9 +337,16 @@ def _enrich_pairs(pairs: list) -> list:
 
 @router.get("/targets")
 def targets_list():
-    """靶标镜像列表（按 image ID 去重别名，含三件完整性 + 编目状态）"""
+    """靶标镜像列表（按 image ID 去重别名，含三件完整性 + 编目状态）。
+    只列本项目管理的镜像：有清单编目（manifest 索引）或导入目录记录（image_catalogs）的 ref；
+    宿主上自行 docker load/pull 的外来镜像不纳入（2026-11-26 用户定稿）。"""
     manifests = _load_manifests()
     mindex = _manifest_index()
+    managed = set(mindex)
+    for record in repository.read('image_catalogs').values():
+        ref = record.get('image_ref') if isinstance(record, dict) else None
+        if ref:
+            managed.add(ref)
     out, _code = _docker("images --format '{{json .}}'", 30)
     by_id = {}
     for ln in out.splitlines():
@@ -354,6 +361,8 @@ def targets_list():
         if not repo or repo == "<none>" or tag == "<none>":
             continue
         ref = f"{repo}:{tag}"
+        if ref not in managed:
+            continue
         iid = o.get("ID") or ref
         iid = ref  # Every tag remains selectable, including aliases of one image ID.
         pc = _pieces(ref, mindex)

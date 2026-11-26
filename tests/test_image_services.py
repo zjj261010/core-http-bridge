@@ -69,6 +69,7 @@ def test_image_alias_shares_revision_and_validates_current_digest(image_api, mon
         raise AssertionError(command)
 
     monkeypatch.setattr(ta, '_docker', docker)
+    monkeypatch.setattr(ta, '_manifest_index', lambda: {ref: {'name': 'test-image', 'image': {'name': ref.split(':')[0], 'tag': ref.split(':')[1]}, 'services': []} for ref in tags})
     applied = save(client,catalog,[service()],'apply',request_id='first').json()['data']
     version = applied['applied_target_version']
     alias_catalog = client.get('/image-services/detail',params={'ref':alias}).json()['data']
