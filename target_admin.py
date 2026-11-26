@@ -347,6 +347,7 @@ def targets_list():
         ref = record.get('image_ref') if isinstance(record, dict) else None
         if ref:
             managed.add(ref)
+    managed.update(repository.read('image_imports'))
     out, _code = _docker("images --format '{{json .}}'", 30)
     by_id = {}
     for ln in out.splitlines():
@@ -448,6 +449,12 @@ def _import_delivery(body:dict,checkpoint=None,reuse=None,input_keys=None):
                 if not refs:
                     refs=[line.split(': ',1)[1] for line in out.splitlines() if line.startswith(('Loaded image: ','Loaded image ID: '))]
                 receipt=ds.image_receipt(refs)
+                # 导入登记（2026-11-26 用户语义：凡经导入接口 load 的镜像即统计——含仅导镜像件、无清单场景）
+                with _store_lock, repository.transaction():
+                    imports = repository.read('image_imports')
+                    for r in refs:
+                        imports[r] = {'ref': r, 'imported_at': repository.now()}
+                    repository.replace_collection('image_imports', imports)
                 progress('image',{'ok':True,'state':'done','detail':out[:1000],'receipt':receipt})
             except (ValueError,OSError,subprocess.TimeoutExpired,tarfile.TarError) as e:
                 progress('image',{'ok':False,'state':'failed','detail':str(e)})
