@@ -244,8 +244,8 @@
   }
   async function chooseCatalog(catalog,accepted){const file=el('input',{type:'file',accept:'.zip,.json',onchange:async event=>{try{const chosen=event.target.files[0];if(!chosen)return;const preview=await api('/image-services/import/preview?ref='+encodeURIComponent(catalog.image_ref),'POST',chosen,true);const parent=document.querySelector('dialog[open] .dialog-content');previewImport(preview,catalog,accepted,parent);}catch(error){P.notice(error.message,true);}}});file.click();}
   function previewImport(preview,catalog,accepted,parent){const content=el('div'),area=imageSection('导入冲突预览',content),message=noticeArea();const choices=preview.rows.map(row=>{row=P.clone(row);const name=input(row.incoming.name,value=>row.incoming.name=value);const action=select([['skip','跳过'],...(row.match_id?[['replace','替换服务及全部模式']]:[]),['add','新增独立服务']],row.action,value=>row.action=value);return {row,controls:[name,row.existing?.name||'无匹配服务',row.incoming.modes.map(m=>m.name).join('、'),action]};});content.append(el('p',{class:'muted'},'新增同名服务前请修改名称；替换包含该服务全部模式与脚本。合入后仍需最后确定。'),table(['导入名称','现有服务','导入模式','处理方式'],choices.map(x=>x.controls),'preview'),message,el('div',{class:'actions'},button('取消预览',()=>area.remove()),button('合入本次编辑',guarded(message,async()=>{const result=await api('/image-services/import/merge','POST',{catalog,preview:{...preview,rows:choices.map(x=>x.row)}});accepted(result.catalog);area.remove();}),true)));parent.append(area);area.scrollIntoView({block:'nearest'});}
-  function importImage(){const message=noticeArea(),source=select([['upload','本机上传'],['path','服务器路径']],'upload',render),kind=select([['bundle','完整交付包（tar.gz）'],['image','镜像归档（tar）']],'bundle',render),path=input('',()=>{}),name=input('image-import',()=>{}),file=el('input',{type:'file'}),form=el('div');const modal=P.modal('导入',el('div',{},el('div',{class:'form-grid'},field('来源',source),field('内容',kind)),form,message));
-    function render(){form.replaceChildren(field('导入名称',name),source.value==='upload'?field('文件',file):field(kind.value==='bundle'?'服务器包目录':'服务器镜像路径',path),el('p',{class:'muted'},'接收镜像与配置后，在镜像详情中预览服务清单，最后确定才注册。'));}render();
+  function importImage(){const message=noticeArea(),source=select([['upload','本机上传'],['path','服务器路径']],'upload',render),kind=select([['bundle','完整交付包（tar.gz）'],['image','镜像归档（tar）']],'bundle',render),path=input('',()=>{}),file=el('input',{type:'file'}),form=el('div');const modal=P.modal('导入',el('div',{},el('div',{class:'form-grid'},field('来源',source),field('内容',kind)),form,message));const autoName=()=>((file.files[0]&&file.files[0].name)||'').replace(/\.(tar\.gz|tgz|tar|gz)$/i,'').replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'')||'image-import';
+    function render(){form.replaceChildren(source.value==='upload'?field('文件',file):field(kind.value==='bundle'?'服务器包目录':'服务器镜像路径',path),el('p',{class:'muted'},'接收镜像与配置后，在镜像详情中预览服务清单，最后确定才注册。名称自动取自包内清单。'));}render();
     modal.footer.append(button('取消',modal.close),button('导入',guarded(message,async()=>{
       const body={defer_services:true};
       if(source.value==='path'){
@@ -255,10 +255,10 @@
         if(!file.files[0])throw Error('请选择文件');
         P.localMessage(message,'正在上传，请保持页面打开。文件接收后，可在后台继续处理。');
         if(kind.value==='bundle'){
-          const uploaded=await api('/targets/import/bundle/upload?defer_extract=true&name='+encodeURIComponent(name.value),'POST',file.files[0],true);
+          const uploaded=await api('/targets/import/bundle/upload?defer_extract=true&name='+encodeURIComponent(autoName()),'POST',file.files[0],true);
           if(uploaded.upload_id)body.bundle_upload_id=uploaded.upload_id;else body.dir=uploaded.dir;
         }else{
-          const uploaded=await api('/targets/import/upload?rel_path='+encodeURIComponent(name.value+'/'+file.files[0].name),'POST',file.files[0],true);
+          const uploaded=await api('/targets/import/upload?rel_path='+encodeURIComponent(autoName()+'/'+file.files[0].name),'POST',file.files[0],true);
           body.image_path=uploaded.path;
         }
       }

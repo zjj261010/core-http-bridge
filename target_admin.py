@@ -1697,11 +1697,13 @@ def unpack_uploaded_delivery(upload_id, cancelled):
 @router.post("/targets/import/bundle/upload")
 async def bundle_upload(request: Request, name: str = "", defer_extract: bool = False):
     """整体导入-本机上传：上传整包压缩包（.tar.gz，内含 image.tar/services/manifest.json），
-    服务端解包落位 IMAGE_IMPORT_DIR/<包名>/ 并返回清单草稿。确认注册走 /targets/import/bundle/confirm"""
+    服务端解包落位 IMAGE_IMPORT_DIR/<包名>/ 并返回清单草稿。确认注册走 /targets/import/bundle/confirm。
+    name 可省略（导入名仅作暂存标签）：省略时解包后按包内 manifest.name 命名暂存目录，
+    编目键始终 = manifest.name（2026-11-26 用户定稿：不再手填导入名）。"""
     import re as _re
     pkg = _re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or "").strip()).strip("-")
     if not pkg:
-        return _err("BAD_NAME", "包名非法（仅允许字母数字-_）")
+        pkg = "pkg-" + __import__('uuid').uuid4().hex[:8]
     target_dir = os.path.join(os.path.realpath(IMAGE_IMPORT_DIR), pkg+'-'+__import__('uuid').uuid4().hex[:12])
     os.makedirs(target_dir, exist_ok=True)
     archive = os.path.join(target_dir, "bundle.tar.gz")
@@ -1745,6 +1747,22 @@ async def bundle_upload(request: Request, name: str = "", defer_extract: bool = 
             if not fp.startswith(os.path.realpath(target_dir)):
                 return _err("EXTRACT_UNSAFE", "压缩包含越界路径，已中止", status=400)
     os.remove(archive)
+    # 名称缺省时按包内清单名落位（仅重命名暂存目录；编目键不受影响）
+    if not (name or "").strip():
+        try:
+            declared = json.loads((Path(target_dir) / 'manifest.json').read_text()).get('name', '')
+        except (OSError, ValueError):
+            declared = ''
+        final = _re.sub(r"[^a-zA-Z0-9_-]+", "-", str(declared).strip()).strip("-")
+        if final:
+            new_dir = os.path.join(os.path.realpath(IMAGE_IMPORT_DIR),
+                                   final + '-' + target_dir.rsplit('-', 1)[-1])
+            try:
+                os.rename(target_dir, new_dir)
+                target_dir = new_dir
+                pkg = final
+            except OSError:
+                pass
     inv = {
         "has_image_tar": os.path.exists(os.path.join(target_dir, "image.tar")),
         "py": sorted(f for f in os.listdir(os.path.join(target_dir, "services"))
