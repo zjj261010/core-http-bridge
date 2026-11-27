@@ -126,12 +126,21 @@ def catalog_for(ref):
     image = inspect_image(ref)
     cid = 'image-' + key(image['Id'])
     record = repo.read('image_catalogs', cid)
+    manifest = ta._manifest_index().get(ref)
+    published = repo.revision('target', manifest['name'], manifest.get('target_revision')) if manifest else None
     if record:
         record = copy.deepcopy(record)
         record['image_ref'] = ref
+        # 自愈（2026-11-27）：早期流程可能存下 services 为空的记录并被下方短路固化——
+        # 详情页"没有服务"（功能层实际完好：清单/custom_services/节点链都在）。清单声明了
+        # 服务而记录为空时，按迁移规则补齐展示（不落库，确认注册时自然固化正确形态）。
+        if manifest and manifest.get('services') and not [s for s in record.get('services') or [] if s.get('modes')]:
+            healed = legacy_catalog(manifest, (published or {}).get('sources'), (published or {}).get('templates'))
+            if [s for s in healed['services'] if s.get('modes')]:
+                record['services'] = healed['services']
+                record['legacy_sources'] = healed['legacy_sources'] or record.get('legacy_sources') or {}
+                record['legacy_templates'] = healed['legacy_templates'] or record.get('legacy_templates') or {}
     else:
-        manifest = ta._manifest_index().get(ref)
-        published = repo.revision('target', manifest['name'], manifest.get('target_revision')) if manifest else None
         migrated = legacy_catalog(manifest or {}, (published or {}).get('sources'), (published or {}).get('templates'))
         if manifest and not published:
             root = Path(ta.CUSTOM_SERVICES_DIR) / manifest['name']
