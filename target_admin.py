@@ -1763,7 +1763,7 @@ async def bundle_upload(request: Request, name: str = "", defer_extract: bool = 
             except OSError:
                 pass
     inv = {
-        "has_image_tar": os.path.exists(os.path.join(target_dir, "image.tar")),
+        "has_image_tar": any(os.path.exists(os.path.join(target_dir, n)) for n in ("image.tar", "image.tar.gz")),
         "py": sorted(f for f in os.listdir(os.path.join(target_dir, "services"))
                      if f.endswith(".py")) if os.path.isdir(os.path.join(target_dir, "services")) else [],
         "has_manifest": os.path.exists(os.path.join(target_dir, "manifest.json")),
