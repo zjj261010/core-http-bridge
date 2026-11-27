@@ -93,19 +93,30 @@ def legacy_catalog(manifest, sources=None, templates=None):
                                     'ports': None, 'depends_on': [], 'files': [],
                                     'cve': entry_cve, 'vulnerable': bool(entry_cve) or None}]})
     owners={m['implementation']:(s['id'],m['id']) for s in services for m in s['modes']}
+    # 源码名可能已带包前缀（stage_delivery 预改写为 svc-<清单名>-<原名>）：建 前缀名→原始名 反查，
+    # 让对接循环认得前缀形态，并把 implementation 指向源码里的实际名字（2026-11-27 现场定障：
+    # 前缀名匹配不上原始名索引 → implementation 悬空 → 全部包在确认时报"缺少原有实现附件"）
+    pkg=(manifest.get('name') or '').strip()
+    prefix='svc-'+re.sub(r'[^a-zA-Z0-9_-]+','-',pkg).strip('-')+'-' if pkg else ''
+    lookup=dict(owners)
+    for source in (sources or {}).values():
+        for n in delivery.names(source):
+            if prefix and n.startswith(prefix) and n[len(prefix):] in owners:
+                lookup[n]=owners[n[len(prefix):]]
     for source in (sources or {}).values():
         for cls in ast.parse(source).body:
             if not isinstance(cls,ast.ClassDef): continue
             names=delivery.names(ast.unparse(cls))
-            if not names or names[0] not in owners: continue
+            if not names or names[0] not in lookup: continue
             dependencies=[]
             for statement in cls.body:
                 if isinstance(statement,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='dependencies' for t in statement.targets):
                     try: dependencies=ast.literal_eval(statement.value)
                     except (ValueError,TypeError): pass
-            sid,mid=owners[names[0]]
+            sid,mid=lookup[names[0]]
             mode=next(m for s in services if s['id']==sid for m in s['modes'] if m['id']==mid)
             mode['depends_on']=[{'service_id':owners[name][0],'mode_id':owners[name][1]} for name in dependencies if name in owners]
+            mode['implementation']=names[0]  # 指向 legacy_sources 中的实际名字（前缀形态亦正确）
     return {'services': services, 'legacy_sources': sources or {}, 'legacy_templates': templates or {},'legacy_manifest':copy.deepcopy(manifest),
             'migration_note': '旧服务逐项保留。需要合并为同一服务的不同模式时，请在服务表中明确调整归属。' if services else ''}
 
@@ -493,9 +504,16 @@ def commit(cid, body):
             builtin_names = set(ServiceManager().load_locals().services)
         except Exception:
             pass  # CORE 不可用时保持原校验口径
+        source_names = {n for text in sources.values() for n in delivery.names(text)}
+        record_pkg = (current.get('legacy_manifest') or {}).get('name') or current.get('target_name') or ''
+        pkg_prefix = 'svc-' + re.sub(r'[^a-zA-Z0-9_-]+', '-', record_pkg).strip('-') + '-' if record_pkg else ''
         for service in services:
             for mode in service['modes']:
-                if mode['strategy'] == 'legacy' and mode.get('implementation') not in ({n for text in sources.values() for n in delivery.names(text)} | builtin_names):
+                impl = mode.get('implementation')
+                # 兜底：已暂存记录的 implementation 可能仍是原始名，而源码已带包前缀——前缀变体也算已实现
+                resolvable = impl in (source_names | builtin_names) or (
+                    bool(impl and pkg_prefix) and pkg_prefix + impl.removeprefix('svc-') in source_names)
+                if mode['strategy'] == 'legacy' and not resolvable:
                     issues.append(service['name'] + ' / ' + mode['name'] + ' 缺少原有实现附件')
         content_hash=key(json.dumps({'services':services,'sources':sources,'templates':templates,'image_id':current['image_id']},sort_keys=True))
         record = {**current, 'services': services, 'legacy_sources': sources, 'legacy_templates': templates,'content_hash':content_hash,
