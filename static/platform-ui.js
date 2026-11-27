@@ -1,3 +1,11 @@
+/* 旧浏览器兼容垫片（内网 Chromium<98；2026-11-27 现场 structuredClone 报错引入）。
+   platform-ui.js 为全站首个脚本，垫片在此一处覆盖所有页面。数据均为 JSON 系，深拷贝回退安全。 */
+if (typeof structuredClone !== 'function') window.structuredClone = value => JSON.parse(JSON.stringify(value));
+if (!Array.prototype.at) Object.defineProperty(Array.prototype, 'at', {value(n){n = Math.trunc(n) || 0; return this[n < 0 ? this.length + n : n];}, writable: true, configurable: true});
+if (!Object.hasOwn) Object.hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+if (!Object.fromEntries) Object.fromEntries = entries => Object.assign({}, ...Array.from(entries, ([k, v]) => ({[k]: v})));
+if (!Element.prototype.replaceChildren) Element.prototype.replaceChildren = function (...children) { while (this.firstChild) this.removeChild(this.firstChild); this.append(...children); };
+
 /* Native controls shared by resource and topology editors. */
 window.Platform = (() => {
   'use strict';
