@@ -1567,6 +1567,12 @@ async def targets_import_upload(request: Request, rel_path: str = ""):
 
 
 def _read_bundle(directory):
+    # 归一化（与 bundle/upload 解包对称）：目录本身无清单时，下探唯一含 manifest.json 的子目录
+    # （现场反馈：同一整包，本机上传可识别清单、服务器路径不识别——差异即在此，2026-11-27）
+    if not (directory / 'manifest.json').is_file():
+        inner = [p for p in directory.iterdir() if p.is_dir() and (p / 'manifest.json').is_file()]
+        if len(inner) == 1:
+            directory = inner[0]
     sources = {p.name:p.read_text() for p in sorted((directory/'services').glob('*.py')) if p.name != '__init__.py'}
     templates = {p.name:p.read_text() for p in sorted((directory/'services'/'templates').glob('*')) if p.is_file()}
     man_path = directory/'manifest.json'

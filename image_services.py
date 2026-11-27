@@ -485,9 +485,17 @@ def commit(cid, body):
         services, issues = normalize(body.get('services', []))
         sources = body.get('legacy_sources', current.get('legacy_sources', {}))
         templates = body.get('legacy_templates', current.get('legacy_templates', {}))
+        # 内置服务名（DefaultRoute/SSH/NAT 等）不在任何附件源码里——legacy 模式实现为内置名时豁免
+        # （现场反馈：kali 清单声明 DefaultRoute，注册被"缺少原有实现附件"拦死，2026-11-27）
+        builtin_names = set()
+        try:
+            from core.services.manager import ServiceManager
+            builtin_names = set(ServiceManager().load_locals().services)
+        except Exception:
+            pass  # CORE 不可用时保持原校验口径
         for service in services:
             for mode in service['modes']:
-                if mode['strategy'] == 'legacy' and mode.get('implementation') not in {n for text in sources.values() for n in delivery.names(text)}:
+                if mode['strategy'] == 'legacy' and mode.get('implementation') not in ({n for text in sources.values() for n in delivery.names(text)} | builtin_names):
                     issues.append(service['name'] + ' / ' + mode['name'] + ' 缺少原有实现附件')
         content_hash=key(json.dumps({'services':services,'sources':sources,'templates':templates,'image_id':current['image_id']},sort_keys=True))
         record = {**current, 'services': services, 'legacy_sources': sources, 'legacy_templates': templates,'content_hash':content_hash,
